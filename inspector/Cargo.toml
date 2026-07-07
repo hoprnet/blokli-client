@@ -4,7 +4,7 @@ edition     = "2024"
 homepage    = "https://hoprnet.org/"
 license     = "GPL-3.0-only"
 name        = "blokli-inspector"
-repository  = "https://github.com/hoprnet/blokli"
+repository  = "https://github.com/hoprnet/blokli-client"
 version     = "0.12.0"
 
 

@@ -1,5 +1,5 @@
 ---
-name: Close release Blokli Client
+name: Close release Blokli Client & Inspector
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +19,11 @@ concurrency:
 jobs:
   build-library:
     name: Build Library
+    # No `package_name` is passed, so the reusable workflow runs
+    # `cargo release publish --workspace`, which publishes the workspace
+    # members in dependency order (blokli-client before blokli-inspector)
+    # and waits for each crate to be indexed on crates.io before publishing
+    # its dependents. `tests/integration` is skipped (publish = false).
     uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@19d69bd81be66220932b18f1a7a655b422180b4e # build-library-v3
     permissions:
       contents: read
@@ -29,7 +34,6 @@ jobs:
       architecture: x86_64-linux
       cachix_cache_name: blokli-client
       build_file: client/Cargo.toml
-      package_name: blokli-client
       runner: depot-ubuntu-24.04-4
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -42,13 +46,30 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - name: Release version
+      # Tag + bump each crate to its next development version. The steps run
+      # sequentially on the same checkout so the inspector bump lands on top of
+      # the client bump.
+      - name: Release blokli-client version
         uses: hoprnet/hopr-workflows/actions/release-version@fd29bf3c58b72faacc300e068a05b59eb3b180bc # 0.9.4
         with:
           source_branch: ${{ github.ref_name }}
           file: client/Cargo.toml
           release_type: ${{ inputs.release_type }}
           release_tag_prefix: blokli-client-v
+          cachix_cache_name: blokli-client
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          zulip_api_key: ${{ secrets.ZULIP_API_KEY }}
+          zulip_email: ${{ secrets.ZULIP_EMAIL }}
+          zulip_channel: Blokli
+          zulip_topic: Releases
+          github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
+      - name: Release blokli-inspector version
+        uses: hoprnet/hopr-workflows/actions/release-version@fd29bf3c58b72faacc300e068a05b59eb3b180bc # 0.9.4
+        with:
+          source_branch: ${{ github.ref_name }}
+          file: inspector/Cargo.toml
+          release_type: ${{ inputs.release_type }}
+          release_tag_prefix: blokli-inspector-v
           cachix_cache_name: blokli-client
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           zulip_api_key: ${{ secrets.ZULIP_API_KEY }}

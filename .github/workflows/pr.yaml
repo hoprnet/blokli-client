@@ -134,7 +134,10 @@ jobs:
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: blokli-client
       build_file: client/Cargo.toml
-      package_name: blokli-client
+      # No `package_name`, so the publish dry-run covers the whole workspace
+      # (`cargo release publish --workspace`), matching the release workflow.
+      # This validates that both blokli-client and blokli-inspector are
+      # publishable on every PR. `tests/integration` is skipped (publish = false).
       runner: ${{ matrix.runner }}
       enabled: ${{ matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label) }}
     secrets:
