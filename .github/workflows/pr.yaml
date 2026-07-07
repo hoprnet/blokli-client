@@ -105,7 +105,7 @@ jobs:
       enable_unit_coverage: true
       unit_coverage_command: "nix run .#coverage-unit"
       enable_integration_tests: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
-      integration_test_command: "BLOKLI_TEST_REMOTE_IMAGE=europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest nix develop -c cargo test --package blokli-integration-tests"
+      integration_test_command: "nix run -L .#test-integration"
       runner_integration: depot-ubuntu-24.04-4
       test_timeout: 30
     secrets:

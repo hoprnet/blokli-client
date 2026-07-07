@@ -68,10 +68,6 @@ nextest:
 nextest-package package:
     cargo nextest run -p {{ package }}
 
-# Run client integration tests against the configured test environment
-integration-test:
-    cargo test -p blokli-integration-tests
-
 # ============================================================================
 # Code Quality
 # ============================================================================
