@@ -1,0 +1,27 @@
+[advisories]
+# All exceptions tracked under blokli-dependencies tracking ID
+# Owner: blokli-team
+# Review cycle: Quarterly (next review by dates listed)
+
+ignore = [
+  # RUSTSEC-2024-0388: derivative unmaintained
+  # Crate: derivative 2.2.0
+  # Transitive: ark-ff -> alloy/hopr-bindings
+  # Status: Macro library for cryptographic operations. No suitable alternative.
+  # Review by: 2026-06-30
+  "RUSTSEC-2024-0388",
+
+  # RUSTSEC-2024-0436: paste unmaintained
+  # Crate: paste 1.0.15
+  # Transitive: syn-solidity -> alloy
+  # Status: Macro library for Solidity type generation. No runtime impact.
+  # Review by: 2026-06-30
+  "RUSTSEC-2024-0436",
+
+  # RUSTSEC-2026-0173: proc-macro-error2 unmaintained
+  # Crate: proc-macro-error2 2.0.1
+  # Transitive: hopr-bindings -> alloy -> alloy-sol-macro (proc-macro-error2)
+  # Status: Build-time proc-macro only; no runtime impact. Track upstream for a maintained replacement.
+  # Review by: 2026-06-30
+  "RUSTSEC-2026-0173",
+]
