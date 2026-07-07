@@ -27,7 +27,7 @@ jobs:
       source_branch: ${{ github.ref_name }}
       version_type: release
       architecture: x86_64-linux
-      cachix_cache_name: blokli
+      cachix_cache_name: blokli-client
       build_file: client/Cargo.toml
       package_name: blokli-client
       runner: depot-ubuntu-24.04-4
@@ -49,7 +49,7 @@ jobs:
           file: client/Cargo.toml
           release_type: ${{ inputs.release_type }}
           release_tag_prefix: blokli-client-v
-          cachix_cache_name: blokli
+          cachix_cache_name: blokli-client
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           zulip_api_key: ${{ secrets.ZULIP_API_KEY }}
           zulip_email: ${{ secrets.ZULIP_EMAIL }}
