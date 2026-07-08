@@ -39,8 +39,7 @@ Full API documentation, including advanced configuration such as timeouts, subsc
 
 ## Development
 
-This project uses [just](https://github.com/casey/just) as a command runner and
-[Nix Flakes](https://nix.dev/manual/nix/2.30/command-ref/new-cli/nix3-flake.html#description) for the development environment.
+This project uses [just](https://github.com/casey/just) as a command runner and [Nix Flakes](https://nix.dev/manual/nix/2.30/command-ref/new-cli/nix3-flake.html#description) for the development environment.
 
 Enter the Nix development environment:
 
@@ -113,8 +112,7 @@ Run integration tests:
 just integration-test
 ```
 
-Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under
-`tests/integration/`.
+Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under `tests/integration/`.
 
 ## Repository Layout
 
