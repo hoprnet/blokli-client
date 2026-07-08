@@ -54,10 +54,13 @@ impl From<HoprBalanceResult> for Result<HoprBalance, BlokliClientError> {
     }
 }
 
+/// HOPR token balance for an address.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct HoprBalance {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Token balance encoded as a decimal string.
     pub balance: TokenValueString,
 }
 
@@ -81,17 +84,23 @@ impl From<NativeBalanceResult> for Result<NativeBalance, BlokliClientError> {
     }
 }
 
+/// Native-chain balance for an address.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct NativeBalance {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Native balance encoded as a decimal string.
     pub balance: TokenValueString,
 }
 
+/// HOPR token allowance configured for a safe.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SafeHoprAllowance {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Allowance encoded as a decimal string.
     pub allowance: TokenValueString,
 }
 
@@ -122,13 +131,19 @@ impl From<SafeHoprAllowanceResult> for Result<SafeHoprAllowance, BlokliClientErr
     }
 }
 
+/// Aggregate ticket redemption statistics.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RedeemedStats {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Sum of accepted redemption amounts.
     pub redeemed_amount: TokenValueString,
+    /// Count of accepted redemptions.
     pub redemption_count: Uint64,
+    /// Sum of rejected redemption amounts.
     pub rejected_amount: TokenValueString,
+    /// Count of rejected redemptions.
     pub rejection_count: Uint64,
 }
 
