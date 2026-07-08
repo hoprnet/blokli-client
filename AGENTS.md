@@ -96,7 +96,8 @@ Prefer HOPR foundation types over creating local replacements for addresses, bal
 | ------------ | -------------------------------------------------------------------------------------------------- |
 | `hopr-types` | `Address`, `Balance<C>`, `HoprBalance`, `XDaiBalance`, `U256`, `Hash`, and related HOPR primitives |
 
-Use the available prelude modules such as `hopr_types::primitive::prelude` and `hopr_types::crypto::prelude` when they fit the module. Implement `From`/`TryFrom` conversions at the client boundary when translating GraphQL data into public Rust types.
+Use the available prelude modules such as `hopr_types::primitive::prelude` and `hopr_types::crypto::prelude` when they fit the module.
+Implement `From`/`TryFrom` conversions at the client boundary when translating GraphQL data into public Rust types.
 
 ## Client Design
 
@@ -104,7 +105,8 @@ Use the available prelude modules such as `hopr_types::primitive::prelude` and `
 
 - Treat `client/target-api-schema.graphql` as the schema contract for generated Cynic query types
 - Keep query definitions close to the relevant API modules under `client/src/api/v1/graphql/`
-- Keep public client methods ergonomic and strongly typed; avoid leaking raw GraphQL response shapes unless that is already the local pattern
+- Keep public client methods ergonomic and strongly typed; avoid leaking raw GraphQL response shapes unless that is already the local
+  pattern
 - When adding API coverage, include both the GraphQL selection and the public client method that callers should use
 
 ### Subscriptions
@@ -118,7 +120,8 @@ Use the available prelude modules such as `hopr_types::primitive::prelude` and `
 
 - Transaction helpers live in `client/src/client/transactions.rs`
 - Keep transaction submission mode and response handling explicit
-- Do not assume permanence from in-memory or async submission state; callers should rely on on-chain confirmation or API results for durable status
+- Do not assume permanence from in-memory or async submission state; callers should rely on on-chain confirmation or API results for durable
+  status
 
 ### Inspector
 

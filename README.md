@@ -6,7 +6,8 @@ This repository contains the Rust client library for Blokli's GraphQL API and tr
 
 ## Using the Client
 
-The main entry point is `BlokliClient`. Query, subscription, and transaction methods are provided by traits, so import the trait for the API family you want to use:
+The main entry point is `BlokliClient`. Query, subscription, and transaction methods are provided by traits, so import the trait for the API
+family you want to use:
 
 ```rust
 use blokli_client::{BlokliClient, BlokliClientConfig, BlokliQueryClient};
@@ -29,7 +30,8 @@ Common public items are re-exported at the crate root:
 - selector types such as `AccountSelector`, `ChannelSelector`, `SafeSelector`, and `TicketSelector`
 - response models under `blokli_client::types`
 
-Full API documentation, including advanced configuration such as timeouts, subscriptions, transactions, and DNS overrides, is available on [docs.rs](https://docs.rs/blokli-client).
+Full API documentation, including advanced configuration such as timeouts, subscriptions, transactions, and DNS overrides, is available on
+[docs.rs](https://docs.rs/blokli-client).
 
 ## Components
 
@@ -39,7 +41,8 @@ Full API documentation, including advanced configuration such as timeouts, subsc
 
 ## Development
 
-This project uses [just](https://github.com/casey/just) as a command runner and [Nix Flakes](https://nix.dev/manual/nix/2.30/command-ref/new-cli/nix3-flake.html#description) for the development environment.
+This project uses [just](https://github.com/casey/just) as a command runner and
+[Nix Flakes](https://nix.dev/manual/nix/2.30/command-ref/new-cli/nix3-flake.html#description) for the development environment.
 
 Enter the Nix development environment:
 
@@ -79,7 +82,8 @@ The `testing` feature exposes an in-memory test client:
 blokli-client = { version = "...", features = ["testing"] }
 ```
 
-`BlokliTestClient` implements the same query, subscription, and transaction traits as `BlokliClient`, backed by a `BlokliTestState`. Tests can provide a `BlokliTestStateMutator` to model the effects of submitted signed transactions without running a Blokli service.
+`BlokliTestClient` implements the same query, subscription, and transaction traits as `BlokliClient`, backed by a `BlokliTestState`. Tests
+can provide a `BlokliTestStateMutator` to model the effects of submitted signed transactions without running a Blokli service.
 
 ## GraphQL Schema
 
@@ -112,7 +116,8 @@ Run integration tests:
 just integration-test
 ```
 
-Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under `tests/integration/`.
+Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under
+`tests/integration/`.
 
 ## Repository Layout
 
