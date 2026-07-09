@@ -5,7 +5,7 @@ resolver = "2"
 members = ["client", "inspector", "tests/integration"]
 
 [workspace.dependencies]
-anyhow             = "1.0.102"
+anyhow             = "1.0.103"
 async-broadcast    = "0.7.2"
 async-trait        = "0.1.89"
 blokli-client      = { path = "client" }
@@ -19,9 +19,9 @@ eventsource-client = { version = "0.17.5", default-features = false }
 futures            = "0.3.32"
 futures-time       = "3.1.0"
 hex                = "0.4.3"
-hopli              = { git = "https://github.com/hoprnet/hopli", branch = "main" }
+hopli              = { git = "https://github.com/hoprnet/hopli", branch = "lukas/update-deps" }
 hopr-bindings      = "4.9.1"
-hopr-types         = "1.8.2"
+hopr-types         = "1.11.1"
 
 http = "1.4.2"
 indexmap = "2.14.0"
