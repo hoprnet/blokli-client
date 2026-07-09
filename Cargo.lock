@@ -3207,7 +3207,7 @@ dependencies = [
 [[package]]
 name = "hopli"
 version = "0.17.6"
-source = "git+https://github.com/hoprnet/hopli?branch=lukas%2Fupdate-deps#44533c1f3eda71d0df2008527c47fd0ee91450f0"
+source = "git+https://github.com/hoprnet/hopli?branch=lukas%2Fupdate-deps#8f8ad243671fd52412a75d9817cba90e7c7f65db"
 dependencies = [
  "alloy-transport-http",
  "anyhow",
