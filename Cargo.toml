@@ -19,7 +19,7 @@ eventsource-client = { version = "0.17.5", default-features = false }
 futures            = "0.3.32"
 futures-time       = "3.1.0"
 hex                = "0.4.3"
-hopli              = { git = "https://github.com/hoprnet/hopli", branch = "lukas/update-deps" }
+hopli              = { git = "https://github.com/hoprnet/hopli", branch = "main" }
 hopr-bindings      = "4.9.1"
 hopr-types         = "1.11.1"
 
