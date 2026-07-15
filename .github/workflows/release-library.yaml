@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build-library:
     name: Build Library
-    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@19d69bd81be66220932b18f1a7a655b422180b4e # build-library-v3
+    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3
     permissions:
       contents: read
       id-token: write
@@ -56,3 +56,5 @@ jobs:
           zulip_channel: Blokli
           zulip_topic: Releases
           github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
+        env:
+          PRE_COMMIT_ALLOW_NO_CONFIG: "1"
