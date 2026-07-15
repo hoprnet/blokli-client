@@ -56,3 +56,5 @@ jobs:
           zulip_channel: Blokli
           zulip_topic: Releases
           github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
+        env:
+          PRE_COMMIT_ALLOW_NO_CONFIG: "1"
