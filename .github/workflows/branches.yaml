@@ -17,6 +17,9 @@ jobs:
   coverage:
     name: Coverage
     uses: hoprnet/hopr-workflows/.github/workflows/tests.yaml@798d791de5c5485c3043049781dfd0938539a36a # workflow-tests-v6
+    permissions:
+      contents: read
+      id-token: write
     with:
       source_branch: ${{ github.ref_name }}
       enable_unit_tests: false

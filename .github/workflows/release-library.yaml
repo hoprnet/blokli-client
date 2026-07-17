@@ -24,7 +24,7 @@ jobs:
     # members in dependency order (blokli-client before blokli-inspector)
     # and waits for each crate to be indexed on crates.io before publishing
     # its dependents. `tests/integration` is skipped (publish = false).
-    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@19d69bd81be66220932b18f1a7a655b422180b4e # build-library-v3
+    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3
     permissions:
       contents: read
       id-token: write
@@ -50,7 +50,7 @@ jobs:
       # sequentially on the same checkout so the inspector bump lands on top of
       # the client bump.
       - name: Release blokli-client version
-        uses: hoprnet/hopr-workflows/actions/release-version@fd29bf3c58b72faacc300e068a05b59eb3b180bc # 0.9.4
+        uses: hoprnet/hopr-workflows/actions/release-version@25898d13dab1b3fbf4c33c394e7c581578a2b0d7 # 0.9.4
         with:
           source_branch: ${{ github.ref_name }}
           file: client/Cargo.toml
@@ -63,6 +63,8 @@ jobs:
           zulip_channel: Blokli
           zulip_topic: Releases
           github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
+        env:
+          PRE_COMMIT_ALLOW_NO_CONFIG: "1"
       - name: Release blokli-inspector version
         uses: hoprnet/hopr-workflows/actions/release-version@fd29bf3c58b72faacc300e068a05b59eb3b180bc # 0.9.4
         with:

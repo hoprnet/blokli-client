@@ -60,12 +60,12 @@ jobs:
       pull-requests: write
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           disable-sudo: true
           egress-policy: audit
       - name: Checkout repository
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/labeler@77a4082b841706ac431479b7e2bb11216ffef250 # main on 20.02.2025
@@ -94,7 +94,7 @@ jobs:
       runner_large: depot-ubuntu-24.04-4
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-  # ── Shared tests (unit) ─────────────────────────────────────────────────────
+  # ── Shared tests (unit + integration) ───────────────────────────────────────
   tests:
     name: Test
     uses: hoprnet/hopr-workflows/.github/workflows/tests.yaml@798d791de5c5485c3043049781dfd0938539a36a # workflow-tests-v6
@@ -104,7 +104,9 @@ jobs:
       unit_test_command: "nix run -L .#test"
       enable_unit_coverage: true
       unit_coverage_command: "nix run .#coverage-unit"
-      runner_unit: depot-ubuntu-24.04-4
+      enable_integration_tests: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      integration_test_command: "nix run -L .#test-integration"
+      runner_integration: depot-ubuntu-24.04-4
       test_timeout: 30
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -124,7 +126,7 @@ jobs:
           - architecture: aarch64-darwin
             runner: depot-macos-15
             required_label: "binary:aarch64-darwin"
-    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@19d69bd81be66220932b18f1a7a655b422180b4e # build-library-v3
+    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3
     permissions:
       contents: read
       id-token: write
@@ -142,13 +144,3 @@ jobs:
       enabled: ${{ matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label) }}
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
-  # ── Integration tests ──────────────────────────────────────────────────────
-  integration-test:
-    name: Integration Tests
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/integration-test.yaml
-    with:
-      image: europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest
-    secrets: inherit
