@@ -41,6 +41,33 @@ impl TransactionBuilder {
         gas_limit: u64,
     ) -> Result<String> {
         let to = AlloyAddress::from_str(recipient).context("Invalid recipient address")?;
+        self.build_eip1559_call_hex(
+            chain_id,
+            nonce,
+            to,
+            value,
+            Vec::new(),
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            gas_limit,
+        )
+        .await
+    }
+
+    /// Builds a signed EIP-1559 transaction hex string that carries `input` calldata to `to`,
+    /// suitable for contract calls (e.g. an ERC20/ERC677 `transfer`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_eip1559_call_hex(
+        &self,
+        chain_id: u64,
+        nonce: u64,
+        to: AlloyAddress,
+        value: U256,
+        input: Vec<u8>,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        gas_limit: u64,
+    ) -> Result<String> {
         let tx = TxEip1559 {
             chain_id,
             nonce,
@@ -50,7 +77,7 @@ impl TransactionBuilder {
             to: TxKind::Call(to),
             value,
             access_list: Default::default(),
-            input: Default::default(),
+            input: input.into(),
         };
 
         let tx_hash = tx.signature_hash();

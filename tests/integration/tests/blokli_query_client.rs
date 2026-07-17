@@ -14,7 +14,7 @@ use hopr_bindings::exports::alloy::primitives::{Address, U256};
 use hopr_types::{
     crypto::keypairs::Keypair,
     internal::channels::generate_channel_id,
-    primitive::prelude::{HoprBalance, XDaiBalance},
+    primitive::prelude::{HoprBalance, XDaiBalance, XHoprBalance},
 };
 use rstest::*;
 use serial_test::serial;
@@ -172,6 +172,114 @@ async fn query_token_balance_and_allowance_of_safe(#[future(awt)] fixture: Integ
         .0
         .parse()
         .expect("failed to parse retrieved allowance amount");
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// verifies that blokli indexes the xHOPR token: the deployer account (which is minted xHOPR at
+/// contract-deployment time) reports a non-zero xHOPR balance, distinct from its wxHOPR balance.
+async fn query_xhopr_balance_of_deployer(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let deployer = &fixture.accounts()[0];
+
+    let xhopr_balance = fixture
+        .client()
+        .query_token_balance(deployer.to_alloy_address().as_ref(), Token::XHOPR)
+        .await?;
+    let parsed_xhopr: XHoprBalance = xhopr_balance
+        .balance
+        .0
+        .parse()
+        .expect("failed to parse blokli xHOPR balance");
+
+    assert!(
+        parsed_xhopr > XHoprBalance::zero(),
+        "deployer should hold the xHOPR minted at deployment time"
+    );
+
+    // The wxHOPR balance is tracked independently and must also be queryable.
+    let wxhopr_balance = fixture
+        .client()
+        .query_token_balance(deployer.to_alloy_address().as_ref(), Token::WxHOPR)
+        .await?;
+    let _: HoprBalance = wxhopr_balance
+        .balance
+        .0
+        .parse()
+        .expect("failed to parse blokli wxHOPR balance");
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// transfers xHOPR from the deployer to another account and verifies that blokli indexes the
+/// transfer: the recipient's xHOPR balance increases by the transferred amount and the deployer's
+/// decreases by the same amount.
+async fn xhopr_transfer_is_indexed(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let deployer = &fixture.accounts()[0];
+    let recipient = &fixture.accounts()[1];
+    let amount: XHoprBalance = "1 xHOPR".parse().expect("failed to parse xHOPR transfer amount");
+
+    let query_xhopr = |address: [u8; 20]| {
+        let client = fixture.client().clone();
+        async move {
+            let balance = client.query_token_balance(&address, Token::XHOPR).await?;
+            balance
+                .balance
+                .0
+                .parse::<XHoprBalance>()
+                .context("failed to parse xHOPR balance")
+        }
+    };
+
+    let deployer_before = query_xhopr(deployer.to_alloy_address().into()).await?;
+    let recipient_before = query_xhopr(recipient.to_alloy_address().into()).await?;
+
+    fixture.transfer_xhopr(deployer, recipient, amount).await?;
+
+    // Wait for the indexer to pick up the xHOPR transfer on the recipient side.
+    let expected_recipient = recipient_before + amount;
+    let recipient_addr: [u8; 20] = recipient.to_alloy_address().into();
+    let client = fixture.client().clone();
+    poll_until(
+        "xHOPR transfer indexed",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let client = client.clone();
+            async move {
+                let balance = client.query_token_balance(&recipient_addr, Token::XHOPR).await?;
+                let parsed = balance
+                    .balance
+                    .0
+                    .parse::<XHoprBalance>()
+                    .context("failed to parse recipient xHOPR balance")?;
+                Ok(if parsed >= expected_recipient {
+                    Some(parsed)
+                } else {
+                    None
+                })
+            }
+        },
+    )
+    .await?;
+
+    let deployer_after = query_xhopr(deployer.to_alloy_address().into()).await?;
+
+    assert_eq!(
+        query_xhopr(recipient.to_alloy_address().into()).await?,
+        expected_recipient,
+        "recipient xHOPR balance should increase by the transferred amount"
+    );
+    assert_eq!(
+        deployer_after,
+        deployer_before - amount,
+        "deployer xHOPR balance should decrease by the transferred amount"
+    );
 
     Ok(())
 }

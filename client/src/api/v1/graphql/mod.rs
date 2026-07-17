@@ -17,7 +17,7 @@ pub(crate) mod schema {}
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Token {
-    #[cynic(rename = "WXHOPR")]
+    #[cynic(rename = "HOPR")]
     WxHOPR,
     #[cynic(rename = "XHOPR")]
     XHOPR,
