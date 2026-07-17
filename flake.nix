@@ -31,7 +31,7 @@
   inputs = {
     # Core Nix ecosystem dependencies
     flake-parts.url = "github:hercules-ci/flake-parts";
-    nixpkgs.url = "github:NixOS/nixpkgs/release-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/release-26.05";
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # HOPR Nix Library (provides flake-utils and reusable build functions)
@@ -192,6 +192,15 @@
               program = toString (
                 pkgs.writeShellScript "test" ''
                   nix develop --command ${pkgs.just}/bin/just test
+                ''
+              );
+            };
+            test-integration = {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript "test-integration" ''
+                  export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest}"
+                  nix develop --command cargo test --package blokli-integration-tests
                 ''
               );
             };
