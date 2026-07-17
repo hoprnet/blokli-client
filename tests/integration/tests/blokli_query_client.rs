@@ -204,11 +204,17 @@ async fn query_xhopr_balance_of_deployer(#[future(awt)] fixture: IntegrationFixt
         .client()
         .query_token_balance(deployer.to_alloy_address().as_ref(), Token::WxHOPR)
         .await?;
-    let _: HoprBalance = wxhopr_balance
+    let parsed_wxhopr: HoprBalance = wxhopr_balance
         .balance
         .0
         .parse()
         .expect("failed to parse blokli wxHOPR balance");
+
+    assert_ne!(
+        parsed_xhopr.amount(),
+        parsed_wxhopr.amount(),
+        "xHOPR balance should be tracked distinctly from wxHOPR balance"
+    );
 
     Ok(())
 }
@@ -245,7 +251,7 @@ async fn xhopr_transfer_is_indexed(#[future(awt)] fixture: IntegrationFixture) -
     let expected_recipient = recipient_before + amount;
     let recipient_addr: [u8; 20] = recipient.to_alloy_address().into();
     let client = fixture.client().clone();
-    poll_until(
+    let recipient_after = poll_until(
         "xHOPR transfer indexed",
         Duration::from_secs(30),
         Duration::from_millis(500),
@@ -271,8 +277,7 @@ async fn xhopr_transfer_is_indexed(#[future(awt)] fixture: IntegrationFixture) -
     let deployer_after = query_xhopr(deployer.to_alloy_address().into()).await?;
 
     assert_eq!(
-        query_xhopr(recipient.to_alloy_address().into()).await?,
-        expected_recipient,
+        recipient_after, expected_recipient,
         "recipient xHOPR balance should increase by the transferred amount"
     );
     assert_eq!(

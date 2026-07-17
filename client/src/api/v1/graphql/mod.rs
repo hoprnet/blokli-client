@@ -14,13 +14,20 @@ pub(crate) mod schema {}
 
 // https://generator.cynic-rs.dev/
 
+/// Token kind accepted by balance queries.
+///
+/// Maps the Blokli GraphQL `Token` enum onto Rust variants. Note that the
+/// GraphQL `HOPR` symbol refers to the wrapped HOPR token (wxHOPR).
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum Token {
+    /// Wrapped HOPR token (wxHOPR); the GraphQL `HOPR` symbol.
     #[cynic(rename = "HOPR")]
     WxHOPR,
+    /// Native HOPR token (xHOPR).
     #[cynic(rename = "XHOPR")]
     XHOPR,
+    /// Native chain token (xDai).
     #[cynic(rename = "NATIVE")]
     Native,
 }
