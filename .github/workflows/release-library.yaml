@@ -50,7 +50,8 @@ jobs:
       # sequentially on the same checkout so the inspector bump lands on top of
       # the client bump.
       - name: Release blokli-client version
-        uses: hoprnet/hopr-workflows/actions/release-version@25898d13dab1b3fbf4c33c394e7c581578a2b0d7 # 0.9.4
+        uses: hoprnet/hopr-workflows/actions/release-version@25898d13dab1b3fbf4c33c394e7c581578a2b0d7 # set-build-version-v2.1.0
+
         with:
           source_branch: ${{ github.ref_name }}
           file: client/Cargo.toml
@@ -66,7 +67,7 @@ jobs:
         env:
           PRE_COMMIT_ALLOW_NO_CONFIG: "1"
       - name: Release blokli-inspector version
-        uses: hoprnet/hopr-workflows/actions/release-version@fd29bf3c58b72faacc300e068a05b59eb3b180bc # 0.9.4
+        uses: hoprnet/hopr-workflows/actions/release-version@25898d13dab1b3fbf4c33c394e7c581578a2b0d7 # set-build-version-v2.1.0
         with:
           source_branch: ${{ github.ref_name }}
           file: inspector/Cargo.toml
