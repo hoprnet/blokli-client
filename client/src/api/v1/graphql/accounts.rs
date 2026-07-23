@@ -54,19 +54,31 @@ pub struct QueryAccountCount {
     pub account_count: CountResult,
 }
 
+/// List of accounts returned by an account query.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct AccountsList {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Matching accounts.
     pub accounts: Vec<Account>,
 }
 
+/// Account indexed by Blokli.
+///
+/// Accounts connect a Blokli key id to the chain key, packet key, advertised multiaddresses, and optional safe
+/// address associated with a node.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Account {
+    /// On-chain address for this account, encoded as a hex string.
     pub chain_key: String,
+    /// Numeric Blokli key id.
     pub keyid: i32,
+    /// Advertised libp2p multiaddresses associated with the account.
     pub multi_addresses: Vec<String>,
+    /// Packet key encoded as a hex string.
     pub packet_key: String,
+    /// Safe contract address associated with this account, when one is known.
     pub safe_address: Option<String>,
 }
 
@@ -95,9 +107,12 @@ pub struct TxCountVariables {
     pub address: String,
 }
 
+/// Transaction count payload for an address.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct TransactionCount {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Number of transactions encoded as a GraphQL `UInt64` string.
     pub count: Uint64,
 }
 

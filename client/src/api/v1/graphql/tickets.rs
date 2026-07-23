@@ -46,16 +46,21 @@ pub struct SubscribeTicketRedeemed {
 
 /// Details of a single on-chain ticket redemption event.
 ///
-/// Returned as stream items by [`BlokliSubscriptionClient::subscribe_ticket_redeemed`].
+/// Returned as stream items by [`crate::api::BlokliSubscriptionClient::subscribe_ticket_redeemed`].
 /// The `epoch` and `index` fields identify which ticket was redeemed; `result` indicates
 /// whether the chain accepted or rejected it.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct RedeemTicketDetails {
+    /// Ticket issuer address encoded as a hex string.
     pub issuer_address: String,
+    /// Ticket recipient address encoded as a hex string.
     pub recipient_address: String,
+    /// Ticket epoch.
     pub epoch: Uint64,
+    /// Ticket index within the channel epoch.
     pub index: Uint64,
+    /// Redemption outcome reported by the chain.
     pub result: RedemptionResult,
 }
 

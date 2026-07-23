@@ -128,11 +128,14 @@ pub struct QueryChannelStats {
     pub channel_stats: ChannelStatsResult,
 }
 
+/// Aggregate count and balance for a channel selector.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cynic(graphql_type = "ChannelStats")]
 pub struct ChannelStats {
+    /// Number of matching channels.
     pub count: i32,
+    /// Total wxHOPR balance across the matching channels.
     pub balance: TokenValueString,
 }
 
@@ -156,23 +159,35 @@ impl From<ChannelStatsResult> for Result<ChannelStats, crate::errors::BlokliClie
     }
 }
 
+/// List of channels returned by a channel query.
 #[derive(cynic::QueryFragment, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ChannelsList {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Matching channels.
     pub channels: Vec<Channel>,
 }
 
+/// Payment channel indexed by Blokli.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Channel {
+    /// Current channel balance.
     pub balance: TokenValueString,
+    /// Time at which the channel may close, when closure has been initiated.
     pub closure_time: Option<DateTime>,
+    /// Concrete channel id encoded as a hex string.
     pub concrete_channel_id: String,
+    /// Destination account key id.
     pub destination: i32,
+    /// Current channel epoch.
     pub epoch: i32,
+    /// Source account key id.
     pub source: i32,
+    /// Current channel lifecycle state.
     pub status: ChannelStatus,
+    /// Current ticket index for the channel.
     pub ticket_index: Uint64,
 }
 
@@ -211,10 +226,13 @@ pub struct QuerySafesBalance {
     pub safes_balance: SafesBalanceResult,
 }
 
+/// Aggregate balance held across indexed safes.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SafesBalance {
+    /// Total wxHOPR balance across matching safes.
     pub balance: TokenValueString,
+    /// Number of safes included in the aggregate.
     pub count: i32,
 }
 

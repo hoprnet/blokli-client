@@ -4,6 +4,35 @@
 
 This repository contains the Rust client library for Blokli's GraphQL API and transaction endpoints.
 
+## Using the Client
+
+The main entry point is `BlokliClient`. Query, subscription, and transaction methods are provided by traits, so import the trait for the API
+family you want to use:
+
+```rust
+use blokli_client::{BlokliClient, BlokliClientConfig, BlokliQueryClient};
+
+async fn query_version() -> Result<String, Box<dyn std::error::Error>> {
+    let client = BlokliClient::new(
+        "https://blokli.example.org".parse()?,
+        BlokliClientConfig::default(),
+    );
+
+    Ok(client.query_version().await?)
+}
+```
+
+Common public items are re-exported at the crate root:
+
+- `BlokliQueryClient`: one-shot GraphQL queries
+- `BlokliSubscriptionClient`: SSE-backed subscriptions
+- `BlokliTransactionClient`: signed transaction submission and tracking
+- selector types such as `AccountSelector`, `ChannelSelector`, `SafeSelector`, and `TicketSelector`
+- response models under `blokli_client::types`
+
+Full API documentation, including advanced configuration such as timeouts, subscriptions, transactions, and DNS overrides, is available on
+[docs.rs](https://docs.rs/blokli-client).
+
 ## Components
 
 - `client/`: `blokli-client` library, Cynic GraphQL types, query helpers, subscriptions, transactions, and test utilities
@@ -45,33 +74,16 @@ Run the inspector:
 just run-inspector --help
 ```
 
-## Client DNS Override
+## Test Utilities
 
-`blokli-client` uses system DNS by default. For deployments where Blokli is reachable through a stable, VPN-exempt IP but DNS can be
-unreliable, callers can configure a DNS override in `BlokliClientConfig`.
+The `testing` feature exposes an in-memory test client:
 
-The Blokli URL should stay hostname-based. The override pins DNS resolution for that hostname, so TLS SNI and certificate validation still
-use the original hostname. If `BlokliDnsOverride::port` is set, Blokli uses that port for requests; otherwise it uses the original URL port
-or the scheme default.
-
-```rust
-use std::net::IpAddr;
-
-use blokli_client::{BlokliClient, BlokliClientConfig, BlokliDnsOverride};
-
-fn build_client() -> Result<BlokliClient, Box<dyn std::error::Error>> {
-    Ok(BlokliClient::new(
-        "https://blokli.example.org".parse()?,
-        BlokliClientConfig {
-            dns_override: Some(BlokliDnsOverride {
-                ip: IpAddr::from([203, 0, 113, 10]),
-                port: None,
-            }),
-            ..Default::default()
-        },
-    ))
-}
+```toml
+blokli-client = { version = "...", features = ["testing"] }
 ```
+
+`BlokliTestClient` implements the same query, subscription, and transaction traits as `BlokliClient`, backed by a `BlokliTestState`. Tests
+can provide a `BlokliTestStateMutator` to model the effects of submitted signed transactions without running a Blokli service.
 
 ## GraphQL Schema
 

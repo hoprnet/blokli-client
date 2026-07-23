@@ -1,11 +1,12 @@
 [package]
-description = "Client connector to Blokli"
-edition     = "2024"
-homepage    = "https://hoprnet.org/"
-license     = "GPL-3.0-only"
-name        = "blokli-client"
-repository  = "https://github.com/hoprnet/blokli-client"
-version     = "0.30.1"
+description   = "Client connector to Blokli"
+documentation = "https://docs.rs/blokli-client"
+edition       = "2024"
+homepage      = "https://hoprnet.org/"
+license       = "GPL-3.0-only"
+name          = "blokli-client"
+repository    = "https://github.com/hoprnet/blokli"
+version       = "0.30.1"
 
 [dependencies]
 anyhow          = { workspace = true }
@@ -68,3 +69,6 @@ tokio       = { workspace = true }
 # registration). cargo-machete does not scan build scripts, so it reports it as unused.
 [package.metadata.cargo-machete]
 ignored = ["cynic-codegen"]
+
+[package.metadata.docs.rs]
+all-features = true

@@ -4,14 +4,19 @@ use crate::{
     errors::{BlokliClientError, ErrorKind},
 };
 
+/// Safe selector variant sent to the GraphQL API.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SafeSelectorInput {
+    /// Select by safe contract address.
     #[cynic(rename = "ADDRESS")]
     Address,
+    /// Select by owner address.
     #[cynic(rename = "OWNER")]
     Owner,
+    /// Select by the owner's chain key legacy alias.
     #[cynic(rename = "CHAIN_KEY")]
     ChainKey,
+    /// Select by registered node address.
     #[cynic(rename = "REGISTERED_NODE")]
     RegisteredNode,
 }
@@ -22,14 +27,21 @@ pub struct SafeByVariables {
     pub address: String,
 }
 
+/// Safe contract indexed by Blokli.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Safe {
+    /// Safe contract address encoded as a hex string.
     pub address: String,
+    /// Chain key associated with the safe.
     pub chain_key: String,
+    /// Owner addresses encoded as hex strings.
     pub owners: Vec<String>,
+    /// Module contract address encoded as a hex string.
     pub module_address: String,
+    /// Registered node addresses encoded as hex strings.
     pub registered_nodes: Vec<String>,
+    /// Safe signature threshold, when reported by the API.
     pub threshold: Option<String>,
 }
 
@@ -53,9 +65,12 @@ pub struct ModuleAddressVariables {
     pub safe_address: String,
 }
 
+/// Predicted module address returned by Blokli.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 pub struct ModuleAddress {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Predicted module contract address encoded as a hex string.
     pub module_address: String,
 }
 
@@ -87,8 +102,10 @@ impl From<SafeResult> for Result<Option<Safe>, BlokliClientError> {
     }
 }
 
+/// List of safes returned by a safe query.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 pub struct SafesList {
+    /// Matching safes.
     pub safes: Vec<Safe>,
 }
 

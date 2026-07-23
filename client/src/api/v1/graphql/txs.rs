@@ -55,31 +55,45 @@ pub struct MutateSendTransaction {
     pub send_transaction: SendTransactionResult,
 }
 
+/// Safe module execution details associated with a transaction.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SafeExecution {
+    /// Whether the safe module execution succeeded.
     pub success: bool,
+    /// Safe transaction hash, when safe execution data is available.
     #[cynic(rename = "safeTxHash")]
     pub safe_tx_hash: Option<Hex32>,
+    /// Revert reason reported by safe execution, when available.
     #[cynic(rename = "revertReason")]
     pub revert_reason: Option<String>,
 }
 
+/// Transaction tracked by Blokli.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Transaction {
+    /// Blokli tracking id.
     pub id: cynic::Id,
+    /// Current transaction status.
     pub status: TransactionStatus,
+    /// Timestamp at which Blokli accepted or observed the submission.
     pub submitted_at: DateTime,
+    /// On-chain transaction hash.
     pub transaction_hash: Hex32,
+    /// Safe execution details for safe module transactions.
     #[cynic(rename = "safeExecution")]
     pub safe_execution: Option<SafeExecution>,
 }
 
+/// Error returned for an unknown or invalid Blokli transaction tracking id.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct InvalidTransactionIdError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
@@ -112,28 +126,40 @@ impl From<TransactionResult> for Result<Transaction, BlokliClientError> {
     }
 }
 
+/// Transaction lifecycle state reported by Blokli.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransactionStatus {
+    /// Transaction reached the configured confirmation requirement.
     #[cynic(rename = "CONFIRMED")]
     Confirmed,
+    /// Transaction is being processed by Blokli.
     #[cynic(rename = "PENDING")]
     Pending,
+    /// Transaction executed and reverted.
     #[cynic(rename = "REVERTED")]
     Reverted,
+    /// Blokli failed to submit the transaction.
     #[cynic(rename = "SUBMISSION_FAILED")]
     SubmissionFailed,
+    /// Transaction was submitted to the chain.
     #[cynic(rename = "SUBMITTED")]
     Submitted,
+    /// Transaction tracking timed out.
     #[cynic(rename = "TIMEOUT")]
     Timeout,
+    /// Blokli rejected the transaction before submission.
     #[cynic(rename = "VALIDATION_FAILED")]
     ValidationFailed,
 }
 
+/// Timeout returned by a synchronous transaction operation.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct TimeoutError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
@@ -148,16 +174,23 @@ impl From<TimeoutError> for BlokliClientError {
     }
 }
 
+/// Successful immediate transaction submission result.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct SendTransactionSuccess {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// On-chain transaction hash.
     pub transaction_hash: Hex32,
 }
 
+/// RPC error returned by Blokli while submitting a transaction.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct RpcError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
@@ -172,12 +205,18 @@ impl From<RpcError> for BlokliClientError {
     }
 }
 
+/// Error returned when a transaction calls a function that Blokli policy rejects.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct FunctionNotAllowedError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Contract address containing the rejected function.
     pub contract_address: String,
+    /// Rejected function selector.
     pub function_selector: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
@@ -192,11 +231,16 @@ impl From<FunctionNotAllowedError> for BlokliClientError {
     }
 }
 
+/// Error returned when a transaction targets a contract that Blokli policy rejects.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct ContractNotAllowedError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Rejected contract address.
     pub contract_address: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
