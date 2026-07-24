@@ -17,6 +17,7 @@ use futures::StreamExt;
 use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
 use hopr_bindings::{
     config::ContractInstances,
+    erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
         primitives::{Address, U256, keccak256},
         providers::{
@@ -24,6 +25,7 @@ use hopr_bindings::{
             fillers::{BlobGasFiller, CachedNonceManager, ChainIdFiller, GasFiller, NonceFiller},
         },
         signers::local::PrivateKeySigner,
+        sol_types::SolCall,
     },
     hopr_token::HoprToken::HoprTokenInstance,
 };
@@ -39,7 +41,7 @@ use hopr_types::{
     },
     internal::{Multiaddr, announcement::AnnouncementData, tickets::TicketBuilder},
     primitive::{
-        prelude::{Address as HoprAddress, HoprBalance},
+        prelude::{Address as HoprAddress, HoprBalance, XHoprBalance},
         traits::IntoEndian,
     },
 };
@@ -462,6 +464,44 @@ impl IntegrationFixture {
             .await?;
 
         self.submit_and_confirm_tx(&payload_bytes, self.config().tx_confirmations)
+            .await
+    }
+
+    /// Transfers `amount` of xHOPR (the `ERC677Mock` token) from `from` to `to` by submitting a
+    /// signed `transfer(to, amount)` call to the xHOPR contract through blokli.
+    pub async fn transfer_xhopr(
+        &self,
+        from: &AnvilAccount,
+        to: &AnvilAccount,
+        amount: XHoprBalance,
+    ) -> Result<[u8; 32]> {
+        let nonce = self.rpc().transaction_count(&from.address).await?;
+        let gas = self.resolve_eip1559_gas_parameters(None).await;
+
+        let calldata = transferCall {
+            _to: to.to_alloy_address(),
+            _value: U256::from_be_bytes(amount.to_be_bytes()),
+        }
+        .abi_encode();
+
+        let tx_builder = TestTransactionBuilder::new(&from.keypair)?;
+        let signed_hex = tx_builder
+            .build_eip1559_call_hex(
+                self.rpc().chain_id().await?,
+                nonce,
+                self.contract_addresses().xhopr_token,
+                U256::ZERO,
+                calldata,
+                gas.max_fee_per_gas,
+                gas.max_priority_fee_per_gas,
+                gas.gas_limit,
+            )
+            .await?;
+
+        let signed_bytes =
+            hex::decode(signed_hex.trim_start_matches("0x")).context("failed to decode xHOPR transfer tx")?;
+
+        self.submit_and_confirm_tx(&signed_bytes, self.config().tx_confirmations)
             .await
     }
 }
