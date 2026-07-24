@@ -1,3 +1,9 @@
+//! Schema-facing GraphQL fragments and scalar wrappers.
+//!
+//! The public client traits return selected structs and enums from these modules through
+//! [`crate::api::types`]. Operation builders and GraphQL variables are implementation details used by
+//! [`crate::BlokliClient`].
+
 use crate::errors::ErrorKind;
 
 pub mod accounts;
@@ -32,34 +38,45 @@ pub enum Token {
     Native,
 }
 
+/// Channel lifecycle state reported by Blokli.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelStatus {
+    /// Channel is open and can carry traffic.
     #[cynic(rename = "OPEN")]
     Open,
+    /// Channel close has been initiated but the closure grace period has not elapsed.
     #[cynic(rename = "PENDINGTOCLOSE")]
     PendingToClose,
+    /// Channel is closed.
     #[cynic(rename = "CLOSED")]
     Closed,
 }
 
+/// Readiness state for a Blokli instance.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadinessState {
+    /// Blokli reports that it is ready to serve requests.
     #[cynic(rename = "READY")]
     Ready,
+    /// Blokli reports that it is not ready.
     #[cynic(rename = "NOT_READY")]
     NotReady,
 }
 
+/// Date-time value as returned by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 pub struct DateTime(pub String);
 
+/// Decimal token amount encoded as a string by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 pub struct TokenValueString(pub String);
 
+/// Unsigned 64-bit integer encoded as a string by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 #[cynic(graphql_type = "UInt64")]
 pub struct Uint64(pub String);
 
+/// 32-byte hex value as returned by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 pub struct Hex32(pub String);
 
@@ -83,16 +100,23 @@ impl From<CountResult> for Result<u32, crate::errors::BlokliClientError> {
     }
 }
 
+/// Shared count payload used by several GraphQL count queries.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct Count {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Number of matching records.
     pub count: i32,
 }
 
+/// Generic Blokli query failure returned by GraphQL union fields.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct QueryFailedError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
+    /// Stable Blokli error code.
     pub code: String,
 }
 
@@ -107,10 +131,14 @@ impl From<QueryFailedError> for crate::errors::BlokliClientError {
     }
 }
 
+/// Error returned when a query requires at least one filter.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct MissingFilterError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
@@ -125,10 +153,14 @@ impl From<MissingFilterError> for crate::errors::BlokliClientError {
     }
 }
 
+/// Error returned when Blokli rejects an address argument.
 #[derive(cynic::QueryFragment, Debug)]
 pub struct InvalidAddressError {
+    /// GraphQL concrete type name.
     pub __typename: String,
+    /// Stable Blokli error code.
     pub code: String,
+    /// Human-readable error message from Blokli.
     pub message: String,
 }
 
