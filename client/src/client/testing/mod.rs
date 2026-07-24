@@ -1,3 +1,17 @@
+//! In-memory Blokli client implementation for downstream tests.
+//!
+//! This module is available with the `testing` feature. It provides [`BlokliTestClient`], a state-backed client that
+//! implements the same query, subscription, and transaction traits as [`BlokliClient`](crate::BlokliClient). Use it
+//! when library consumers need deterministic tests without running a Blokli service.
+//!
+//! The client starts from a [`BlokliTestState`]. Submitted transactions are passed to a
+//! [`BlokliTestStateMutator`], which may update that state. The client then broadcasts account, channel, safe, and
+//! ticket-parameter changes to active subscriptions.
+//!
+//! This is a test double, not a byte-for-byte Blokli server emulator. It enforces basic consistency checks and keeps
+//! subscription behavior close to the public traits, but callers remain responsible for modeling the state transitions
+//! they care about in their mutator.
+
 use std::{
     ops::Div,
     sync::Arc,
@@ -24,7 +38,11 @@ where
     serde::Serialize::serialize(&IndexMap::<K, V>::new(), serializer)
 }
 
-/// Represents a state for [`BlokliTestClient`].
+/// In-memory state served by [`BlokliTestClient`].
+///
+/// Fields are public so tests can build fixtures directly. Maps are keyed by the same identifiers used by the public
+/// client responses, typically hex-encoded addresses or ids. [`BlokliTestState::default`] provides a small coherent
+/// baseline suitable for tests that only need to override a few fields.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlokliTestState {
     /// Contains KeyID -> Account
@@ -211,20 +229,25 @@ impl BlokliTestState {
     }
 }
 
-/// Mutator for the [`BlokliTestState`] based on signed transactions.
+/// Applies signed-transaction effects to a [`BlokliTestState`].
+///
+/// Implement this trait when a test needs transaction submission methods to modify the in-memory state. The mutator is
+/// called synchronously while the test client holds the state write lock. If the mutator returns an error, the state is
+/// reverted to its previous value and the simulated transaction reports a failure according to the submission mode.
 pub trait BlokliTestStateMutator {
     /// Updates the state given the signed transaction.
     ///
     /// [`BlokliTestClient`] makes several consistency checks on the updates.
     /// For example, all mutations that remove anything from the state are not allowed.
     ///
-    /// For arbitrary state updates via the client, see [`BlokliTestClient::update_state`].
+    /// For arbitrary state updates via the client, see [`BlokliTestClient::hidden_state_update`].
     fn update_state(&self, signed_tx: &[u8], state: &mut BlokliTestState) -> Result<()>;
 }
 
 /// No-op state mutator.
 ///
-/// Useful for static tests.
+/// Useful for tests that only query a fixed [`BlokliTestState`] or that mutate state manually with
+/// [`BlokliTestClient::hidden_state_update`].
 #[derive(Clone, Debug, Default)]
 pub struct NopStateMutator;
 
@@ -257,7 +280,10 @@ type TicketParamEvents = (
 
 type SafeDeployEvents = (async_broadcast::Sender<Safe>, async_broadcast::InactiveReceiver<Safe>);
 
-/// Represents a snapshot of the [`BlokliTestState`] inside a [`BlokliTestClient`].
+/// Snapshot of the [`BlokliTestState`] inside a [`BlokliTestClient`].
+///
+/// Snapshots are cheap handles containing a cloned state view. Call [`refresh`](BlokliTestStateSnapshot::refresh) to
+/// replace the stored view with the latest shared state.
 #[derive(Clone)]
 pub struct BlokliTestStateSnapshot {
     state: Arc<parking_lot::RwLock<BlokliTestState>>,
@@ -289,18 +315,19 @@ impl std::ops::Deref for BlokliTestStateSnapshot {
     }
 }
 
-/// Blokli client for testing purposes.
+/// In-memory Blokli client for tests.
 ///
-/// This is useful to simulate Blokli server in unit tests.
-/// The test client gets an initial [state](BlokliTestState).
+/// `BlokliTestClient` implements [`BlokliQueryClient`], [`BlokliSubscriptionClient`], and
+/// [`BlokliTransactionClient`] against a shared [`BlokliTestState`]. Clones share the same state and broadcast
+/// channels, which makes it possible to submit simulated transactions from one handle and observe subscription updates
+/// from another.
 ///
-/// Later transactions done using the client can [mutate](BlokliTestStateMutator) the state and
-/// changes are propagated to the subscribers.
-/// Mutations that remove accounts or channels are not allowed, so that a transaction cannot
-/// make the state inconsistent.
+/// Transactions submitted through the client call the configured [`BlokliTestStateMutator`]. Mutations that remove
+/// accounts, channels, balances, allowances, or active transactions are rejected to avoid producing inconsistent test
+/// state. For direct fixture edits that should not emit subscription events, use
+/// [`hidden_state_update`](BlokliTestClient::hidden_state_update).
 ///
-/// Cloning the client will create a new client that shares the same state with the previous one.
-/// This makes sense, however, only when the `mutator` can perform actual changes on the shared state.
+/// This type is exported only with the `testing` feature.
 #[derive(Clone)]
 pub struct BlokliTestClient<M> {
     state: Arc<parking_lot::RwLock<BlokliTestState>>,
@@ -375,23 +402,26 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
         }
     }
 
-    /// Allows changing the mutator on the instance for another one of the same type.
+    /// Replaces the transaction mutator.
+    ///
+    /// The returned client keeps the same shared state and subscription channels.
     #[must_use]
     pub fn with_mutator(mut self, mutator: M) -> Self {
         self.mutator = mutator;
         self
     }
 
-    /// Enables or disables usage of internal (Safe) transactions.
+    /// Enables or disables internal safe transaction simulation.
     ///
-    /// Default is disabled.
+    /// When enabled, a mutator error wrapped in [`InternalTxError`](crate::errors::InternalTxError) produces a
+    /// confirmed outer transaction with failed safe execution details. The default is disabled.
     #[must_use]
     pub fn with_use_internal_txs(mut self, use_internal_txs: bool) -> Self {
         self.use_internal_txs = use_internal_txs;
         self
     }
 
-    /// Sets the delay before a simulated transaction is confirmed.
+    /// Sets the delay before a simulated transaction is confirmed or emitted by tracking streams.
     ///
     /// The default is 1 second.
     #[must_use]
@@ -411,16 +441,20 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
         }
     }
 
-    /// Performs arbitrary update to the state which is not notified in an event broadcast.
+    /// Performs an arbitrary state update without broadcasting subscription events.
+    ///
+    /// This is useful for arranging fixtures between assertions. Use transaction submission or
+    /// [`update_price_and_win_prob`](BlokliTestClient::update_price_and_win_prob) when tests need subscribers to
+    /// observe the change.
     pub fn hidden_state_update(&self, update: impl FnOnce(&mut BlokliTestState)) {
         let mut state = self.state.write();
         update(&mut state);
     }
 
-    /// Allows updating the minimum ticket price and minimum ticket-winning probability.
+    /// Updates the ticket price and/or minimum ticket-winning probability.
     ///
-    /// These changes are also broadcasted as events and take effect on the shared state
-    /// for all clones of the client.
+    /// These changes update the shared state and broadcast a [`TicketParameters`] event to active subscribers when at
+    /// least one value changes.
     pub fn update_price_and_win_prob(&self, new_price: Option<TokenValueString>, new_win_prob: Option<f64>) {
         let mut updated = false;
         let (new_price_param, new_win_prob_param) = {
@@ -499,7 +533,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliQueryClient for BlokliTestCl
             .ok_or_else(|| ErrorKind::NoData.into())
     }
 
-    async fn query_token_balance(&self, address: &ChainAddress) -> Result<HoprBalance> {
+    async fn query_token_balance(&self, address: &ChainAddress, token: Token) -> Result<HoprBalance> {
         let address = hex::encode(address);
         self.state
             .read()

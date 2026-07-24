@@ -1,9 +1,56 @@
+//! Blokli API v1 client contract.
+//!
+//! This module contains the public trait surface implemented by [`BlokliClient`](crate::BlokliClient), plus the
+//! selectors and response models used by those traits.
+//!
+//! # Trait families
+//!
+//! Use these traits to make the corresponding methods available on [`BlokliClient`](crate::BlokliClient):
+//!
+//! - [`BlokliQueryClient`] for request/response GraphQL queries.
+//! - [`BlokliSubscriptionClient`] for SSE-backed GraphQL subscriptions.
+//! - [`BlokliTransactionClient`] for signed transaction submission and tracking.
+//!
+//! # Selectors
+//!
+//! Query and subscription methods avoid unstructured filter maps. Instead, pass one of the selector types:
+//!
+//! - [`AccountSelector`] selects accounts by key id, chain address, packet key, or all accounts.
+//! - [`ChannelSelector`] combines an optional [`ChannelFilter`], channel status, and safe address.
+//! - [`SafeSelector`] selects safes by safe address, owner, chain key alias, or registered node.
+//! - [`RedeemedStatsSelector`] selects ticket redemption aggregates.
+//! - [`TicketSelector`] filters ticket redemption subscription events.
+//!
+//! # Response models
+//!
+//! The [`types`] module re-exports the schema-facing GraphQL response structs and enums that are returned by public
+//! methods. These models intentionally mirror the Blokli API shape while conversions at the client boundary normalize
+//! common success/error unions into `Result` values.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use blokli_client::{BlokliClient, BlokliClientConfig, BlokliQueryClient, ChannelFilter, ChannelSelector};
+//!
+//! async fn example(destination: u32) -> Result<(), Box<dyn std::error::Error>> {
+//!     let client = BlokliClient::new("https://blokli.example.org".parse()?, BlokliClientConfig::default());
+//!     let selector = ChannelSelector {
+//!         filter: Some(ChannelFilter::DestinationKeyId(destination)),
+//!         ..Default::default()
+//!     };
+//!     let stats = client.query_channel_stats(selector).await?;
+//!
+//!     println!("{} channels matched", stats.count);
+//!     Ok(())
+//! }
+//! ```
+
 use std::{fmt::Formatter, time::Duration};
 
 mod graphql;
 pub mod types {
     pub use super::graphql::{
-        ChannelStatus, DateTime, Hex32, ReadinessState, TokenValueString, Uint64,
+        ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64,
         accounts::Account,
         balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
@@ -42,14 +89,28 @@ pub(crate) mod internal {
     };
 }
 
+/// EVM-style 20-byte chain address used by Blokli account, safe, and node filters.
 pub type ChainAddress = [u8; 20];
+/// HOPR packet key used to identify accounts.
 pub type PacketKey = [u8; 32];
+/// Concrete 32-byte payment channel identifier.
 pub type ChannelId = [u8; 32];
+/// Transaction receipt or hash returned by transaction submission endpoints.
 pub type TxReceipt = [u8; 32];
+/// Numeric Blokli key id.
 pub type KeyId = u32;
+/// Blokli transaction tracking identifier.
+///
+/// This id is returned by [`BlokliTransactionClient::submit_and_track_transaction`] and can be passed to
+/// [`BlokliQueryClient::query_transaction_status`], [`BlokliSubscriptionClient::subscribe_track_transaction`], or
+/// [`BlokliTransactionClient::track_transaction`].
 pub type TxId = String;
 
-/// Allows selecting [`Accounts`](types::Account) by their key id, address or packet key.
+/// Selects [`Account`](types::Account) records by key id, chain address, packet key, or all accounts.
+///
+/// `AccountSelector::Any` is accepted by [`BlokliQueryClient::count_accounts`] and
+/// [`BlokliSubscriptionClient::subscribe_accounts`]. [`BlokliQueryClient::query_accounts`] requires a narrower
+/// selector to avoid accidentally fetching an unbounded account list.
 #[derive(Clone)]
 pub enum AccountSelector {
     /// Select an account by its key id.
@@ -73,8 +134,10 @@ impl std::fmt::Debug for AccountSelector {
     }
 }
 
-/// Allows selecting [`Channels`](types::Channel) based on a [`ChannelFilter`], optionally a [`ChannelStatus`],
-/// and optionally a safe contract address.
+/// Selects [`Channel`](types::Channel) records by optional channel filter, status, and safe contract address.
+///
+/// Use [`ChannelSelector::default`] to address all channels when a method supports unfiltered access. Query methods
+/// that could otherwise return large result sets may require at least one filter.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelSelector {
     /// Filter for the selected channels.
@@ -92,7 +155,8 @@ impl ChannelSelector {
     }
 }
 
-/// Allows filtering [`Channels`](types::Channel) by their channel id, source and/or destination key id.
+/// Filters [`Channel`](types::Channel) records by channel id, source key id, destination key id, or both endpoint key
+/// ids.
 #[derive(Clone)]
 pub enum ChannelFilter {
     /// Select a channel by its channel id.
@@ -120,7 +184,7 @@ impl std::fmt::Debug for ChannelFilter {
     }
 }
 
-/// Allows querying existing [`Safes`](types::Safe) by their address, owner, or registered node.
+/// Selects deployed [`Safe`](types::Safe) records by safe address, owner, chain key alias, or registered node.
 #[derive(Clone)]
 pub enum SafeSelector {
     /// Select a safe by its address.
@@ -221,7 +285,7 @@ impl std::fmt::Debug for TicketSelector {
     }
 }
 
-/// Input for the [`query_module_address_prediction`] query.
+/// Input for [`BlokliQueryClient::query_module_address_prediction`].
 #[derive(Clone, PartialEq, Eq)]
 pub struct ModulePredictionInput {
     /// Safe deployment nonce.
@@ -244,51 +308,73 @@ impl std::fmt::Debug for ModulePredictionInput {
 
 pub(crate) type Result<T> = std::result::Result<T, crate::errors::BlokliClientError>;
 
-/// Trait defining restricted queries to Blokli API.
+/// One-shot GraphQL queries against a Blokli instance.
+///
+/// These methods return the current indexed state known to Blokli at request time. They do not subscribe for later
+/// changes and they do not retry application-level GraphQL errors. Transport, decoding, invalid input, and Blokli
+/// GraphQL union errors are returned as [`BlokliClientError`](crate::errors::BlokliClientError).
 #[async_trait::async_trait]
 pub trait BlokliQueryClient {
-    /// Counts the number of accounts optionally matching the given [`selector`](AccountSelector).
+    /// Counts accounts matching the given [`AccountSelector`].
+    ///
+    /// [`AccountSelector::Any`] is accepted here and counts every indexed account.
     async fn count_accounts(&self, selector: AccountSelector) -> Result<u32>;
-    /// Queries the accounts matching the given [`selector`](AccountSelector).
+    /// Returns accounts matching the given [`AccountSelector`].
+    ///
+    /// Unlike [`count_accounts`](BlokliQueryClient::count_accounts), this method rejects [`AccountSelector::Any`] to
+    /// avoid accidentally fetching an unbounded account list.
     async fn query_accounts(&self, selector: AccountSelector) -> Result<Vec<types::Account>>;
-    /// Queries the native balance of the given account.
+    /// Returns the native-chain balance for an account or safe address.
+    ///
+    /// The address is encoded as hexadecimal for the GraphQL request. Invalid addresses or upstream query failures are
+    /// surfaced as client errors.
     async fn query_native_balance(&self, address: &ChainAddress) -> Result<types::NativeBalance>;
-    /// Queries the token balance of the given account.
-    async fn query_token_balance(&self, address: &ChainAddress) -> Result<types::HoprBalance>;
-    /// Queries the number of transactions sent from the given account.
+    /// Returns the HOPR token balance for an account or safe address.
+    async fn query_token_balance(&self, address: &ChainAddress, token: types::Token) -> Result<types::HoprBalance>;
+    /// Returns the number of indexed transactions sent from the given address.
     async fn query_transaction_count(&self, address: &ChainAddress) -> Result<u64>;
-    /// Queries the safe allowance of the given account.
+    /// Returns the HOPR token allowance configured for a safe address.
     async fn query_safe_allowance(&self, address: &ChainAddress) -> Result<types::SafeHoprAllowance>;
-    /// Queries redeemed ticket stats filtered by safe, node, or both.
+    /// Returns redeemed and rejected ticket aggregates filtered by safe, node, or both.
+    ///
+    /// Use [`RedeemedStatsSelector::SafeAndNodeAddress`] when a single safe/node pair is required.
     async fn query_redeemed_stats(&self, selector: RedeemedStatsSelector) -> Result<types::RedeemedStats>;
-    /// Queries deployed Safes matching the given [`selector`](SafeSelector).
+    /// Returns deployed safes matching the given [`SafeSelector`].
     async fn query_safe(&self, selector: SafeSelector) -> Result<Vec<types::Safe>>;
-    /// Queries the module address prediction of the given [Safe deployment data](ModulePredictionInput).
+    /// Returns the predicted module address for the given safe deployment data.
     async fn query_module_address_prediction(&self, input: ModulePredictionInput) -> Result<ChainAddress>;
-    /// Counts the number of channels matching the given [`selector`](ChannelSelector).
+    /// Counts channels matching the given [`ChannelSelector`].
+    ///
+    /// Prefer [`query_channel_stats`](BlokliQueryClient::query_channel_stats), which also returns the aggregate
+    /// channel balance.
     #[deprecated(
         since = "0.22.0",
         note = "Use query_channel_stats instead, which returns both count and total wxHOPR balance."
     )]
     async fn count_channels(&self, selector: ChannelSelector) -> Result<u32>;
-    /// Queries channel count and total wxHOPR balance matching the given [`selector`](ChannelSelector).
+    /// Returns channel count and total wxHOPR balance matching the given [`ChannelSelector`].
     ///
-    /// If no filter is set on the selector, returns stats across all channels.
+    /// An unfiltered selector returns stats across all indexed channels.
     async fn query_channel_stats(&self, selector: ChannelSelector) -> Result<types::ChannelStats>;
-    /// Queries the channels matching the given [`selector`](ChannelSelector), including aggregated balance.
+    /// Returns channels matching the given [`ChannelSelector`].
+    ///
+    /// At least one filter or safe address must be set. For unfiltered aggregate data, use
+    /// [`query_channel_stats`](BlokliQueryClient::query_channel_stats).
     async fn query_channels(&self, selector: ChannelSelector) -> Result<types::ChannelsList>;
-    /// Queries the total wxHOPR balance held across indexed safe contracts.
+    /// Returns the total wxHOPR balance held across indexed safe contracts.
     ///
     /// When `owner_address` is provided, restricts to safes whose registered accounts have that chain key.
     async fn query_safes_balance(&self, owner_address: Option<ChainAddress>) -> Result<types::SafesBalance>;
-    /// Queries the status of the transaction given the `tx_id` previously returned by
-    /// [`BlokliTransactionClient::submit_and_track_transaction`].
+    /// Returns the latest known status for a tracked transaction id.
+    ///
+    /// The `tx_id` is the Blokli tracking id returned by
+    /// [`BlokliTransactionClient::submit_and_track_transaction`], not necessarily the on-chain transaction hash.
     async fn query_transaction_status(&self, tx_id: TxId) -> Result<types::Transaction>;
-    /// Queries the chain info.
+    /// Returns chain, contract, fee, ticket, and timing parameters reported by Blokli.
     async fn query_chain_info(&self) -> Result<types::ChainInfo>;
-    /// Queries the version of the Blokli API.
+    /// Returns the Blokli server version string.
     async fn query_version(&self) -> Result<String>;
-    /// Queries the health of the Blokli server.
+    /// Returns the current health state as reported by the legacy health query.
     async fn query_health(&self) -> Result<String>;
     /// Queries server compatibility information.
     ///
@@ -297,36 +383,44 @@ pub trait BlokliQueryClient {
     async fn query_compatibility(&self) -> Result<types::Compatibility>;
 }
 
-/// Trait defining subscriptions to Blokli API.
+/// SSE-backed GraphQL subscriptions to Blokli updates.
+///
+/// Subscription methods return streams of `Result<T, BlokliClientError>`. The client uses the configured reconnect,
+/// read-timeout, TCP keepalive, and restart-delay options from [`BlokliClientConfig`](crate::BlokliClientConfig).
+/// Transport issues may be retried internally; malformed GraphQL payloads and terminal stream errors are yielded as
+/// stream items so callers can decide whether to continue, log, or abort.
 pub trait BlokliSubscriptionClient {
-    /// Subscribes to channel updates matching the given [`selector`](ChannelSelector).
+    /// Streams channel updates matching the given [`ChannelSelector`].
     ///
-    /// If no selector is given, subscribes to all channel updates.
+    /// An unfiltered selector subscribes to all channel updates. Each yielded item is a single updated channel.
     fn subscribe_channels(
         &self,
         selector: ChannelSelector,
     ) -> Result<impl futures::Stream<Item = Result<types::Channel>> + Send>;
-    /// Subscribes to account updates optionally matching the given [`selector`](AccountSelector).
+    /// Streams account updates matching the given [`AccountSelector`].
     ///
-    /// If no selector is given, subscribes to all account updates.
+    /// [`AccountSelector::Any`] subscribes to all account updates.
     fn subscribe_accounts(
         &self,
         selector: AccountSelector,
     ) -> Result<impl futures::Stream<Item = Result<types::Account>> + Send>;
-    /// Subscribes to updates of the entire channel graph.
+    /// Streams updates for the open-channel graph.
     ///
     /// The initial stream emits one entry per currently open channel. Later updates
     /// include all channel state transitions, including `CLOSED` entries. Consumers
     /// should merge entries by `channel.concrete_channel_id` and use closed entries
     /// as removal signals for an open-channel graph.
     fn subscribe_graph(&self) -> Result<impl futures::Stream<Item = Result<types::OpenedChannelsGraphEntry>> + Send>;
-    /// Subscribes to updates of the ticket parameters.
+    /// Streams updates of ticket price and winning-probability parameters.
     fn subscribe_ticket_params(&self) -> Result<impl futures::Stream<Item = Result<types::TicketParameters>> + Send>;
-    /// Subscribes to health updates for the Blokli instance.
+    /// Streams readiness updates for the Blokli instance.
     fn subscribe_health(&self) -> Result<impl futures::Stream<Item = Result<types::ReadinessState>> + Send>;
-    /// Subscribes to on-chain Safe deployments.
+    /// Streams on-chain safe deployments indexed by Blokli.
     fn subscribe_safe_deployments(&self) -> Result<impl futures::Stream<Item = Result<types::Safe>> + Send>;
-    /// Subscribes to status updates of a tracked transaction.
+    /// Streams status updates for a tracked transaction id.
+    ///
+    /// The `tx_id` is the Blokli tracking id returned by
+    /// [`BlokliTransactionClient::submit_and_track_transaction`].
     fn subscribe_track_transaction(
         &self,
         tx_id: TxId,
@@ -363,15 +457,27 @@ pub trait BlokliSubscriptionClient {
     ) -> Result<impl futures::Stream<Item = Result<types::RedeemTicketDetails>> + Send>;
 }
 
-/// Trait defining Blokli API for signed transaction submission to the chain.
+/// Signed transaction submission and tracking through Blokli.
+///
+/// These methods do not sign transactions. Callers provide raw signed transaction bytes. Submission success means
+/// Blokli accepted or relayed the transaction according to the chosen mode; callers that need durable chain state
+/// should rely on confirmations or independent chain observation.
 #[async_trait::async_trait]
 pub trait BlokliTransactionClient {
-    /// Submits a signed transaction to the chain without waiting for confirmation.
+    /// Submits a signed transaction and returns the on-chain transaction hash reported by Blokli.
+    ///
+    /// This method does not wait for confirmation.
     async fn submit_transaction(&self, signed_tx: &[u8]) -> Result<TxReceipt>;
-    /// Submits a signed transaction to the chain and returns an ID that can be used to track the transaction
-    /// status via subscription or query.
+    /// Submits a signed transaction and returns a Blokli tracking id.
+    ///
+    /// Pass the returned id to [`BlokliQueryClient::query_transaction_status`],
+    /// [`BlokliSubscriptionClient::subscribe_track_transaction`], or
+    /// [`track_transaction`](BlokliTransactionClient::track_transaction).
     async fn submit_and_track_transaction(&self, signed_tx: &[u8]) -> Result<TxId>;
-    /// Submits a signed transaction to the chain and waits for the given number of confirmations.
+    /// Submits a signed transaction and waits for the requested number of confirmations.
+    ///
+    /// Blokli caps very large confirmation counts internally. A timeout or RPC error is returned as
+    /// [`BlokliClientError`](crate::errors::BlokliClientError).
     async fn submit_and_confirm_transaction(&self, signed_tx: &[u8], num_confirmations: usize) -> Result<TxReceipt>;
     /// Tracks the transaction given the `tx_id` previously returned
     /// by [`submit_and_track_transaction`](BlokliTransactionClient::submit_and_track_transaction) until it is confirmed

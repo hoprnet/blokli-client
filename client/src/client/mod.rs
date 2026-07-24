@@ -48,21 +48,29 @@ pub struct BlokliDnsOverride {
 }
 
 /// Configuration for the [`BlokliClient`].
+///
+/// The same configuration is used for one-shot GraphQL operations and SSE subscriptions. Non-streaming requests use
+/// [`timeout`](BlokliClientConfig::timeout) as a request timeout. Subscriptions use it as the connection timeout and
+/// then apply the subscription-specific read, reconnect, keepalive, and restart settings.
 #[derive(Clone, Debug, PartialEq, Eq, smart_default::SmartDefault)]
 pub struct BlokliClientConfig {
     /// General timeout for non-streaming requests and SSE connection establishment.
     #[default(Duration::from_secs(10))]
     pub timeout: Duration,
-    /// Reconnection timeout for SSE streams.
+    /// Maximum delay used by SSE reconnect backoff.
     #[default(Duration::from_secs(30))]
     pub stream_reconnect_timeout: Duration,
-    /// Per-read timeout for SSE streams. If `None`, established streams may stay open indefinitely.
+    /// Per-read timeout for SSE streams.
+    ///
+    /// If `None`, established streams may stay open indefinitely while waiting for the next event.
     #[default(Some(Duration::from_secs(60)))]
     pub subscription_read_timeout: Option<Duration>,
     /// TCP keepalive interval for SSE streams.
     #[default(Duration::from_secs(15))]
     pub subscription_tcp_keepalive: Duration,
-    /// Delay before recreating a completed SSE stream. If `None`, completed streams will not be recreated.
+    /// Delay before recreating a completed SSE stream.
+    ///
+    /// If `None`, completed streams are not recreated and the returned subscription stream terminates.
     #[default(Some(Duration::from_secs(1)))]
     pub subscription_stream_restart_delay: Option<Duration>,
     /// Optional DNS override for the Blokli base URL host.
@@ -172,9 +180,9 @@ impl HttpTransport for ReqwestTransport {
 /// Client implementation of the Blokli API.
 ///
 /// The client implements the following Blokli API traits:
-/// - [`BlokliQueryClient`](api::BlokliQueryClient)
-/// - [`BlokliSubscriptionClient`](api::BlokliSubscriptionClient).
-/// - [`BlokliTransactionClient`](api::BlokliTransactionClient)
+/// - [`BlokliQueryClient`](crate::api::BlokliQueryClient)
+/// - [`BlokliSubscriptionClient`](crate::api::BlokliSubscriptionClient).
+/// - [`BlokliTransactionClient`](crate::api::BlokliTransactionClient)
 #[derive(Clone, Debug)]
 pub struct BlokliClient {
     base_url: url::Url,

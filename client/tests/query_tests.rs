@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
-    api::{BlokliQueryClient, SafeSelector},
+    api::{BlokliQueryClient, SafeSelector, types::Token},
 };
 use mockito::Matcher;
 use tokio::{
@@ -80,7 +80,7 @@ async fn query_token_balance() -> anyhow::Result<()> {
         .create_async()
         .await;
 
-    let balance = cli.query_token_balance(&[1u8; 20]).await?;
+    let balance = cli.query_token_balance(&[1u8; 20], Token::WxHOPR).await?;
     assert_eq!("1234567890", balance.balance.0);
 
     balance_mock.assert_async().await;
