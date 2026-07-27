@@ -805,7 +805,7 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
         .connect_http(config.rpc_url().clone());
 
     let contract_instances =
-        ContractInstances::deploy_for_testing(provider, accounts[0].to_alloy_address(), accounts[1].to_alloy_address())
+        ContractInstances::deploy_for_testing(provider, accounts[0].to_alloy_address(), accounts[0].to_alloy_address())
             .await
             .expect("failed to deploy hopr contracts for testing");
 
