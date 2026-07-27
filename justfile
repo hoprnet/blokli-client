@@ -11,7 +11,22 @@ default:
 # ============================================================================
 
 # Quick check - format, clippy, and check
-quick: fmt clippy check
+quick: fmt clippy check check-versions
+
+# Verify the workspace `blokli-client` dependency matches the client crate version,
+# so a published `blokli-inspector` always depends on the matching client release
+check-versions:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    client_version="$(grep -m1 -E '^version' client/Cargo.toml | cut -d'"' -f2)"
+    dep_version="$(grep -m1 -E '^blokli-client' Cargo.toml | sed -E 's/.*version = "([^"]+)".*/\1/')"
+    if [[ "${client_version}" != "${dep_version}" ]]; then
+      echo "error: blokli-client version mismatch: client/Cargo.toml is ${client_version}," >&2
+      echo "       but [workspace.dependencies] requires ${dep_version}." >&2
+      echo "       Update the workspace dependency so the published inspector depends on the matching client." >&2
+      exit 1
+    fi
+    echo "blokli-client version in sync: ${client_version}"
 
 # Development build and test cycle - format, check, and test
 dev: fmt check test
