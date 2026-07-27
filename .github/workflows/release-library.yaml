@@ -1,5 +1,5 @@
 ---
-name: Close release Blokli Client
+name: Close release Blokli Client & Inspector
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +19,11 @@ concurrency:
 jobs:
   build-library:
     name: Build Library
+    # No `package_name` is passed, so the reusable workflow runs
+    # `cargo release publish --workspace`, which publishes the workspace
+    # members in dependency order (blokli-client before blokli-inspector)
+    # and waits for each crate to be indexed on crates.io before publishing
+    # its dependents. `tests/integration` is skipped (publish = false).
     uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3.1.2
     permissions:
       contents: read
@@ -29,7 +34,6 @@ jobs:
       architecture: x86_64-linux
       cachix_cache_name: blokli-client
       build_file: client/Cargo.toml
-      package_name: blokli-client
       runner: depot-ubuntu-24.04-4
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -58,3 +62,17 @@ jobs:
           github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
         env:
           PRE_COMMIT_ALLOW_NO_CONFIG: "1"
+      - name: Release blokli-inspector version
+        uses: hoprnet/hopr-workflows/actions/release-version@25898d13dab1b3fbf4c33c394e7c581578a2b0d7 # set-build-version-v2.1.0
+        with:
+          source_branch: ${{ github.ref_name }}
+          file: inspector/Cargo.toml
+          release_type: ${{ inputs.release_type }}
+          release_tag_prefix: blokli-inspector-v
+          cachix_cache_name: blokli-client
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          zulip_api_key: ${{ secrets.ZULIP_API_KEY }}
+          zulip_email: ${{ secrets.ZULIP_EMAIL }}
+          zulip_channel: Blokli
+          zulip_topic: Releases
+          github_app_private_key: ${{ secrets.GH_APP_HOPRNET_BOT_PRIVATE_KEY }}
