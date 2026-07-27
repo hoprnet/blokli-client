@@ -69,14 +69,15 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "alloy"
-version = "2.1.0"
+version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1172e33a862030da77768c11cf17a1f801590de94cf518392b65207f15810c8"
+checksum = "d9677ab3454c237abe6307805bea17a7912b3a516b606c7b4d3d948b9fede137"
 dependencies = [
  "alloy-consensus",
  "alloy-contract",
  "alloy-core",
  "alloy-eips",
+ "alloy-ens",
  "alloy-genesis",
  "alloy-json-rpc",
  "alloy-network",
@@ -270,6 +271,20 @@ dependencies = [
  "serde",
  "serde_with",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "alloy-ens"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709ddd5c63a05ac3274143ed0589e129119206f65cf094d2e727499da23efae8"
+dependencies = [
+ "alloy-contract",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-sol-types",
+ "async-trait",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3197,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "hopli"
 version = "0.17.6"
-source = "git+https://github.com/hoprnet/hopli?branch=main#567a9577e2bc224314b536bf574a7211ff8daa92"
+source = "git+https://github.com/hoprnet/hopli?branch=main#3286928d98a64f68eb4b6a39cfc1f804e79dac8f"
 dependencies = [
  "alloy-transport-http",
  "anyhow",
@@ -3220,9 +3235,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-bindings"
-version = "4.10.0"
+version = "4.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b7679591cc56238e934139e1e46f57e5df1d688e059a034fa0e38a5ce09b7c"
+checksum = "0375fb0dc90a31484ae7620ce71681203f5ed1ee670cab51e02fb3b7a9d351dc"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3238,9 +3253,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "2.0.0"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e24293a5ce7289056c4e01b8d91beebc8663cdcca8ffbc24d847f3f22af4f274"
+checksum = "3aabecd53d5211c4a81f046d27bad0f7ad64659afcb5b88e0e410ecaa8928bf3"
 dependencies = [
  "aes",
  "anyhow",
