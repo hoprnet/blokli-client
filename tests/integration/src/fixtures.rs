@@ -19,6 +19,7 @@ use hopr_bindings::{
     config::ContractInstances,
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
+        network::EthereumWallet,
         primitives::{Address, U256, keccak256},
         providers::{
             ProviderBuilder,
@@ -792,7 +793,11 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     let rpc = RpcClient::new(config.rpc_url().as_str(), config.http_timeout)?;
 
     let deployer: ChainKeypair = accounts[0].keypair.clone();
-    let wallet = PrivateKeySigner::from_slice(deployer.secret().as_ref()).expect("failed to construct wallet");
+
+    let common_deployer_signer = PrivateKeySigner::from_slice(accounts[0].keypair.secret().as_ref()).expect("failed to construct common_deployer wallet");
+    let hopr_deployer_signer = PrivateKeySigner::from_slice(accounts[1].keypair.secret().as_ref()).expect("failed to construct hopr_deployer wallet");
+    let mut wallet = EthereumWallet::from(common_deployer_signer);
+    wallet.register_default_signer(hopr_deployer_signer);
 
     // Build default JSON RPC provider
     let provider = ProviderBuilder::new()
