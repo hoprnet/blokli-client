@@ -23,7 +23,7 @@ jobs:
     # `cargo release publish --workspace`, which publishes the workspace
     # members in dependency order (blokli-client before blokli-inspector)
     # and waits for each crate to be indexed on crates.io before publishing
-    # its dependents. `tests/integration` is skipped (publish = false).
+    # its dependents.
     uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3.1.2
     permissions:
       contents: read

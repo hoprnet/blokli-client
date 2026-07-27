@@ -4,6 +4,11 @@ name    = "blokli-integration-tests"
 publish = false
 version = "0.4.3"
 
+# `cargo release publish --workspace` selects every workspace member regardless of
+# the `publish = false` field above, so the package has to be opted out explicitly.
+[package.metadata.release]
+release = false
+
 [dependencies]
 anyhow = { workspace = true }
 blokli-client = { workspace = true, features = ["serde"] }
