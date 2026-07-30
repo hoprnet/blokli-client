@@ -193,18 +193,21 @@
           };
 
           # Combine all packages
-          packages = blokliClientPackages // blokliInspectorPackages // {
-            # Additional standalone packages
+          packages =
+            blokliClientPackages
+            // blokliInspectorPackages
+            // {
+              # Additional standalone packages
 
-            # Pre-commit hooks check
-            pre-commit-check = pkgs.callPackage ./nix/packages/pre-commit-check.nix {
-              inherit
-                pre-commit
-                system
-                config
-                ;
+              # Pre-commit hooks check
+              pre-commit-check = pkgs.callPackage ./nix/packages/pre-commit-check.nix {
+                inherit
+                  pre-commit
+                  system
+                  config
+                  ;
+              };
             };
-          };
 
           utilityApps = {
             update-github-labels = nixLib.mkUpdateGithubLabelsApp;
