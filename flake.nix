@@ -129,6 +129,18 @@
             );
           };
 
+          # blokli-inspector crate information
+          blokliInspectorCrateInfoOriginal = craneLib.crateNameFromCargoToml {
+            cargoToml = ./inspector/Cargo.toml;
+          };
+          blokliInspectorCrateInfo = {
+            pname = "blokli-inspector";
+            # Normalize version to major.minor.patch for consistent caching
+            version = pkgs.lib.strings.concatStringsSep "." (
+              pkgs.lib.lists.take 3 (builtins.splitVersion blokliInspectorCrateInfoOriginal.version)
+            );
+          };
+
           # Create source trees for different build contexts using nix-lib
           sources = {
             main = nixLib.mkSrc {
@@ -169,8 +181,19 @@
               ;
           };
 
+          blokliInspectorPackages = import ./nix/packages/blokli-inspector.nix {
+            inherit
+              lib
+              builders
+              sources
+              blokliInspectorCrateInfo
+              rev
+              nixLib
+              ;
+          };
+
           # Combine all packages
-          packages = blokliClientPackages // {
+          packages = blokliClientPackages // blokliInspectorPackages // {
             # Additional standalone packages
 
             # Pre-commit hooks check
