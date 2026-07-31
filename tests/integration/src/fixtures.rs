@@ -902,8 +902,10 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     let config: Arc<TestConfig> = Arc::new(TestConfig::load()?);
     let mut docker = DockerEnvironment::new(config.clone());
 
-    docker.ensure_image_available()?;
-    docker.compose_up()?;
+    if !config.external_stack {
+        docker.ensure_image_available()?;
+        docker.compose_up()?;
+    }
     let client = BlokliClient::new(config.bloklid_url().clone(), BlokliClientConfig::default());
     info!(
         seconds = STACK_STARTUP_WAIT.as_secs(),

@@ -1,5 +1,6 @@
-# Integration test binaries run in parallel (each gets its own Docker stack),
-# but tests within each binary run serially (they share a fixture).
+# The integration runner starts one external Docker stack per test binary.
+# Binaries run in parallel, while tests within each binary run serially
+# against their assigned stack.
 [test-groups.integration-query]
 max-threads = 1
 
@@ -10,6 +11,9 @@ max-threads = 1
 max-threads = 1
 
 [test-groups.integration-load]
+max-threads = 1
+
+[test-groups.integration-deposit]
 max-threads = 1
 
 [[profile.default.overrides]]
@@ -27,3 +31,7 @@ test-group = "integration-transaction"
 [[profile.default.overrides]]
 filter     = "binary(blokli_load)"
 test-group = "integration-load"
+
+[[profile.default.overrides]]
+filter     = "binary(blokli_deposit_events)"
+test-group = "integration-deposit"

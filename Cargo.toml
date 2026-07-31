@@ -40,6 +40,7 @@ serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 serial_test = "3.5.0"
 smart-default = "0.7.1"
+tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = [
@@ -50,6 +51,7 @@ tokio = { version = "1.52.3", features = [
   "time",
   "tracing",
 ] }
+toml_edit = { version = "=0.25.12", features = ["serde"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = [
   "env-filter",
@@ -75,6 +77,13 @@ strip         = true
 # perform minimal optimizations to prevent stack overflows in large tests
 [profile.test]
 opt-level = 1
+
+# CI keeps line-level backtraces while avoiding large incremental and full
+# debug-info artifacts in the Nix binary cache.
+[profile.ci-test]
+debug       = 1
+incremental = false
+inherits    = "test"
 
 # this profile focuses on the best runtime performance and the smallest binary size
 [profile.release]

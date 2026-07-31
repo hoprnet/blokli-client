@@ -35,7 +35,7 @@
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # HOPR Nix Library (provides flake-utils and reusable build functions)
-    nix-lib.url = "github:hoprnet/nix-lib/v1.1.0";
+    nix-lib.url = "github:hoprnet/nix-lib/v1.3.0";
 
     # Rust build system
     crane.url = "github:ipetkov/crane";
@@ -157,6 +157,7 @@
               extraExtensions = [
                 "csv"
                 "graphql"
+                "snap"
               ];
             };
             deps = nixLib.mkDepsSrc {
@@ -173,6 +174,7 @@
           blokliClientPackages = import ./nix/packages/blokli-client.nix {
             inherit
               lib
+              pkgs
               builders
               sources
               blokliClientCrateInfo
@@ -224,10 +226,12 @@
             test-integration = {
               type = "app";
               program = toString (
-                pkgs.writeShellScript "test-integration" ''
-                  export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1}"
-                  nix develop --command cargo test --package blokli-integration-tests
-                ''
+                pkgs.writeShellApplication {
+                  name = "test-integration";
+                  runtimeInputs = [ pkgs.cargo-nextest ];
+                  text = builtins.readFile ./nix/scripts/test-integration.sh;
+                }
+                + "/bin/test-integration"
               );
             };
             test-integration-curvy = {
@@ -235,7 +239,7 @@
               program = toString (
                 pkgs.writeShellScript "test-integration-curvy" ''
                   export BLOKLI_TEST_REMOTE_IMAGE="europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1"
-                  nix develop --command cargo test --package blokli-integration-tests --test blokli_deposit_events -- --ignored
+                  nix run -L .#test-integration -- --test blokli_deposit_events --run-ignored ignored-only
                 ''
               );
             };
@@ -424,16 +428,7 @@
           inherit checks;
 
           # Export applications using nix-lib
-          apps = utilityApps // {
-            coverage-unit = {
-              type = "app";
-              program = toString (
-                pkgs.writeShellScript "coverage-unit" ''
-                  nix develop .#coverage -c cargo llvm-cov --workspace --lib --lcov --output-path coverage.lcov
-                ''
-              );
-            };
-          };
+          apps = utilityApps;
 
           # Export packages
           packages = packages // {

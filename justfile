@@ -83,6 +83,10 @@ nextest:
 nextest-package package:
     cargo nextest run -p {{ package }}
 
+# Build and run the archived integration test suite
+test-integration:
+    nix run -L .#test-integration
+
 # ============================================================================
 # Code Quality
 # ============================================================================

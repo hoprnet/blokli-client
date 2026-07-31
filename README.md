@@ -113,11 +113,13 @@ just test-package blokli-inspector
 Run integration tests:
 
 ```bash
-just integration-test
+BLOKLI_TEST_REMOTE_IMAGE='europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid@sha256:<digest>' \
+  nix run .#test-integration
 ```
 
-Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under
-`tests/integration/`.
+The command builds a cacheable Nextest archive before running the tests against the Docker-based environment configured under
+`tests/integration/`. Replace `<digest>` with the immutable digest to test; explicitly setting `BLOKLI_TEST_REMOTE_IMAGE` avoids the
+command's mutable `latest` fallback and makes the test image reproducible.
 
 ## Repository Layout
 
@@ -137,5 +139,5 @@ just clippy          # lint
 just check           # cargo check
 just nextest         # run unit tests with nextest
 nix build .          # build default Nix package
-nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).blokli-client-clippy
+nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).clippy
 ```

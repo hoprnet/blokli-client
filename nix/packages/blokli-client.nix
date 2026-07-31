@@ -5,6 +5,7 @@
 
 {
   lib,
+  pkgs,
   builders,
   sources,
   blokliClientCrateInfo,
@@ -48,14 +49,81 @@ let
       "aarch64-darwin"
     ]
   );
+
+  clippyDerivation = builders.local.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+    })
+    // {
+      runClippy = true;
+      prependPackageName = false;
+      cargoExtraArgs = "--workspace";
+    }
+  );
+
+  integrationTestRunner = builders.local.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.test;
+      depsSrc = sources.deps;
+    })
+    // {
+      cargoToml = ./../../tests/integration/Cargo.toml;
+      runNextest = true;
+      testCargoProfile = "ci-test";
+      prependPackageName = false;
+      cargoExtraArgs = "-p blokli-integration-tests";
+    }
+  );
+
+  # Compile integration tests in the Nix sandbox, but archive rather than run
+  # them so the cached binaries can later access Docker on the host.
+  integrationTests = integrationTestRunner.overrideAttrs (_: {
+    pname = "integration-tests";
+    doInstallCargoArtifacts = false;
+    checkPhase = ''
+      runHook preCheck
+      mkdir -p "$out"
+      cargo nextest archive \
+        --cargo-profile ci-test \
+        -p blokli-integration-tests \
+        --archive-format tar-zst \
+        --archive-file "$out/integration-tests.tar.zst"
+      runHook postCheck
+    '';
+  });
 in
 {
   lib-blokli-client = builders.local.callPackage nixLib.mkRustLibrary localArgs;
 
-  clippy = builders.local.callPackage nixLib.mkRustLibrary (
-    localArgs
+  nextest = builders.local.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.test;
+      depsSrc = sources.deps;
+    })
     // {
-      runClippy = true;
+      runNextest = true;
+      testCargoProfile = "ci-test";
+      prependPackageName = false;
+      cargoExtraArgs = "--workspace --exclude blokli-integration-tests";
+    }
+  );
+
+  clippy = clippyDerivation;
+
+  integration-tests = integrationTests;
+
+  coverage = builders.localCoverage.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.test;
+      depsSrc = sources.deps;
+    })
+    // {
+      runCoverage = true;
+      cargoLlvmCovCommand = "nextest";
+      testCargoProfile = "ci-test";
+      cargoExtraArgs = "--exclude blokli-integration-tests";
+      extraNativeBuildInputs = [ pkgs.cargo-nextest ];
     }
   );
 }
