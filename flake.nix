@@ -231,34 +231,11 @@
                   export BLOKLI_TEST_WORKSPACE_ROOT="''${BLOKLI_TEST_WORKSPACE_ROOT:-$PWD}"
 
                   archive_path="$(nix build -L --no-link --print-out-paths .#integration-tests)"
-                  test_root="$(${pkgs.coreutils}/bin/mktemp -d)"
-                  trap '${pkgs.coreutils}/bin/rm -rf "$test_root"' EXIT
 
-                  ${pkgs.gnutar}/bin/tar \
-                    --use-compress-program=${pkgs.zstd}/bin/unzstd \
-                    -xf "$archive_path/integration-tests.tar.zst" \
-                    -C "$test_root"
-
-                  runtime_lib_dirs="$test_root/target/nextest/libdirs/host:$test_root/target/nextest/libdirs/target/0"
-                  export LD_LIBRARY_PATH="$runtime_lib_dirs''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-                  export DYLD_FALLBACK_LIBRARY_PATH="$runtime_lib_dirs''${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
-
-                  found_test_binary=false
-                  for test_binary in "$test_root"/target/*/ci-test/deps/blokli_*; do
-                    if [[ ! -x "$test_binary" || -d "$test_binary" ]]; then
-                      continue
-                    fi
-
-                    found_test_binary=true
-                    if ! "$test_binary" "$@"; then
-                      exit 1
-                    fi
-                  done
-
-                  if [[ "$found_test_binary" != true ]]; then
-                    echo "No integration test binaries found in archive" >&2
-                    exit 1
-                  fi
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run \
+                    --archive-file "$archive_path/integration-tests.tar.zst" \
+                    --workspace-remap "$BLOKLI_TEST_WORKSPACE_ROOT" \
+                    "$@"
                 ''
               );
             };

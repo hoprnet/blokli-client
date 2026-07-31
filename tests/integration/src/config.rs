@@ -156,21 +156,26 @@ fn validate_workspace_root(project_root: PathBuf) -> Result<(PathBuf, PathBuf)> 
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
+
+    use tempfile::{TempDir, tempdir};
 
     use super::validate_workspace_root;
 
-    fn workspace_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|tests_dir| tests_dir.parent())
-            .expect("integration crate must be nested under the workspace root")
-            .to_path_buf()
+    fn workspace_fixture(include_integration_dir: bool) -> TempDir {
+        let workspace = tempdir().expect("temporary workspace should be created");
+        fs::write(workspace.path().join("Cargo.toml"), "[workspace]\n").expect("workspace manifest should be created");
+        if include_integration_dir {
+            fs::create_dir_all(workspace.path().join("tests/integration"))
+                .expect("integration directory should be created");
+        }
+        workspace
     }
 
     #[test]
     fn accepts_valid_workspace_root() {
-        let project_root = workspace_root();
+        let workspace = workspace_fixture(true);
+        let project_root = workspace.path().to_path_buf();
 
         let (resolved_root, integration_dir) =
             validate_workspace_root(project_root.clone()).expect("workspace root should be valid");
@@ -180,27 +185,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_workspace_root() {
-        let error = validate_workspace_root(PathBuf::new()).expect_err("empty root must be rejected");
+    fn rejects_invalid_workspace_roots() {
+        let unrelated_workspace = workspace_fixture(false);
+        let invalid_roots = [
+            (PathBuf::new(), "must not be empty"),
+            (
+                unrelated_workspace.path().join("does-not-exist"),
+                "containing Cargo.toml",
+            ),
+            (
+                unrelated_workspace.path().to_path_buf(),
+                "must contain tests/integration",
+            ),
+        ];
 
-        assert!(error.to_string().contains("must not be empty"));
-    }
+        for (project_root, expected_error) in invalid_roots {
+            let error = validate_workspace_root(project_root).expect_err("invalid root must be rejected");
 
-    #[test]
-    fn rejects_nonexistent_workspace_root() {
-        let missing_root = workspace_root().join("does-not-exist");
-
-        let error = validate_workspace_root(missing_root).expect_err("missing root must be rejected");
-
-        assert!(error.to_string().contains("containing Cargo.toml"));
-    }
-
-    #[test]
-    fn rejects_unrelated_directory() {
-        let unrelated_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-
-        let error = validate_workspace_root(unrelated_root).expect_err("unrelated root must be rejected");
-
-        assert!(error.to_string().contains("must contain tests/integration"));
+            assert!(error.to_string().contains(expected_error));
+        }
     }
 }
