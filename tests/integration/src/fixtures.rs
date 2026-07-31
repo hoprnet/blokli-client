@@ -13,7 +13,7 @@ use blokli_client::{
         types::{ReadinessState, Safe},
     },
 };
-use futures::StreamExt;
+use futures::{StreamExt, future::try_join_all};
 use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
 use hopr_bindings::{
     config::ContractInstances,
@@ -21,7 +21,7 @@ use hopr_bindings::{
     exports::alloy::{
         primitives::{Address, U256, keccak256},
         providers::{
-            ProviderBuilder,
+            Provider, ProviderBuilder,
             fillers::{BlobGasFiller, CachedNonceManager, ChainIdFiller, GasFiller, NonceFiller},
         },
         signers::local::PrivateKeySigner,
@@ -778,8 +778,10 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     let config: Arc<TestConfig> = Arc::new(TestConfig::load()?);
     let mut docker = DockerEnvironment::new(config.clone());
 
-    docker.ensure_image_available()?;
-    docker.compose_up()?;
+    if !config.external_stack {
+        docker.ensure_image_available()?;
+        docker.compose_up()?;
+    }
     let client = BlokliClient::new(config.bloklid_url().clone(), BlokliClientConfig::default());
     info!(
         seconds = STACK_STARTUP_WAIT.as_secs(),
@@ -804,45 +806,79 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
         .wallet(wallet)
         .connect_http(config.rpc_url().clone());
 
-    let contract_instances =
-        ContractInstances::deploy_for_testing(provider, accounts[0].to_alloy_address(), accounts[0].to_alloy_address())
-            .await
-            .expect("failed to deploy hopr contracts for testing");
-
-    info!("deployed hopr contracts for testing");
+    let configured_contract_addresses = config.contract_addresses()?;
+    let contracts_already_deployed = if config.external_stack {
+        let critical_contract_addresses = [
+            configured_contract_addresses.token,
+            configured_contract_addresses.channels,
+            configured_contract_addresses.announcements,
+            configured_contract_addresses.node_safe_registry,
+            configured_contract_addresses.ticket_price_oracle,
+            configured_contract_addresses.winning_probability_oracle,
+            configured_contract_addresses.node_stake_factory,
+            configured_contract_addresses.module_implementation,
+            configured_contract_addresses.node_safe_migration,
+            configured_contract_addresses.xhopr_token,
+        ];
+        try_join_all(critical_contract_addresses.into_iter().map(|address| {
+            let provider = &provider;
+            async move { provider.get_code_at(address).await }
+        }))
+        .await?
+        .iter()
+        .all(|code| !code.is_empty())
+    } else {
+        false
+    };
+    let contract_instances = if contracts_already_deployed {
+        info!("reusing hopr contracts already deployed for this test binary");
+        ContractInstances::new(&configured_contract_addresses, provider)
+    } else {
+        let instances = ContractInstances::deploy_for_testing(
+            provider,
+            accounts[0].to_alloy_address(),
+            accounts[0].to_alloy_address(),
+        )
+        .await
+        .expect("failed to deploy hopr contracts for testing");
+        info!("deployed hopr contracts for testing");
+        instances
+    };
 
     let contract_addresses = contract_instances.get_contract_addresses();
 
-    info!(contract_addresses = ?contract_addresses, "deployed contract addresses");
+    info!(contract_addresses = ?contract_addresses, "using contract addresses");
 
-    // Mint HOPR tokens
-    let encoded_minter_role = keccak256(b"MINTER_ROLE");
-    contract_instances
-        .token
-        .grantRole(encoded_minter_role, a2h(deployer.public().to_address()))
-        .send()
-        .await?
-        .watch()
+    if !contracts_already_deployed {
+        // Mint HOPR tokens once for the persistent per-binary test environment.
+        let encoded_minter_role = keccak256(b"MINTER_ROLE");
+        contract_instances
+            .token
+            .grantRole(encoded_minter_role, a2h(deployer.public().to_address()))
+            .send()
+            .await?
+            .watch()
+            .await?;
+
+        let all_addresses: Vec<Address> = accounts.iter().map(|acc| acc.to_alloy_address()).collect();
+
+        let hopr_token = HoprTokenInstance::new(
+            *contract_instances.token.address(),
+            Arc::new(contract_instances.token.provider().clone()),
+        );
+
+        let total_transferred_amount = transfer_or_mint_tokens(
+            hopr_token,
+            all_addresses,
+            vec![U256::from(1_000_000_000_000_000_000_000u128); accounts.len()],
+        )
         .await?;
 
-    let all_addresses: Vec<Address> = accounts.iter().map(|acc| acc.to_alloy_address()).collect();
-
-    let hopr_token = HoprTokenInstance::new(
-        *contract_instances.token.address(),
-        Arc::new(contract_instances.token.provider().clone()),
-    );
-
-    let total_transferred_amount = transfer_or_mint_tokens(
-        hopr_token,
-        all_addresses,
-        vec![U256::from(1_000_000_000_000_000_000_000u128); accounts.len()],
-    )
-    .await?;
-
-    info!(
-        total=?total_transferred_amount,
-        "minted and distributed HOPR tokens to test accounts",
-    );
+        info!(
+            total=?total_transferred_amount,
+            "minted and distributed HOPR tokens to test accounts",
+        );
+    }
 
     let fixture = IntegrationFixture {
         inner: Arc::new(IntegrationFixtureInner {
