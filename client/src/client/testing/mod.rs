@@ -848,11 +848,11 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
         Ok(futures::stream::empty())
     }
 
-    fn subscribe_curvy_note_events(
+    fn subscribe_deposit_events(
         &self,
-        _after: Option<CurvyEventCursor>,
-        _filter: Option<CurvyNoteEventFilter>,
-    ) -> Result<impl futures::Stream<Item = Result<CurvyNoteEvent>> + Send> {
+        _after: Option<DepositEventCursor>,
+        _filter: DepositEventFilter,
+    ) -> Result<impl futures::Stream<Item = Result<DepositEvent>> + Send> {
         Ok(futures::stream::empty())
     }
 }

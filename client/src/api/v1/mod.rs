@@ -47,22 +47,24 @@
 
 use std::{fmt::Formatter, time::Duration};
 
+mod deposits;
 mod graphql;
 pub mod types {
-    pub use super::graphql::{
-        ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64,
-        accounts::Account,
-        balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
-        channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
-        curvy::{
-            CurvyCommittedNote, CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter, CurvyNoteEventKind,
-            CurvyPendingNote,
+    pub use super::{
+        deposits::{
+            DepositCompletion, DepositDetectionCandidate, DepositEvent, DepositEventCursor, DepositEventFilter,
         },
-        graph::OpenedChannelsGraphEntry,
-        info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
-        safe::{ModuleAddress, Safe},
-        tickets::{RedeemTicketDetails, RedemptionResult},
-        txs::{SafeExecution, Transaction, TransactionStatus},
+        graphql::{
+            ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64,
+            accounts::Account,
+            balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
+            channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
+            graph::OpenedChannelsGraphEntry,
+            info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
+            safe::{ModuleAddress, Safe},
+            tickets::{RedeemTicketDetails, RedemptionResult},
+            txs::{SafeExecution, Transaction, TransactionStatus},
+        },
     };
 }
 
@@ -79,7 +81,7 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
-        curvy::{CurvyNoteEventVariables, SubscribeCurvyNoteEvents},
+        curvy::{CurvyEventCursor, CurvyNoteEventFilter, CurvyNoteEventVariables, SubscribeCurvyNoteEvents},
         graph::SubscribeGraph,
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
@@ -460,16 +462,16 @@ pub trait BlokliSubscriptionClient {
         &self,
         selector: TicketSelector,
     ) -> Result<impl futures::Stream<Item = Result<types::RedeemTicketDetails>> + Send>;
-    /// Subscribes to raw Curvy `PendingNotes` and `CommittedNotes` items.
+    /// Subscribes to strategy-oriented deposit lifecycle events.
     ///
     /// `after` is exclusive. Persist the cursor from each processed event and pass
-    /// it back after disconnection. Filters use only raw event kinds and known note
-    /// IDs; ownership detection and pending/committed correlation remain local.
-    fn subscribe_curvy_note_events(
+    /// it back after disconnection. Detection candidates must be checked for local
+    /// BJJ ownership before their note IDs are used to correlate completion events.
+    fn subscribe_deposit_events(
         &self,
-        after: Option<types::CurvyEventCursor>,
-        filter: Option<types::CurvyNoteEventFilter>,
-    ) -> Result<impl futures::Stream<Item = Result<types::CurvyNoteEvent>> + Send>;
+        after: Option<types::DepositEventCursor>,
+        filter: types::DepositEventFilter,
+    ) -> Result<impl futures::Stream<Item = Result<types::DepositEvent>> + Send>;
 }
 
 /// Signed transaction submission and tracking through Blokli.

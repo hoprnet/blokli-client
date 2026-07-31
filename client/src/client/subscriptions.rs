@@ -5,12 +5,12 @@ use super::{BlokliClient, GraphQlQueries};
 use crate::api::{
     AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, TicketSelector, TxId,
     internal::{
-        AccountVariables, ChannelsVariables, CurvyNoteEventVariables, SubscribeAccounts, SubscribeChannels,
-        SubscribeCurvyNoteEvents, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeTicketParams,
-        SubscribeTicketRedeemed, TicketRedeemedVariables,
+        AccountVariables, ChannelsVariables, CurvyEventCursor, CurvyNoteEventFilter, CurvyNoteEventVariables,
+        SubscribeAccounts, SubscribeChannels, SubscribeCurvyNoteEvents, SubscribeGraph, SubscribeHealth,
+        SubscribeSafeDeployment, SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter, OpenedChannelsGraphEntry,
+        Account, Channel, DepositEvent, DepositEventCursor, DepositEventFilter, OpenedChannelsGraphEntry,
         ReadinessState, RedeemTicketDetails, Safe, TicketParameters, Transaction,
     },
 };
@@ -57,12 +57,15 @@ impl GraphQlQueries {
         SubscribeTicketRedeemed::build(TicketRedeemedVariables::from(selector))
     }
 
-    /// `SubscribeCurvyNoteEvents` subscription GraphQL query.
-    pub fn subscribe_curvy_note_events(
-        after: Option<CurvyEventCursor>,
-        filter: Option<CurvyNoteEventFilter>,
+    /// Deposit lifecycle subscription backed by the raw Curvy note event operation.
+    pub fn subscribe_deposit_events(
+        after: Option<DepositEventCursor>,
+        filter: DepositEventFilter,
     ) -> cynic::StreamingOperation<SubscribeCurvyNoteEvents, CurvyNoteEventVariables> {
-        SubscribeCurvyNoteEvents::build(CurvyNoteEventVariables { after, filter })
+        SubscribeCurvyNoteEvents::build(CurvyNoteEventVariables {
+            after: after.map(CurvyEventCursor::from),
+            filter: Some(CurvyNoteEventFilter::from(filter)),
+        })
     }
 }
 
@@ -127,13 +130,13 @@ impl BlokliSubscriptionClient for BlokliClient {
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(?after, ?filter))]
-    fn subscribe_curvy_note_events(
+    fn subscribe_deposit_events(
         &self,
-        after: Option<CurvyEventCursor>,
-        filter: Option<CurvyNoteEventFilter>,
-    ) -> Result<impl futures::Stream<Item = Result<CurvyNoteEvent>> + Send> {
+        after: Option<DepositEventCursor>,
+        filter: DepositEventFilter,
+    ) -> Result<impl futures::Stream<Item = Result<DepositEvent>> + Send> {
         Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_curvy_note_events(after, filter))?
-            .try_filter_map(|item| futures::future::ok(Some(item.curvy_note_events))))
+            .build_subscription_stream(GraphQlQueries::subscribe_deposit_events(after, filter))?
+            .try_filter_map(|item| futures::future::ok(DepositEvent::from_graphql(item.curvy_note_events))))
     }
 }

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow};
 use blokli_client::api::{
     BlokliQueryClient, BlokliSubscriptionClient,
-    types::{CurvyNoteEvent, CurvyNoteEventFilter, CurvyNoteEventKind},
+    types::{DepositEvent, DepositEventFilter},
 };
 use blokli_integration_tests::{
     constants::subscription_timeout,
@@ -36,9 +36,7 @@ fn curvy_aggregator_address(raw_map: &str) -> Result<Address> {
 #[test_log::test(tokio::test)]
 #[serial]
 #[ignore = "requires the CI-produced bloklid-anvil-curvy image"]
-async fn curvy_note_subscription_filters_resumes_and_correlates_raw_events(
-    #[future(awt)] fixture: IntegrationFixture,
-) -> Result<()> {
+async fn deposit_subscription_detects_resumes_and_completes(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [account] = fixture.sample_accounts::<1>();
     let chain_info = fixture.client().query_chain_info().await?;
     let aggregator_address = curvy_aggregator_address(&chain_info.contract_addresses.0)?;
@@ -49,26 +47,20 @@ async fn curvy_note_subscription_filters_resumes_and_correlates_raw_events(
     let aggregator = CurvyAggregatorAlphaV2Instance::new(aggregator_address, provider);
 
     let client = fixture.client().clone();
-    let pending_handle = tokio::spawn(async move {
-        let pending_stream = client
-            .subscribe_curvy_note_events(
-                None,
-                Some(CurvyNoteEventFilter {
-                    kinds: Some(vec![CurvyNoteEventKind::Pending]),
-                    note_ids: None,
-                }),
-            )
-            .expect("failed to create pending Curvy note subscription");
-        let mut notes = pending_stream
+    let candidate_handle = tokio::spawn(async move {
+        let candidate_stream = client
+            .subscribe_deposit_events(None, DepositEventFilter::detection_candidates())
+            .expect("failed to create deposit detection subscription");
+        let mut candidates = candidate_stream
             .filter_map(|result| async move {
                 match result {
-                    Ok(CurvyNoteEvent::CurvyPendingNote(note)) => Some(Ok(note)),
+                    Ok(DepositEvent::DetectionCandidate(candidate)) => Some(Ok(candidate)),
                     Ok(_) => None,
                     Err(error) => Some(Err(error)),
                 }
             })
             .boxed();
-        notes.next().timeout(subscription_timeout()).await
+        candidates.next().timeout(subscription_timeout()).await
     });
 
     aggregator
@@ -85,35 +77,32 @@ async fn curvy_note_subscription_filters_resumes_and_correlates_raw_events(
         .watch()
         .await?;
 
-    let pending = pending_handle
+    let candidate = candidate_handle
         .await??
-        .ok_or_else(|| anyhow!("pending note subscription ended"))??;
-    let cursor = pending.cursor.clone();
-    let note_id = U256::from_str(&pending.note_id)?;
+        .ok_or_else(|| anyhow!("deposit detection subscription ended"))??;
+    let cursor = candidate.cursor.clone();
+    let note_id = U256::from_str(&candidate.deposit_note_id)?;
 
     let client = fixture.client().clone();
     let resume_cursor = cursor.clone();
-    let matching_note_id = pending.note_id.clone();
-    let committed_handle = tokio::spawn(async move {
-        let committed_stream = client
-            .subscribe_curvy_note_events(
+    let matching_note_id = candidate.deposit_note_id.clone();
+    let completion_handle = tokio::spawn(async move {
+        let completion_stream = client
+            .subscribe_deposit_events(
                 Some(resume_cursor),
-                Some(CurvyNoteEventFilter {
-                    kinds: Some(vec![CurvyNoteEventKind::Committed]),
-                    note_ids: Some(vec![matching_note_id]),
-                }),
+                DepositEventFilter::completions(vec![matching_note_id]),
             )
-            .expect("failed to create committed Curvy note subscription");
-        let mut notes = committed_stream
+            .expect("failed to create deposit completion subscription");
+        let mut completions = completion_stream
             .filter_map(|result| async move {
                 match result {
-                    Ok(CurvyNoteEvent::CurvyCommittedNote(note)) => Some(Ok(note)),
+                    Ok(DepositEvent::Completed(completion)) => Some(Ok(completion)),
                     Ok(_) => None,
                     Err(error) => Some(Err(error)),
                 }
             })
             .boxed();
-        notes.next().timeout(subscription_timeout()).await
+        completions.next().timeout(subscription_timeout()).await
     });
 
     aggregator
@@ -130,10 +119,10 @@ async fn curvy_note_subscription_filters_resumes_and_correlates_raw_events(
         .watch()
         .await?;
 
-    let committed = committed_handle
+    let completion = completion_handle
         .await??
-        .ok_or_else(|| anyhow!("committed note subscription ended"))??;
-    assert_eq!(committed.note_id, pending.note_id);
-    assert!(committed.cursor.components() > cursor.components());
+        .ok_or_else(|| anyhow!("deposit completion subscription ended"))??;
+    assert_eq!(completion.deposit_note_id, candidate.deposit_note_id);
+    assert!(completion.cursor.components() > cursor.components());
     Ok(())
 }
