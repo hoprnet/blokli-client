@@ -417,16 +417,7 @@
           inherit checks;
 
           # Export applications using nix-lib
-          apps = utilityApps // {
-            coverage-unit = {
-              type = "app";
-              program = toString (
-                pkgs.writeShellScript "coverage-unit" ''
-                  nix build -L .#blokli-client-coverage -o coverage.lcov
-                ''
-              );
-            };
-          };
+          apps = utilityApps;
 
           # Export packages
           packages = packages // {

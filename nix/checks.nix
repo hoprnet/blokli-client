@@ -9,7 +9,7 @@
 
 {
   # Rust linting checks
-  blokli-client-clippy = packages.clippy;
+  clippy = packages.clippy;
 
   # Repository hygiene checks
   pre-commit = packages.pre-commit-check;

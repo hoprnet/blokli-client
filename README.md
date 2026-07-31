@@ -137,5 +137,5 @@ just clippy          # lint
 just check           # cargo check
 just nextest         # run unit tests with nextest
 nix build .          # build default Nix package
-nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).blokli-client-clippy
+nix build .#checks.$(nix eval --impure --raw --expr builtins.currentSystem).clippy
 ```

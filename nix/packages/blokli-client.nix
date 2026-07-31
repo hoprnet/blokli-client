@@ -50,7 +50,7 @@ let
     ]
   );
 
-  blokliClientClippy = builders.local.callPackage nixLib.mkRustPackage (
+  clippyDerivation = builders.local.callPackage nixLib.mkRustPackage (
     (mkblokliClientBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
@@ -65,7 +65,7 @@ in
 {
   lib-blokli-client = builders.local.callPackage nixLib.mkRustLibrary localArgs;
 
-  blokli-client-nextest = builders.local.callPackage nixLib.mkRustPackage (
+  nextest = builders.local.callPackage nixLib.mkRustPackage (
     (mkblokliClientBuildArgs {
       src = sources.test;
       depsSrc = sources.deps;
@@ -78,9 +78,9 @@ in
     }
   );
 
-  blokli-client-clippy = blokliClientClippy;
+  clippy = clippyDerivation;
 
-  blokli-client-coverage = builders.localCoverage.callPackage nixLib.mkRustPackage (
+  coverage = builders.localCoverage.callPackage nixLib.mkRustPackage (
     (mkblokliClientBuildArgs {
       src = sources.test;
       depsSrc = sources.deps;
@@ -93,8 +93,5 @@ in
       extraNativeBuildInputs = [ pkgs.cargo-nextest ];
     }
   );
-
-  # Backward-compatible alias for callers of the original package.
-  clippy = blokliClientClippy;
 }
 // blokliClientPlatformPackages
