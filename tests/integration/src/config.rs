@@ -1,11 +1,12 @@
 use std::{env, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, builder::TypedValueParser};
 use url::Url;
 
 const DEFAULT_INTEGRATION_CONFIG: &str = "config-integration-anvil.toml";
 const DEFAULT_TEST_IMAGE: &str = "bloklid:integration-test";
+/// Environment variable whose value must identify the workspace root used by integration tests.
 const TEST_WORKSPACE_ROOT_ENV: &str = "BLOKLI_TEST_WORKSPACE_ROOT";
 
 /// Base ports for integration test stacks. Each stack offsets from these
@@ -117,8 +118,7 @@ impl TestConfig {
 
 fn resolve_paths() -> Result<(PathBuf, PathBuf)> {
     if let Some(project_root) = env::var_os(TEST_WORKSPACE_ROOT_ENV) {
-        let project_root = PathBuf::from(project_root);
-        return Ok((project_root.clone(), project_root.join("tests/integration")));
+        return validate_workspace_root(PathBuf::from(project_root));
     }
 
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -130,5 +130,77 @@ fn resolve_paths() -> Result<(PathBuf, PathBuf)> {
         .parent()
         .context("Failed to resolve workspace root")?
         .to_path_buf();
-    Ok((project_root.clone(), project_root.join("tests/integration")))
+    validate_workspace_root(project_root)
+}
+
+fn validate_workspace_root(project_root: PathBuf) -> Result<(PathBuf, PathBuf)> {
+    ensure!(
+        !project_root.as_os_str().is_empty(),
+        "{TEST_WORKSPACE_ROOT_ENV} must not be empty"
+    );
+    ensure!(
+        project_root.join("Cargo.toml").is_file(),
+        "{TEST_WORKSPACE_ROOT_ENV} must point to a workspace root containing Cargo.toml: {}",
+        project_root.display()
+    );
+
+    let integration_dir = project_root.join("tests/integration");
+    ensure!(
+        integration_dir.is_dir(),
+        "{TEST_WORKSPACE_ROOT_ENV} workspace root must contain tests/integration: {}",
+        project_root.display()
+    );
+
+    Ok((project_root, integration_dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::validate_workspace_root;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|tests_dir| tests_dir.parent())
+            .expect("integration crate must be nested under the workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn accepts_valid_workspace_root() {
+        let project_root = workspace_root();
+
+        let (resolved_root, integration_dir) =
+            validate_workspace_root(project_root.clone()).expect("workspace root should be valid");
+
+        assert_eq!(resolved_root, project_root);
+        assert_eq!(integration_dir, resolved_root.join("tests/integration"));
+    }
+
+    #[test]
+    fn rejects_empty_workspace_root() {
+        let error = validate_workspace_root(PathBuf::new()).expect_err("empty root must be rejected");
+
+        assert!(error.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn rejects_nonexistent_workspace_root() {
+        let missing_root = workspace_root().join("does-not-exist");
+
+        let error = validate_workspace_root(missing_root).expect_err("missing root must be rejected");
+
+        assert!(error.to_string().contains("containing Cargo.toml"));
+    }
+
+    #[test]
+    fn rejects_unrelated_directory() {
+        let unrelated_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+        let error = validate_workspace_root(unrelated_root).expect_err("unrelated root must be rejected");
+
+        assert!(error.to_string().contains("must contain tests/integration"));
+    }
 }

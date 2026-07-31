@@ -113,11 +113,13 @@ just test-package blokli-inspector
 Run integration tests:
 
 ```bash
-nix run .#test-integration
+BLOKLI_TEST_REMOTE_IMAGE='europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid@sha256:<digest>' \
+  nix run .#test-integration
 ```
 
 The command builds a cacheable Nextest archive before running the tests against the Docker-based environment configured under
-`tests/integration/`.
+`tests/integration/`. Replace `<digest>` with the immutable digest to test; explicitly setting `BLOKLI_TEST_REMOTE_IMAGE` avoids the
+command's mutable `latest` fallback and makes the test image reproducible.
 
 ## Repository Layout
 
