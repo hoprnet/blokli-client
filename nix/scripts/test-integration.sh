@@ -155,7 +155,7 @@ for attempt in {1..10}; do
   previous_port_base="$BLOKLI_TEST_PORT_BASE"
   port_slot=$((((BLOKLI_TEST_PORT_BASE - 20000) / 50 + 1) % 900))
   export BLOKLI_TEST_PORT_BASE=$((20000 + port_slot * 50))
-  echo "Integration ports starting at $previous_port_base were unavailable; retrying at $BLOKLI_TEST_PORT_BASE" >&2
+  echo "Integration port attempt $attempt failed at $previous_port_base; retrying at $BLOKLI_TEST_PORT_BASE" >&2
 done
 if [[ $stacks_started == false ]]; then
   echo "Failed to start one or more integration Docker stacks" >&2
