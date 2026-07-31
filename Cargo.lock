@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "blokli-integration-tests"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "blokli-client",

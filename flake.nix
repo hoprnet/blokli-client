@@ -228,7 +228,13 @@
               program = toString (
                 pkgs.writeShellScript "test-integration" ''
                   export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest}"
-                  nix develop --command cargo test --package blokli-integration-tests
+                  export BLOKLI_TEST_WORKSPACE_ROOT="''${BLOKLI_TEST_WORKSPACE_ROOT:-$PWD}"
+
+                  archive_path="$(nix build -L --no-link --print-out-paths .#integration-tests)"
+                  ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run \
+                    --archive-file "$archive_path/integration-tests.tar.zst" \
+                    --workspace-remap "$BLOKLI_TEST_WORKSPACE_ROOT" \
+                    "$@"
                 ''
               );
             };

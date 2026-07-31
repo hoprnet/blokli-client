@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Parser, builder::TypedValueParser};
@@ -6,6 +6,7 @@ use url::Url;
 
 const DEFAULT_INTEGRATION_CONFIG: &str = "config-integration-anvil.toml";
 const DEFAULT_TEST_IMAGE: &str = "bloklid:integration-test";
+const TEST_WORKSPACE_ROOT_ENV: &str = "BLOKLI_TEST_WORKSPACE_ROOT";
 
 /// Base ports for integration test stacks. Each stack offsets from these
 /// using a deterministic value derived from the process ID.
@@ -115,6 +116,11 @@ impl TestConfig {
 }
 
 fn resolve_paths() -> Result<(PathBuf, PathBuf)> {
+    if let Some(project_root) = env::var_os(TEST_WORKSPACE_ROOT_ENV) {
+        let project_root = PathBuf::from(project_root);
+        return Ok((project_root.clone(), project_root.join("tests/integration")));
+    }
+
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let tests_dir = crate_dir
         .parent()

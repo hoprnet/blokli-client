@@ -2,7 +2,7 @@
 edition = "2021"
 name    = "blokli-integration-tests"
 publish = false
-version = "0.4.3"
+version = "0.4.4"
 
 # `cargo release publish --workspace` selects every workspace member regardless of
 # the `publish = false` field above, so the package has to be opted out explicitly.

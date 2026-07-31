@@ -113,10 +113,10 @@ just test-package blokli-inspector
 Run integration tests:
 
 ```bash
-just integration-test
+nix run .#test-integration
 ```
 
-Integration tests expect their external Blokli-compatible environment to be configured by the test fixtures and environment variables under
+The command builds a cacheable Nextest archive before running the tests against the Docker-based environment configured under
 `tests/integration/`.
 
 ## Repository Layout
