@@ -234,6 +234,7 @@
                   ${pkgs.cargo-nextest}/bin/cargo-nextest nextest run \
                     --archive-file "$archive_path/integration-tests.tar.zst" \
                     --workspace-remap "$BLOKLI_TEST_WORKSPACE_ROOT" \
+                    --test-threads=1 \
                     "$@"
                 ''
               );
