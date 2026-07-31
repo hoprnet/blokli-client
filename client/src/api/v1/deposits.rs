@@ -47,23 +47,31 @@ enum DepositEventKind {
 /// Filter for deposit lifecycle events.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositEventFilter {
-    kind: DepositEventKind,
+    kinds: Vec<DepositEventKind>,
     deposit_note_ids: Option<Vec<String>>,
 }
 
 impl DepositEventFilter {
-    /// Selects candidates whose ownership metadata must be inspected locally.
-    pub fn detection_candidates() -> Self {
+    /// Selects the complete deposit lifecycle for ownership detection and correlation by `hopr-chain-connector`.
+    pub fn lifecycle() -> Self {
         Self {
-            kind: DepositEventKind::DetectionCandidate,
+            kinds: vec![DepositEventKind::DetectionCandidate, DepositEventKind::Completed],
             deposit_note_ids: None,
         }
     }
 
-    /// Selects completion events for note IDs already correlated with local deposits.
+    /// Selects candidates whose ownership metadata must be inspected locally by `hopr-chain-connector`.
+    pub fn detection_candidates() -> Self {
+        Self {
+            kinds: vec![DepositEventKind::DetectionCandidate],
+            deposit_note_ids: None,
+        }
+    }
+
+    /// Selects completion events for note IDs already correlated by `hopr-chain-connector`.
     pub fn completions(deposit_note_ids: Vec<String>) -> Self {
         Self {
-            kind: DepositEventKind::Completed,
+            kinds: vec![DepositEventKind::Completed],
             deposit_note_ids: Some(deposit_note_ids),
         }
     }
@@ -72,22 +80,28 @@ impl DepositEventFilter {
 impl From<DepositEventFilter> for CurvyNoteEventFilter {
     fn from(filter: DepositEventFilter) -> Self {
         Self {
-            kinds: Some(vec![match filter.kind {
-                DepositEventKind::DetectionCandidate => CurvyNoteEventKind::Pending,
-                DepositEventKind::Completed => CurvyNoteEventKind::Committed,
-            }]),
+            kinds: Some(
+                filter
+                    .kinds
+                    .into_iter()
+                    .map(|kind| match kind {
+                        DepositEventKind::DetectionCandidate => CurvyNoteEventKind::Pending,
+                        DepositEventKind::Completed => CurvyNoteEventKind::Committed,
+                    })
+                    .collect(),
+            ),
             note_ids: filter.deposit_note_ids,
         }
     }
 }
 
-/// Strategy-oriented deposit lifecycle event.
+/// Connector-facing deposit lifecycle event translated from Blokli's raw Curvy terminology.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum DepositEvent {
-    /// Contains the metadata needed to check whether a deposit belongs to this node.
+    /// Contains the metadata the connector needs to check whether a deposit belongs to this node.
     DetectionCandidate(DepositDetectionCandidate),
-    /// Indicates that a locally correlated deposit note is committed and spendable.
+    /// Indicates that a note is committed and spendable; the connector must correlate it before notifying PIX.
     Completed(DepositCompletion),
 }
 
@@ -121,7 +135,7 @@ impl DepositEvent {
     }
 }
 
-/// Metadata used by the node to determine whether a detected note belongs to one of its BJJ deposit addresses.
+/// Metadata used by `hopr-chain-connector` to determine whether a note belongs to one of the node's BJJ addresses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DepositDetectionCandidate {
@@ -148,7 +162,7 @@ impl From<CurvyPendingNote> for DepositDetectionCandidate {
     }
 }
 
-/// A locally correlated deposit note that is committed and spendable.
+/// A committed note that `hopr-chain-connector` can correlate with its locally owned deposit notes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct DepositCompletion {
@@ -176,6 +190,19 @@ mod tests {
             CurvyNoteEventFilter {
                 kinds: Some(vec![CurvyNoteEventKind::Committed]),
                 note_ids: Some(vec!["42".to_string()]),
+            }
+        );
+    }
+
+    #[test]
+    fn lifecycle_filter_requests_both_raw_event_kinds() {
+        let raw = CurvyNoteEventFilter::from(DepositEventFilter::lifecycle());
+
+        assert_eq!(
+            raw,
+            CurvyNoteEventFilter {
+                kinds: Some(vec![CurvyNoteEventKind::Pending, CurvyNoteEventKind::Committed]),
+                note_ids: None,
             }
         );
     }

@@ -466,7 +466,10 @@ pub trait BlokliSubscriptionClient {
     ///
     /// `after` is exclusive. Persist the cursor from each processed event and pass
     /// it back after disconnection. Detection candidates must be checked for local
-    /// BJJ ownership before their note IDs are used to correlate completion events.
+    /// BJJ ownership by `hopr-chain-connector` before their note IDs are used to
+    /// correlate completion events and notify the PIX strategy.
+    /// Use [`types::DepositEventFilter::lifecycle`] to consume both stages through
+    /// one stream and perform that correlation locally.
     fn subscribe_deposit_events(
         &self,
         after: Option<types::DepositEventCursor>,

@@ -13,17 +13,21 @@ use blokli_client::{
         types::{ReadinessState, Safe},
     },
 };
+use curvy_bindings::{
+    curvy_aggregator_alpha_v2::CurvyAggregatorAlphaV2::CurvyAggregatorAlphaV2Instance,
+    portal_factory::{CurvyTypes, PortalFactory::PortalFactoryInstance},
+};
 use futures::StreamExt;
-use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
+use hopli_lib::methods::transfer_or_mint_tokens;
 use hopr_bindings::{
-    config::ContractInstances,
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
-        primitives::{Address, U256, keccak256},
+        primitives::{Address, U256},
         providers::{
-            ProviderBuilder,
+            Provider, ProviderBuilder,
             fillers::{BlobGasFiller, CachedNonceManager, ChainIdFiller, GasFiller, NonceFiller},
         },
+        rpc::types::TransactionRequest,
         signers::local::PrivateKeySigner,
         sol_types::SolCall,
     },
@@ -74,6 +78,99 @@ const DEFAULT_MAX_FEE_PER_GAS: u128 = 2_000_000_000;
 const DEFAULT_MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
 const DEFAULT_GAS_LIMIT: u64 = 10_000_000;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CURVY_COMMITMENT_BATCH_SIZE: usize = 5;
+const CURVY_TEST_TOKEN_ID: u64 = 1;
+const CURVY_TEST_DEPOSIT_AMOUNT: u128 = 1_000_000_000_000_000_000;
+/// Minimal EVM runtime returning ABI-encoded `true` for any verifier call.
+const ACCEPT_ALL_VERIFIER_CODE: [u8; 10] = [0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+
+/// Test-only direct Curvy access replacing connector transaction construction and external operator actions.
+pub struct CurvyTestChain<P> {
+    account: Address,
+    aggregator: CurvyAggregatorAlphaV2Instance<P>,
+    portal_factory: PortalFactoryInstance<P>,
+    provider: P,
+}
+
+impl<P> CurvyTestChain<P>
+where
+    P: Provider + Clone,
+{
+    pub const fn commitment_batch_size(&self) -> usize {
+        CURVY_COMMITMENT_BATCH_SIZE
+    }
+
+    /// Drives deposits directly on Anvil.
+    ///
+    /// In production, PIX supplies the deposit intent, `hopr-chain-connector` constructs and signs the portal
+    /// transaction, and `blokli-client` submits the signed bytes. None of those components calls this helper.
+    pub async fn submit_deposit_batch(&self) -> Result<()> {
+        let token = U256::from(CURVY_TEST_TOKEN_ID);
+        let amount = U256::from(CURVY_TEST_DEPOSIT_AMOUNT);
+
+        for index in 0..CURVY_COMMITMENT_BATCH_SIZE {
+            let index = U256::from(index);
+            let note = CurvyTypes::Note {
+                ownerHash: U256::from(101) + index,
+                token,
+                amount,
+                ephemeralKey: [U256::from(201) + index, U256::from(202) + index],
+                viewTag: 7,
+            };
+            let portal_address = self
+                .portal_factory
+                .getEntryPortalAddress(note.ownerHash, self.account)
+                .call()
+                .await?;
+
+            self.provider
+                .send_transaction(TransactionRequest::default().to(portal_address).value(amount))
+                .await?
+                .watch()
+                .await?;
+            self.portal_factory
+                .deployShieldPortal(note, self.account)
+                .send()
+                .await?
+                .watch()
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Simulates the external Curvy operator committing a batch.
+    ///
+    /// This is not performed by the PIX strategy, `hopr-chain-connector`, or `blokli-client` in production.
+    pub async fn commit_deposit_batch(&self, fixture: &IntegrationFixture, note_ids: Vec<U256>) -> Result<()> {
+        let batch_size = U256::from(CURVY_COMMITMENT_BATCH_SIZE);
+        let verifier = self
+            .aggregator
+            .getPendingNotesCommitmentVerifier(batch_size)
+            .call()
+            .await?;
+        fixture
+            .rpc()
+            .set_anvil_code(&verifier.to_string(), &ACCEPT_ALL_VERIFIER_CODE)
+            .await?;
+
+        self.aggregator
+            .commitPendingNotes(
+                batch_size,
+                note_ids,
+                U256::from(301),
+                [U256::ZERO; 2],
+                [[U256::ZERO; 2]; 2],
+                [U256::ZERO; 2],
+            )
+            .send()
+            .await?
+            .watch()
+            .await?;
+
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Eip1559GasParameters {
@@ -121,6 +218,33 @@ impl IntegrationFixture {
 
     pub fn contract_addresses(&self) -> &ContractAddresses {
         &self.inner.contract_addrs
+    }
+
+    /// Creates test-only Curvy contract access for producing indexed note events.
+    pub async fn curvy_test_chain(&self) -> Result<CurvyTestChain<impl Provider + Clone>> {
+        let account = &self.accounts()[0];
+        let chain_info = self.client().query_chain_info().await?;
+        let addresses: serde_json::Value = serde_json::from_str(&chain_info.contract_addresses.0)?;
+        let aggregator_address = addresses
+            .get("curvy_aggregator")
+            .and_then(serde_json::Value::as_str)
+            .context("chainInfo does not contain curvy_aggregator")?
+            .parse()
+            .context("invalid Curvy aggregator address")?;
+        let signer = PrivateKeySigner::from_slice(account.keypair.secret().as_ref())?;
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(self.config().rpc_url().clone());
+        let aggregator = CurvyAggregatorAlphaV2Instance::new(aggregator_address, provider.clone());
+        let portal_factory_address = aggregator.portalFactory().call().await?;
+        let portal_factory = PortalFactoryInstance::new(portal_factory_address, provider.clone());
+
+        Ok(CurvyTestChain {
+            account: account.to_alloy_address(),
+            aggregator,
+            portal_factory,
+            provider,
+        })
     }
 }
 
@@ -804,33 +928,15 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
         .wallet(wallet)
         .connect_http(config.rpc_url().clone());
 
-    let contract_instances =
-        ContractInstances::deploy_for_testing(provider, accounts[0].to_alloy_address(), accounts[0].to_alloy_address())
-            .await
-            .expect("failed to deploy hopr contracts for testing");
+    let chain_info = client.query_chain_info().await?;
+    let contract_addresses: ContractAddresses = serde_json::from_str(&chain_info.contract_addresses.0)
+        .context("failed to parse contract addresses reported by bloklid")?;
 
-    info!("deployed hopr contracts for testing");
+    info!(contract_addresses = ?contract_addresses, "using contract addresses deployed by the integration image");
 
-    let contract_addresses = contract_instances.get_contract_addresses();
-
-    info!(contract_addresses = ?contract_addresses, "deployed contract addresses");
-
-    // Mint HOPR tokens
-    let encoded_minter_role = keccak256(b"MINTER_ROLE");
-    contract_instances
-        .token
-        .grantRole(encoded_minter_role, a2h(deployer.public().to_address()))
-        .send()
-        .await?
-        .watch()
-        .await?;
+    let hopr_token = HoprTokenInstance::new(contract_addresses.token, Arc::new(provider));
 
     let all_addresses: Vec<Address> = accounts.iter().map(|acc| acc.to_alloy_address()).collect();
-
-    let hopr_token = HoprTokenInstance::new(
-        *contract_instances.token.address(),
-        Arc::new(contract_instances.token.provider().clone()),
-    );
 
     let total_transferred_amount = transfer_or_mint_tokens(
         hopr_token,

@@ -63,6 +63,16 @@ impl RpcClient {
         parse_u256(value.as_str().context("eth_getBalance returned non-string result")?)
     }
 
+    /// Replaces an account's bytecode through Anvil's test-only RPC API.
+    pub async fn set_anvil_code(&self, address: &str, code: &[u8]) -> Result<()> {
+        self.call_raw(
+            "anvil_setCode",
+            vec![json!(address), json!(format!("0x{}", hex::encode(code)))],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn call_raw(&self, method: &str, params: Vec<Value>) -> Result<Option<Value>> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0",

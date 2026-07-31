@@ -225,8 +225,17 @@
               type = "app";
               program = toString (
                 pkgs.writeShellScript "test-integration" ''
-                  export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest}"
+                  export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1}"
                   nix develop --command cargo test --package blokli-integration-tests
+                ''
+              );
+            };
+            test-integration-curvy = {
+              type = "app";
+              program = toString (
+                pkgs.writeShellScript "test-integration-curvy" ''
+                  export BLOKLI_TEST_REMOTE_IMAGE="europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1"
+                  nix develop --command cargo test --package blokli-integration-tests --test blokli_deposit_events -- --ignored
                 ''
               );
             };
