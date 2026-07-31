@@ -847,6 +847,14 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
     ) -> Result<impl futures::Stream<Item = Result<RedeemTicketDetails>> + Send> {
         Ok(futures::stream::empty())
     }
+
+    fn subscribe_curvy_note_events(
+        &self,
+        _after: Option<CurvyEventCursor>,
+        _filter: Option<CurvyNoteEventFilter>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyNoteEvent>> + Send> {
+        Ok(futures::stream::empty())
+    }
 }
 
 fn simulate_tx_execution(

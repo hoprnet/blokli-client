@@ -5,12 +5,13 @@ use super::{BlokliClient, GraphQlQueries};
 use crate::api::{
     AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, TicketSelector, TxId,
     internal::{
-        AccountVariables, ChannelsVariables, SubscribeAccounts, SubscribeChannels, SubscribeGraph, SubscribeHealth,
-        SubscribeSafeDeployment, SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
+        AccountVariables, ChannelsVariables, CurvyNoteEventVariables, SubscribeAccounts, SubscribeChannels,
+        SubscribeCurvyNoteEvents, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeTicketParams,
+        SubscribeTicketRedeemed, TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, TicketParameters,
-        Transaction,
+        Account, Channel, CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter, OpenedChannelsGraphEntry,
+        ReadinessState, RedeemTicketDetails, Safe, TicketParameters, Transaction,
     },
 };
 
@@ -54,6 +55,14 @@ impl GraphQlQueries {
         selector: TicketSelector,
     ) -> cynic::StreamingOperation<SubscribeTicketRedeemed, TicketRedeemedVariables> {
         SubscribeTicketRedeemed::build(TicketRedeemedVariables::from(selector))
+    }
+
+    /// `SubscribeCurvyNoteEvents` subscription GraphQL query.
+    pub fn subscribe_curvy_note_events(
+        after: Option<CurvyEventCursor>,
+        filter: Option<CurvyNoteEventFilter>,
+    ) -> cynic::StreamingOperation<SubscribeCurvyNoteEvents, CurvyNoteEventVariables> {
+        SubscribeCurvyNoteEvents::build(CurvyNoteEventVariables { after, filter })
     }
 }
 
@@ -115,5 +124,16 @@ impl BlokliSubscriptionClient for BlokliClient {
         Ok(self
             .build_subscription_stream(GraphQlQueries::subscribe_ticket_redeemed(selector))?
             .try_filter_map(|item| futures::future::ok(Some(item.ticket_redeemed))))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?after, ?filter))]
+    fn subscribe_curvy_note_events(
+        &self,
+        after: Option<CurvyEventCursor>,
+        filter: Option<CurvyNoteEventFilter>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyNoteEvent>> + Send> {
+        Ok(self
+            .build_subscription_stream(GraphQlQueries::subscribe_curvy_note_events(after, filter))?
+            .try_filter_map(|item| futures::future::ok(Some(item.curvy_note_events))))
     }
 }

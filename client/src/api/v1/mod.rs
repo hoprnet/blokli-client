@@ -54,6 +54,10 @@ pub mod types {
         accounts::Account,
         balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
+        curvy::{
+            CurvyCommittedNote, CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter, CurvyNoteEventKind,
+            CurvyPendingNote,
+        },
         graph::OpenedChannelsGraphEntry,
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
         safe::{ModuleAddress, Safe},
@@ -75,6 +79,7 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
+        curvy::{CurvyNoteEventVariables, SubscribeCurvyNoteEvents},
         graph::SubscribeGraph,
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
@@ -455,6 +460,16 @@ pub trait BlokliSubscriptionClient {
         &self,
         selector: TicketSelector,
     ) -> Result<impl futures::Stream<Item = Result<types::RedeemTicketDetails>> + Send>;
+    /// Subscribes to raw Curvy `PendingNotes` and `CommittedNotes` items.
+    ///
+    /// `after` is exclusive. Persist the cursor from each processed event and pass
+    /// it back after disconnection. Filters use only raw event kinds and known note
+    /// IDs; ownership detection and pending/committed correlation remain local.
+    fn subscribe_curvy_note_events(
+        &self,
+        after: Option<types::CurvyEventCursor>,
+        filter: Option<types::CurvyNoteEventFilter>,
+    ) -> Result<impl futures::Stream<Item = Result<types::CurvyNoteEvent>> + Send>;
 }
 
 /// Signed transaction submission and tracking through Blokli.
