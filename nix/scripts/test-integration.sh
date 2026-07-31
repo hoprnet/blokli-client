@@ -4,8 +4,13 @@ export BLOKLI_TEST_REMOTE_IMAGE="${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker
 export BLOKLI_TEST_WORKSPACE_ROOT="${BLOKLI_TEST_WORKSPACE_ROOT:-$PWD}"
 export BLOKLI_TEST_IMAGE="${BLOKLI_TEST_IMAGE:-bloklid-anvil:integration-test}"
 export BLOKLI_TEST_EXTERNAL_STACK=true
-export BLOKLI_TEST_RUN_ID="${BLOKLI_TEST_RUN_ID:-run-$(printf '%x' "$$")}"
-export BLOKLI_TEST_PORT_BASE="${BLOKLI_TEST_PORT_BASE:-$((20000 + ($$ % 900) * 40))}"
+export BLOKLI_TEST_RUN_ID="${BLOKLI_TEST_RUN_ID:-run-$(printf '%x-%x' "$$" "$RANDOM")}"
+port_base_is_fixed=false
+if [[ -n ${BLOKLI_TEST_PORT_BASE:-} ]]; then
+  port_base_is_fixed=true
+else
+  export BLOKLI_TEST_PORT_BASE=$((20000 + (($$ + RANDOM) % 900) * 50))
+fi
 export INSTA_WORKSPACE_ROOT="${INSTA_WORKSPACE_ROOT:-$BLOKLI_TEST_WORKSPACE_ROOT}"
 
 integration_dir="$BLOKLI_TEST_WORKSPACE_ROOT/tests/integration"
@@ -62,12 +67,26 @@ compose_down() {
   )
 }
 
-cleanup() {
-  local status="$?"
+start_stacks() {
+  local start_pids=()
+  local start_failed=false
+
+  for index in "${!stack_names[@]}"; do
+    compose_up "$index" &
+    start_pids+=("$!")
+  done
+  for pid in "${start_pids[@]}"; do
+    if ! wait "$pid"; then
+      start_failed=true
+    fi
+  done
+
+  [[ $start_failed == false ]]
+}
+
+stop_stacks() {
   local cleanup_pids=()
 
-  trap - EXIT
-  set +e
   for index in "${!stack_names[@]}"; do
     compose_down "$index" &
     cleanup_pids+=("$!")
@@ -75,6 +94,14 @@ cleanup() {
   for pid in "${cleanup_pids[@]}"; do
     wait "$pid"
   done
+}
+
+cleanup() {
+  local status="$?"
+
+  trap - EXIT
+  set +e
+  stop_stacks
   exit "$status"
 }
 
@@ -113,18 +140,24 @@ archive_path="$(nix build -L --no-link --print-out-paths .#integration-tests)"
 
 prepare_image
 
-start_pids=()
-for index in "${!stack_names[@]}"; do
-  compose_up "$index" &
-  start_pids+=("$!")
-done
-start_failed=false
-for pid in "${start_pids[@]}"; do
-  if ! wait "$pid"; then
-    start_failed=true
+stacks_started=false
+for attempt in {1..10}; do
+  if start_stacks; then
+    stacks_started=true
+    break
   fi
+
+  stop_stacks
+  if [[ $port_base_is_fixed == true ]]; then
+    break
+  fi
+
+  previous_port_base="$BLOKLI_TEST_PORT_BASE"
+  port_slot=$((((BLOKLI_TEST_PORT_BASE - 20000) / 50 + 1) % 900))
+  export BLOKLI_TEST_PORT_BASE=$((20000 + port_slot * 50))
+  echo "Integration ports starting at $previous_port_base were unavailable; retrying at $BLOKLI_TEST_PORT_BASE" >&2
 done
-if [[ $start_failed == true ]]; then
+if [[ $stacks_started == false ]]; then
   echo "Failed to start one or more integration Docker stacks" >&2
   exit 1
 fi
