@@ -88,7 +88,7 @@ jobs:
     with:
       source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
       cachix_cache_name: blokli-client
-      lint_command: "nix develop --command just quick"
+      lint_command: "nix build -L .#blokli-client-clippy"
       audit_command: "nix run -L .#audit"
       deps: true
       runner_small: depot-ubuntu-24.04-2
@@ -102,10 +102,9 @@ jobs:
     with:
       source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
       cachix_cache_name: blokli-client
-      enable_unit_tests: true
-      unit_test_command: "nix run -L .#test"
+      enable_unit_tests: false
       enable_unit_coverage: true
-      unit_coverage_command: "nix run .#coverage-unit"
+      unit_coverage_command: "nix build -L .#blokli-client-coverage -o coverage.lcov"
       enable_integration_tests: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
       integration_test_command: "nix run -L .#test-integration"
       runner_integration: depot-ubuntu-24.04-4

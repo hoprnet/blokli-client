@@ -35,7 +35,7 @@
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # HOPR Nix Library (provides flake-utils and reusable build functions)
-    nix-lib.url = "github:hoprnet/nix-lib/v1.1.0";
+    nix-lib.url = "github:hoprnet/nix-lib/v1.3.0";
 
     # Rust build system
     crane.url = "github:ipetkov/crane";
@@ -157,6 +157,7 @@
               extraExtensions = [
                 "csv"
                 "graphql"
+                "snap"
               ];
             };
             deps = nixLib.mkDepsSrc {
@@ -173,6 +174,7 @@
           blokliClientPackages = import ./nix/packages/blokli-client.nix {
             inherit
               lib
+              pkgs
               builders
               sources
               blokliClientCrateInfo
@@ -420,7 +422,7 @@
               type = "app";
               program = toString (
                 pkgs.writeShellScript "coverage-unit" ''
-                  nix develop .#coverage -c cargo llvm-cov --workspace --lib --lcov --output-path coverage.lcov
+                  nix build -L .#blokli-client-coverage -o coverage.lcov
                 ''
               );
             };

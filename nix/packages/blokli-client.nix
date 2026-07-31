@@ -5,6 +5,7 @@
 
 {
   lib,
+  pkgs,
   builders,
   sources,
   blokliClientCrateInfo,
@@ -48,15 +49,52 @@ let
       "aarch64-darwin"
     ]
   );
+
+  blokliClientClippy = builders.local.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+    })
+    // {
+      runClippy = true;
+      prependPackageName = false;
+      cargoExtraArgs = "--workspace";
+    }
+  );
 in
 {
   lib-blokli-client = builders.local.callPackage nixLib.mkRustLibrary localArgs;
 
-  clippy = builders.local.callPackage nixLib.mkRustLibrary (
-    localArgs
+  blokli-client-nextest = builders.local.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.test;
+      depsSrc = sources.deps;
+    })
     // {
-      runClippy = true;
+      runNextest = true;
+      testCargoProfile = "ci-test";
+      prependPackageName = false;
+      cargoExtraArgs = "--workspace --exclude blokli-integration-tests";
     }
   );
+
+  blokli-client-clippy = blokliClientClippy;
+
+  blokli-client-coverage = builders.localCoverage.callPackage nixLib.mkRustPackage (
+    (mkblokliClientBuildArgs {
+      src = sources.test;
+      depsSrc = sources.deps;
+    })
+    // {
+      runCoverage = true;
+      cargoLlvmCovCommand = "nextest";
+      testCargoProfile = "ci-test";
+      cargoExtraArgs = "--exclude blokli-integration-tests";
+      extraNativeBuildInputs = [ pkgs.cargo-nextest ];
+    }
+  );
+
+  # Backward-compatible alias for callers of the original package.
+  clippy = blokliClientClippy;
 }
 // blokliClientPlatformPackages
