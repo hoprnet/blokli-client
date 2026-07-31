@@ -87,6 +87,8 @@ prepare_image() {
     while IFS= read -r line; do
       if [[ $line == "Loaded image: "* ]]; then
         source_image="${line#Loaded image: }"
+      elif [[ $line == "Loaded image ID: "* ]]; then
+        source_image="${line#Loaded image ID: }"
       fi
     done <<<"$load_output"
   fi

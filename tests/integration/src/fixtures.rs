@@ -13,7 +13,7 @@ use blokli_client::{
         types::{ReadinessState, Safe},
     },
 };
-use futures::StreamExt;
+use futures::{StreamExt, future::try_join_all};
 use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
 use hopr_bindings::{
     config::ContractInstances,
@@ -807,11 +807,29 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
         .connect_http(config.rpc_url().clone());
 
     let configured_contract_addresses = config.contract_addresses()?;
-    let contracts_already_deployed = config.external_stack
-        && !provider
-            .get_code_at(configured_contract_addresses.token)
-            .await?
-            .is_empty();
+    let contracts_already_deployed = if config.external_stack {
+        let critical_contract_addresses = [
+            configured_contract_addresses.token,
+            configured_contract_addresses.channels,
+            configured_contract_addresses.announcements,
+            configured_contract_addresses.node_safe_registry,
+            configured_contract_addresses.ticket_price_oracle,
+            configured_contract_addresses.winning_probability_oracle,
+            configured_contract_addresses.node_stake_factory,
+            configured_contract_addresses.module_implementation,
+            configured_contract_addresses.node_safe_migration,
+            configured_contract_addresses.xhopr_token,
+        ];
+        try_join_all(critical_contract_addresses.into_iter().map(|address| {
+            let provider = &provider;
+            async move { provider.get_code_at(address).await }
+        }))
+        .await?
+        .iter()
+        .all(|code| !code.is_empty())
+    } else {
+        false
+    };
     let contract_instances = if contracts_already_deployed {
         info!("reusing hopr contracts already deployed for this test binary");
         ContractInstances::new(&configured_contract_addresses, provider)

@@ -1,7 +1,10 @@
 use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use clap::{Parser, builder::TypedValueParser};
+use clap::{
+    ArgAction, Parser,
+    builder::{BoolishValueParser, TypedValueParser},
+};
 use hopr_types::chain::ContractAddresses;
 use serde::Deserialize;
 use url::Url;
@@ -85,7 +88,14 @@ pub struct TestConfig {
     #[arg(long, env = "BLOKLI_TEST_STACK_ID", default_value_t = default_stack_id())]
     pub stack_id: String,
 
-    #[arg(long, env = "BLOKLI_TEST_EXTERNAL_STACK", default_value_t = false)]
+    /// Uses an externally managed Docker stack instead of managing one locally.
+    #[arg(
+        long,
+        env = "BLOKLI_TEST_EXTERNAL_STACK",
+        default_value_t = false,
+        action = ArgAction::Set,
+        value_parser = BoolishValueParser::new()
+    )]
     pub external_stack: bool,
 }
 
@@ -172,12 +182,16 @@ impl TestConfig {
 }
 
 fn external_stack_assignment(binary_name: &str, run_id: &str, port_base: u16) -> Result<ExternalStackAssignment> {
+    let mut run_id_characters = run_id.chars();
+    let has_valid_first_character = run_id_characters
+        .next()
+        .is_some_and(|character| character.is_ascii_lowercase() || character.is_ascii_digit());
     ensure!(
-        !run_id.is_empty()
-            && run_id
-                .chars()
+        has_valid_first_character
+            && run_id_characters
                 .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'),
-        "{EXTERNAL_RUN_ID_ENV} must contain only lowercase ASCII letters, digits, and hyphens"
+        "{EXTERNAL_RUN_ID_ENV} must start with a lowercase ASCII letter or digit and contain only lowercase ASCII \
+         letters, digits, and hyphens"
     );
 
     let (stack_name, stack_index) = if binary_name.starts_with("blokli_query_client") {
@@ -253,9 +267,10 @@ fn validate_workspace_root(project_root: PathBuf) -> Result<(PathBuf, PathBuf)> 
 mod tests {
     use std::{fs, path::PathBuf};
 
+    use clap::Parser;
     use tempfile::{TempDir, tempdir};
 
-    use super::{ExternalStackAssignment, external_stack_assignment, validate_workspace_root};
+    use super::{ExternalStackAssignment, TestConfig, external_stack_assignment, validate_workspace_root};
 
     fn workspace_fixture(include_integration_dir: bool) -> TempDir {
         let workspace = tempdir().expect("temporary workspace should be created");
@@ -355,6 +370,18 @@ mod tests {
     fn rejects_invalid_external_stack_configuration() {
         assert!(external_stack_assignment("unknown-test", "local", 20_000).is_err());
         assert!(external_stack_assignment("blokli_load-hash", "INVALID", 20_000).is_err());
+        assert!(external_stack_assignment("blokli_load-hash", "-local", 20_000).is_err());
         assert!(external_stack_assignment("blokli_load-hash", "local", u16::MAX).is_err());
+    }
+
+    #[test]
+    fn parses_external_stack_boolean_values() {
+        let disabled = TestConfig::try_parse_from(["test-config", "--external-stack", "false"])
+            .expect("false should be accepted as an external stack value");
+        let enabled = TestConfig::try_parse_from(["test-config", "--external-stack", "true"])
+            .expect("true should be accepted as an external stack value");
+
+        assert!(!disabled.external_stack);
+        assert!(enabled.external_stack);
     }
 }
