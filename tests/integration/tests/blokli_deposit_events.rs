@@ -102,7 +102,6 @@ async fn watch_deposit_lifecycle(
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "requires the CI-produced bloklid-anvil-curvy image"]
 async fn deposit_subscription_detects_resumes_and_completes(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     // TEST HARNESS SETUP — performed by neither PIX, the connector, nor blokli-client.
     // It creates privileged contract access used only to drive the combined Anvil+Curvy test chain.
