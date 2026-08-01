@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, anyhow};
 use blokli_client::{
     BlokliClient,
@@ -43,7 +45,9 @@ async fn watch_deposit_lifecycle(
     // HOPR CONNECTOR: persists the owned note ID and latest processed cursor. On connection loss it asks blokli-client
     // to reopen the same lifecycle subscription exclusively after that cursor.
     let resume_cursor = first_candidate.cursor.clone();
+    let resume_components = resume_cursor.components().context("resume cursor is not parsable")?;
     let owned_note_id = first_candidate.deposit_note_id.clone();
+    let mut candidate_note_ids = HashSet::from([owned_note_id.clone()]);
     drop(stream);
     let mut stream = client.subscribe_deposit_events(Some(resume_cursor), DepositEventFilter::lifecycle())?;
     let mut candidates = Vec::with_capacity(expected_count);
@@ -57,6 +61,18 @@ async fn watch_deposit_lifecycle(
             .context("timed out waiting for a deposit detection candidate")?
             .ok_or_else(|| anyhow!("deposit lifecycle subscription ended"))??;
         if let DepositEvent::DetectionCandidate(candidate) = event {
+            let components = candidate
+                .cursor
+                .components()
+                .context("resumed candidate cursor is not parsable")?;
+            if components <= resume_components {
+                return Err(anyhow!(
+                    "resumed subscription re-delivered a candidate at or before the resume cursor"
+                ));
+            }
+            if !candidate_note_ids.insert(candidate.deposit_note_id.clone()) {
+                return Err(anyhow!("resumed subscription re-delivered a candidate note ID"));
+            }
             candidates.push(candidate);
         }
     }
@@ -125,13 +141,18 @@ async fn deposit_subscription_detects_resumes_and_completes(#[future(awt)] fixtu
     // TEST HARNESS CHAIN ADVANCEMENT — performed by none of PIX, the connector, or blokli-client.
     // Normally an external Curvy operator commits pending notes. Since the image has no prover, the helper installs a
     // test-only accept-all verifier and commits the complete circuit-sized batch.
-    test_chain.commit_deposit_batch(&fixture, note_ids).await?;
+    test_chain.commit_deposit_batch(fixture.rpc(), note_ids).await?;
 
     // HOPR CONNECTOR -> PIX STRATEGY — deliver DepositCompleted.
     // Blokli-client reports a committed note; the connector correlates it and emits the strategy-level signal.
     let completion = lifecycle_handle.await??;
     assert_eq!(completion.deposit_note_id, candidate.deposit_note_id);
-    assert!(completion.cursor.components() > cursor.components());
+    let completion_components = completion
+        .cursor
+        .components()
+        .context("completion cursor is not parsable")?;
+    let last_candidate_components = cursor.components().context("candidate cursor is not parsable")?;
+    assert!(completion_components > last_candidate_components);
 
     // TEST HARNESS TEARDOWN — performed by neither PIX, the connector, nor blokli-client.
     // IntegrationFixture captures the container logs and stops the combined environment when this test process exits.

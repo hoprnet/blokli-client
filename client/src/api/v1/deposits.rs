@@ -1,3 +1,5 @@
+//! Translation from raw Curvy note events into the connector-facing deposit lifecycle vocabulary.
+
 use super::graphql::curvy::{
     CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter, CurvyNoteEventKind, CurvyPendingNote,
 };
@@ -75,6 +77,14 @@ impl DepositEventFilter {
             deposit_note_ids: Some(deposit_note_ids),
         }
     }
+
+    pub(crate) fn event_kind_count(&self) -> usize {
+        self.kinds.len()
+    }
+
+    pub(crate) fn deposit_note_id_count(&self) -> usize {
+        self.deposit_note_ids.as_ref().map_or(0, Vec::len)
+    }
 }
 
 impl From<DepositEventFilter> for CurvyNoteEventFilter {
@@ -130,7 +140,10 @@ impl DepositEvent {
                 deposit_note_id: note.note_id,
                 batch_index: note.batch_index,
             })),
-            CurvyNoteEvent::Unknown => None,
+            CurvyNoteEvent::Unknown => {
+                tracing::warn!("dropping unknown Curvy note event variant; client schema may be outdated");
+                None
+            }
         }
     }
 }
@@ -173,12 +186,33 @@ pub struct DepositCompletion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::graphql::curvy::CurvyCommittedNote, CurvyEventCursor, CurvyNoteEvent, CurvyNoteEventFilter,
+        CurvyNoteEventKind, CurvyPendingNote, DepositCompletion, DepositDetectionCandidate, DepositEvent,
+        DepositEventCursor, DepositEventFilter,
+    };
 
     #[test]
     fn cursor_round_trip() {
         let cursor = DepositEventCursor::new(10, 2, 7, 3);
         assert_eq!(cursor.components(), Some((10, 2, 7, 3)));
+    }
+
+    #[test]
+    fn cursor_rejects_malformed_components() {
+        for value in ["", "10:2:7", "10:2:7:3:1", "ten:2:7:3", "10:2:7:-1"] {
+            assert_eq!(DepositEventCursor(value.to_string()).components(), None);
+        }
+    }
+
+    #[test]
+    fn cursor_converts_to_and_from_graphql_cursor() {
+        let graphql_cursor = CurvyEventCursor::from(DepositEventCursor("10:2:7:3".to_string()));
+        assert_eq!(graphql_cursor, CurvyEventCursor("10:2:7:3".to_string()));
+        assert_eq!(
+            DepositEventCursor::from(graphql_cursor),
+            DepositEventCursor("10:2:7:3".to_string())
+        );
     }
 
     #[test]
@@ -205,5 +239,81 @@ mod tests {
                 note_ids: None,
             }
         );
+    }
+
+    #[test]
+    fn detection_candidate_filter_requests_pending_events() {
+        let raw = CurvyNoteEventFilter::from(DepositEventFilter::detection_candidates());
+
+        assert_eq!(
+            raw,
+            CurvyNoteEventFilter {
+                kinds: Some(vec![CurvyNoteEventKind::Pending]),
+                note_ids: None,
+            }
+        );
+    }
+
+    #[test]
+    fn filter_summary_does_not_expose_note_ids() {
+        let filter = DepositEventFilter::completions(vec!["42".to_string(), "43".to_string()]);
+
+        assert_eq!(filter.event_kind_count(), 1);
+        assert_eq!(filter.deposit_note_id_count(), 2);
+    }
+
+    #[test]
+    fn pending_note_maps_to_detection_candidate() {
+        let event = DepositEvent::from_graphql(CurvyNoteEvent::CurvyPendingNote(CurvyPendingNote {
+            cursor: CurvyEventCursor("10:2:7:3".to_string()),
+            note_id: "42".to_string(),
+            ephemeral_key: vec!["11".to_string(), "12".to_string()],
+            view_tag: 7,
+            token: "1".to_string(),
+            amount: "1000".to_string(),
+            is_plaintext: false,
+        }))
+        .expect("pending note should map to a deposit event");
+
+        assert_eq!(event.cursor(), &DepositEventCursor("10:2:7:3".to_string()));
+        assert_eq!(event.deposit_note_id(), "42");
+        assert_eq!(
+            event,
+            DepositEvent::DetectionCandidate(DepositDetectionCandidate {
+                cursor: DepositEventCursor("10:2:7:3".to_string()),
+                deposit_note_id: "42".to_string(),
+                ephemeral_key: vec!["11".to_string(), "12".to_string()],
+                view_tag: 7,
+                token: "1".to_string(),
+                amount: "1000".to_string(),
+                is_plaintext: false,
+            })
+        );
+    }
+
+    #[test]
+    fn committed_note_maps_to_completion() {
+        let event = DepositEvent::from_graphql(CurvyNoteEvent::CurvyCommittedNote(CurvyCommittedNote {
+            cursor: CurvyEventCursor("11:0:1:0".to_string()),
+            note_id: "42".to_string(),
+            batch_index: "9".to_string(),
+        }))
+        .expect("committed note should map to a deposit event");
+
+        assert_eq!(event.cursor(), &DepositEventCursor("11:0:1:0".to_string()));
+        assert_eq!(event.deposit_note_id(), "42");
+        assert_eq!(
+            event,
+            DepositEvent::Completed(DepositCompletion {
+                cursor: DepositEventCursor("11:0:1:0".to_string()),
+                deposit_note_id: "42".to_string(),
+                batch_index: "9".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_graphql_event_is_ignored() {
+        assert_eq!(DepositEvent::from_graphql(CurvyNoteEvent::Unknown), None);
     }
 }

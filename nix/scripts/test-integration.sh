@@ -1,6 +1,8 @@
+#!/usr/bin/env bash
+
 set -euo pipefail
 
-export BLOKLI_TEST_REMOTE_IMAGE="${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1}"
+export BLOKLI_TEST_REMOTE_IMAGE="${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.12.1-commit.4734ba1@sha256:e6a01cc90d275e6f59a2c94b7acf3c51306acee0dbd30feeb7a3228034a8403a}"
 export BLOKLI_TEST_WORKSPACE_ROOT="${BLOKLI_TEST_WORKSPACE_ROOT:-$PWD}"
 export BLOKLI_TEST_IMAGE="${BLOKLI_TEST_IMAGE:-bloklid-anvil:integration-test}"
 export BLOKLI_TEST_EXTERNAL_STACK=true
@@ -70,9 +72,11 @@ compose_down() {
 start_stacks() {
   local start_pids=()
   local start_failed=false
+  local start_log
+  start_log="$(mktemp)"
 
   for index in "${!stack_names[@]}"; do
-    compose_up "$index" &
+    compose_up "$index" >>"$start_log" 2>&1 &
     start_pids+=("$!")
   done
   for pid in "${start_pids[@]}"; do
@@ -80,6 +84,13 @@ start_stacks() {
       start_failed=true
     fi
   done
+  cat "$start_log" >&2
+
+  if [[ $start_failed == true ]] && grep -qiE 'address already in use|port is already allocated|bind:.*address.*in use' "$start_log"; then
+    rm -f "$start_log"
+    return 2
+  fi
+  rm -f "$start_log"
 
   [[ $start_failed == false ]]
 }
@@ -141,14 +152,16 @@ archive_path="$(nix build -L --no-link --print-out-paths .#integration-tests)"
 prepare_image
 
 stacks_started=false
-for attempt in {1..10}; do
-  if start_stacks; then
+for attempt in {1..3}; do
+  start_status=0
+  start_stacks || start_status="$?"
+  if ((start_status == 0)); then
     stacks_started=true
     break
   fi
 
   stop_stacks
-  if [[ $port_base_is_fixed == true ]]; then
+  if ((start_status != 2)) || [[ $port_base_is_fixed == true ]]; then
     break
   fi
 

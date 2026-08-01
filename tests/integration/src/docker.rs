@@ -33,8 +33,7 @@ impl DockerEnvironment {
             return Ok(());
         }
         bail!(
-            "No local bloklid Docker image found at {} and BLOKLI_TEST_REMOTE_IMAGE is not set. Please run `nix build \
-             .#docker-bloklid-anvil-${{arch}}` before running integration tests.",
+            "No usable local bloklid Docker image found at {} and BLOKLI_TEST_REMOTE_IMAGE is not set",
             self.config.project_root.join("result").display()
         );
     }
@@ -63,7 +62,7 @@ impl DockerEnvironment {
                 warn!(
                     error = ?err,
                     path = %result_path.display(),
-                    "failed to load local Docker image, falling back to remote image"
+                    "failed to load local Docker image"
                 );
                 Ok(false)
             }

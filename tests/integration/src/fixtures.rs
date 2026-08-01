@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use blokli_client::{
     BlokliClient, BlokliClientConfig,
     api::{
@@ -18,11 +18,12 @@ use curvy_bindings::{
     portal_factory::{CurvyTypes, PortalFactory::PortalFactoryInstance},
 };
 use futures::StreamExt;
+use futures_time::future::FutureExt as FutureTimeoutExt;
 use hopli_lib::methods::transfer_or_mint_tokens;
 use hopr_bindings::{
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
-        primitives::{Address, U256},
+        primitives::{Address, U256, keccak256},
         providers::{
             Provider, ProviderBuilder,
             fillers::{BlobGasFiller, CachedNonceManager, ChainIdFiller, GasFiller, NonceFiller},
@@ -56,7 +57,11 @@ use tokio::sync::OnceCell;
 use tracing::{debug, info, warn};
 
 use crate::{
-    anvil::AnvilAccount, config::TestConfig, constants::STACK_STARTUP_WAIT, docker::DockerEnvironment, rpc::RpcClient,
+    anvil::AnvilAccount,
+    config::TestConfig,
+    constants::{STACK_STARTUP_WAIT, subscription_timeout},
+    docker::DockerEnvironment,
+    rpc::RpcClient,
     transaction::TransactionBuilder as TestTransactionBuilder,
 };
 
@@ -79,7 +84,8 @@ const DEFAULT_MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
 const DEFAULT_GAS_LIMIT: u64 = 10_000_000;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CURVY_COMMITMENT_BATCH_SIZE: usize = 5;
-const CURVY_TEST_TOKEN_ID: u64 = 1;
+/// Curvy's local development configuration registers native ETH as token ID 1.
+const CURVY_TEST_NATIVE_TOKEN_ID: u64 = 1;
 const CURVY_TEST_DEPOSIT_AMOUNT: u128 = 1_000_000_000_000_000_000;
 /// Minimal EVM runtime returning ABI-encoded `true` for any verifier call.
 const ACCEPT_ALL_VERIFIER_CODE: [u8; 10] = [0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
@@ -105,7 +111,7 @@ where
     /// In production, PIX supplies the deposit intent, `hopr-chain-connector` constructs and signs the portal
     /// transaction, and `blokli-client` submits the signed bytes. None of those components calls this helper.
     pub async fn submit_deposit_batch(&self) -> Result<()> {
-        let token = U256::from(CURVY_TEST_TOKEN_ID);
+        let token = U256::from(CURVY_TEST_NATIVE_TOKEN_ID);
         let amount = U256::from(CURVY_TEST_DEPOSIT_AMOUNT);
 
         for index in 0..CURVY_COMMITMENT_BATCH_SIZE {
@@ -127,13 +133,17 @@ where
                 .send_transaction(TransactionRequest::default().to(portal_address).value(amount))
                 .await?
                 .watch()
-                .await?;
+                .timeout(subscription_timeout())
+                .await
+                .context("timed out waiting for Curvy portal funding transaction")??;
             self.portal_factory
                 .deployShieldPortal(note, self.account)
                 .send()
                 .await?
                 .watch()
-                .await?;
+                .timeout(subscription_timeout())
+                .await
+                .context("timed out waiting for Curvy shield portal deployment")??;
         }
 
         Ok(())
@@ -141,18 +151,22 @@ where
 
     /// Simulates the external Curvy operator committing a batch.
     ///
-    /// This is not performed by the PIX strategy, `hopr-chain-connector`, or `blokli-client` in production.
-    pub async fn commit_deposit_batch(&self, fixture: &IntegrationFixture, note_ids: Vec<U256>) -> Result<()> {
+    /// This is not performed by the PIX strategy, `hopr-chain-connector`, or `blokli-client` in production. The
+    /// dedicated deposit-test stack is discarded after this test binary, so the test-only verifier code is not
+    /// restored.
+    pub async fn commit_deposit_batch(&self, rpc: &RpcClient, note_ids: Vec<U256>) -> Result<()> {
+        ensure!(
+            note_ids.len() == CURVY_COMMITMENT_BATCH_SIZE,
+            "commitPendingNotes requires exactly {CURVY_COMMITMENT_BATCH_SIZE} note IDs, received {}",
+            note_ids.len()
+        );
         let batch_size = U256::from(CURVY_COMMITMENT_BATCH_SIZE);
         let verifier = self
             .aggregator
             .getPendingNotesCommitmentVerifier(batch_size)
             .call()
             .await?;
-        fixture
-            .rpc()
-            .set_anvil_code(&verifier.to_string(), &ACCEPT_ALL_VERIFIER_CODE)
-            .await?;
+        rpc.set_anvil_code(&verifier, &ACCEPT_ALL_VERIFIER_CODE).await?;
 
         self.aggregator
             .commitPendingNotes(
@@ -166,7 +180,9 @@ where
             .send()
             .await?
             .watch()
-            .await?;
+            .timeout(subscription_timeout())
+            .await
+            .context("timed out waiting for Curvy deposit commitment")??;
 
         Ok(())
     }
@@ -224,14 +240,16 @@ impl IntegrationFixture {
     pub async fn curvy_test_chain(&self) -> Result<CurvyTestChain<impl Provider + Clone>> {
         let account = &self.accounts()[0];
         let chain_info = self.client().query_chain_info().await?;
-        let addresses: serde_json::Value = serde_json::from_str(&chain_info.contract_addresses.0)?;
+        let addresses: serde_json::Value = serde_json::from_str(&chain_info.contract_addresses.0)
+            .context("failed to parse contract addresses reported by bloklid")?;
         let aggregator_address = addresses
             .get("curvy_aggregator")
             .and_then(serde_json::Value::as_str)
             .context("chainInfo does not contain curvy_aggregator")?
             .parse()
             .context("invalid Curvy aggregator address")?;
-        let signer = PrivateKeySigner::from_slice(account.keypair.secret().as_ref())?;
+        let signer = PrivateKeySigner::from_slice(account.keypair.secret().as_ref())
+            .context("failed to build a signer from the first Anvil account")?;
         let provider = ProviderBuilder::new()
             .wallet(signer)
             .connect_http(self.config().rpc_url().clone());
@@ -918,6 +936,7 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     let rpc = RpcClient::new(config.rpc_url().as_str(), config.http_timeout)?;
 
     let deployer: ChainKeypair = accounts[0].keypair.clone();
+    let deployer_address = accounts[0].to_alloy_address();
     let wallet = PrivateKeySigner::from_slice(deployer.secret().as_ref()).expect("failed to construct wallet");
 
     // Build default JSON RPC provider
@@ -938,14 +957,20 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
 
     let hopr_token = HoprTokenInstance::new(contract_addresses.token, Arc::new(provider));
 
-    let all_addresses: Vec<Address> = accounts.iter().map(|acc| acc.to_alloy_address()).collect();
+    let encoded_minter_role = keccak256(b"MINTER_ROLE");
+    hopr_token
+        .grantRole(encoded_minter_role, deployer_address)
+        .send()
+        .await?
+        .watch()
+        .timeout(subscription_timeout())
+        .await
+        .context("timed out granting the integration deployer HOPR token minter access")??;
 
-    let total_transferred_amount = transfer_or_mint_tokens(
-        hopr_token,
-        all_addresses,
-        vec![U256::from(1_000_000_000_000_000_000_000u128); accounts.len()],
-    )
-    .await?;
+    let external_addresses: Vec<Address> = accounts.iter().skip(1).map(AnvilAccount::to_alloy_address).collect();
+    let amounts = vec![U256::from(1_000_000_000_000_000_000_000u128); external_addresses.len()];
+
+    let total_transferred_amount = transfer_or_mint_tokens(hopr_token, external_addresses, amounts).await?;
 
     info!(
         total=?total_transferred_amount,

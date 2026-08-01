@@ -129,7 +129,15 @@ impl BlokliSubscriptionClient for BlokliClient {
             .try_filter_map(|item| futures::future::ok(Some(item.ticket_redeemed))))
     }
 
-    #[tracing::instrument(level = "debug", skip(self), fields(?after, ?filter))]
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, filter),
+        fields(
+            ?after,
+            event_kind_count = filter.event_kind_count(),
+            deposit_note_id_count = filter.deposit_note_id_count(),
+        )
+    )]
     fn subscribe_deposit_events(
         &self,
         after: Option<DepositEventCursor>,
@@ -138,5 +146,39 @@ impl BlokliSubscriptionClient for BlokliClient {
         Ok(self
             .build_subscription_stream(GraphQlQueries::subscribe_deposit_events(after, filter))?
             .try_filter_map(|item| futures::future::ok(DepositEvent::from_graphql(item.curvy_note_events))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::GraphQlQueries;
+    use crate::api::types::{DepositEventCursor, DepositEventFilter};
+
+    #[test]
+    fn deposit_subscription_serializes_cursor_and_filter_variables() {
+        let operation = GraphQlQueries::subscribe_deposit_events(
+            Some(DepositEventCursor("9:0:0:0".to_string())),
+            DepositEventFilter::completions(vec!["42".to_string(), "43".to_string()]),
+        );
+
+        let serialized = serde_json::to_value(operation).expect("subscription operation should serialize");
+
+        assert_eq!(
+            serialized["variables"],
+            json!({
+                "after": "9:0:0:0",
+                "filter": {
+                    "kinds": ["COMMITTED"],
+                    "noteIds": ["42", "43"],
+                },
+            })
+        );
+        assert!(
+            serialized["query"]
+                .as_str()
+                .is_some_and(|query| query.contains("curvyNoteEvents"))
+        );
     }
 }

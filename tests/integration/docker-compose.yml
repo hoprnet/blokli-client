@@ -8,10 +8,10 @@ services:
     environment:
       ANVIL_HOST: 0.0.0.0
       BLOKLI_INDEXER_ENABLE_SAFE_INDEXING: "true"
-      RUST_LOG: trace
+      RUST_LOG: ${BLOKLI_TEST_RUST_LOG:-info}
     ports:
-      - "${ANVIL_PORT:-8546}:8545"
-      - "${BLOKLID_PORT:-8081}:8080"
+      - "127.0.0.1:${ANVIL_PORT:-8546}:8545"
+      - "127.0.0.1:${BLOKLID_PORT:-8081}:8080"
     healthcheck:
       test: ["CMD", "sh", "-c", "curl -sf http://localhost:8080/healthz && curl -sf http://localhost:8080/readyz | grep -q '\"status\":\"ready\"'"]
       interval: 5s

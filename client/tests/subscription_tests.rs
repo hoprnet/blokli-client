@@ -5,7 +5,7 @@ use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
         BlokliSubscriptionClient,
-        types::{ChannelStatus, ReadinessState},
+        types::{ChannelStatus, DepositEvent, DepositEventCursor, DepositEventFilter, ReadinessState},
     },
 };
 use futures::StreamExt;
@@ -292,6 +292,76 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn subscribe_deposit_events_translates_lifecycle_and_ignores_unknown_events() -> Result<()> {
+    let body = [
+        format_deposit_event("FutureCurvyNote", serde_json::json!({})),
+        format_deposit_event(
+            "CurvyPendingNote",
+            serde_json::json!({
+                "cursor": "10:2:7:3",
+                "noteId": "42",
+                "ephemeralKey": ["11", "12"],
+                "viewTag": 7,
+                "token": "1",
+                "amount": "1000",
+                "isPlaintext": false,
+            }),
+        ),
+        format_deposit_event(
+            "CurvyCommittedNote",
+            serde_json::json!({
+                "cursor": "11:0:1:0",
+                "noteId": "42",
+                "batchIndex": "9",
+            }),
+        ),
+    ]
+    .join("");
+    let (base_url, server) = spawn_single_streaming_server(body).await?;
+    let client = BlokliClient::new(
+        base_url,
+        BlokliClientConfig {
+            subscription_stream_restart_delay: None,
+            ..BlokliClientConfig::default()
+        },
+    );
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(2),
+        client
+            .subscribe_deposit_events(
+                Some(DepositEventCursor("9:0:0:0".to_string())),
+                DepositEventFilter::lifecycle(),
+            )?
+            .take(2)
+            .collect::<Vec<_>>(),
+    )
+    .await?
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(events.len(), 2);
+    let DepositEvent::DetectionCandidate(candidate) = &events[0] else {
+        anyhow::bail!("expected a detection candidate");
+    };
+    assert_eq!(candidate.deposit_note_id, "42");
+    assert_eq!(candidate.ephemeral_key, ["11", "12"]);
+    assert_eq!(candidate.view_tag, 7);
+    assert_eq!(candidate.token, "1");
+    assert_eq!(candidate.amount, "1000");
+    assert!(!candidate.is_plaintext);
+
+    let DepositEvent::Completed(completion) = &events[1] else {
+        anyhow::bail!("expected a completion");
+    };
+    assert_eq!(completion.deposit_note_id, "42");
+    assert_eq!(completion.batch_index, "9");
+
+    server.await??;
+    Ok(())
+}
+
 async fn spawn_reconnecting_server(
     event_batches: Vec<Vec<TicketParams>>,
 ) -> Result<(Url, tokio::task::JoinHandle<Result<()>>)> {
@@ -458,6 +528,17 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
                     "safeAddress": null,
                 },
             },
+        },
+    });
+    format!("event: next\ndata: {payload}\n\n")
+}
+
+fn format_deposit_event(typename: &str, fields: serde_json::Value) -> String {
+    let mut note = fields.as_object().cloned().unwrap_or_default();
+    note.insert("__typename".to_string(), serde_json::json!(typename));
+    let payload = serde_json::json!({
+        "data": {
+            "curvyNoteEvents": note,
         },
     });
     format!("event: next\ndata: {payload}\n\n")

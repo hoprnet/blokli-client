@@ -1,3 +1,7 @@
+//! Cynic types for the raw Curvy note event subscription.
+//!
+//! The schema contract for these types is `client/target-api-schema.graphql`.
+
 use super::schema;
 
 /// Exclusive Curvy event cursor encoded as `block:transaction:log:item`.

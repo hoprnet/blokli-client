@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use hopr_bindings::exports::alloy::primitives::U256;
+use hopr_bindings::exports::alloy::primitives::{Address as AlloyAddress, U256};
 use hopr_types::primitive::prelude::Address;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -64,10 +64,10 @@ impl RpcClient {
     }
 
     /// Replaces an account's bytecode through Anvil's test-only RPC API.
-    pub async fn set_anvil_code(&self, address: &str, code: &[u8]) -> Result<()> {
+    pub async fn set_anvil_code(&self, address: &AlloyAddress, code: &[u8]) -> Result<()> {
         self.call_raw(
             "anvil_setCode",
-            vec![json!(address), json!(format!("0x{}", hex::encode(code)))],
+            vec![json!(address.to_string()), json!(format!("0x{}", hex::encode(code)))],
         )
         .await?;
         Ok(())
