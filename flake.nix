@@ -35,7 +35,7 @@
     nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # HOPR Nix Library (provides flake-utils and reusable build functions)
-    nix-lib.url = "github:hoprnet/nix-lib/v1.1.0";
+    nix-lib.url = "github:hoprnet/nix-lib/v1.3.0";
 
     # Rust build system
     crane.url = "github:ipetkov/crane";
@@ -129,6 +129,18 @@
             );
           };
 
+          # blokli-inspector crate information
+          blokliInspectorCrateInfoOriginal = craneLib.crateNameFromCargoToml {
+            cargoToml = ./inspector/Cargo.toml;
+          };
+          blokliInspectorCrateInfo = {
+            pname = "blokli-inspector";
+            # Normalize version to major.minor.patch for consistent caching
+            version = pkgs.lib.strings.concatStringsSep "." (
+              pkgs.lib.lists.take 3 (builtins.splitVersion blokliInspectorCrateInfoOriginal.version)
+            );
+          };
+
           # Create source trees for different build contexts using nix-lib
           sources = {
             main = nixLib.mkSrc {
@@ -145,6 +157,7 @@
               extraExtensions = [
                 "csv"
                 "graphql"
+                "snap"
               ];
             };
             deps = nixLib.mkDepsSrc {
@@ -161,6 +174,7 @@
           blokliClientPackages = import ./nix/packages/blokli-client.nix {
             inherit
               lib
+              pkgs
               builders
               sources
               blokliClientCrateInfo
@@ -169,19 +183,33 @@
               ;
           };
 
-          # Combine all packages
-          packages = blokliClientPackages // {
-            # Additional standalone packages
-
-            # Pre-commit hooks check
-            pre-commit-check = pkgs.callPackage ./nix/packages/pre-commit-check.nix {
-              inherit
-                pre-commit
-                system
-                config
-                ;
-            };
+          blokliInspectorPackages = import ./nix/packages/blokli-inspector.nix {
+            inherit
+              lib
+              builders
+              sources
+              blokliInspectorCrateInfo
+              rev
+              nixLib
+              ;
           };
+
+          # Combine all packages
+          packages =
+            blokliClientPackages
+            // blokliInspectorPackages
+            // {
+              # Additional standalone packages
+
+              # Pre-commit hooks check
+              pre-commit-check = pkgs.callPackage ./nix/packages/pre-commit-check.nix {
+                inherit
+                  pre-commit
+                  system
+                  config
+                  ;
+              };
+            };
 
           utilityApps = {
             update-github-labels = nixLib.mkUpdateGithubLabelsApp;
@@ -198,10 +226,12 @@
             test-integration = {
               type = "app";
               program = toString (
-                pkgs.writeShellScript "test-integration" ''
-                  export BLOKLI_TEST_REMOTE_IMAGE="''${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid:latest}"
-                  nix develop --command cargo test --package blokli-integration-tests
-                ''
+                pkgs.writeShellApplication {
+                  name = "test-integration";
+                  runtimeInputs = [ pkgs.cargo-nextest ];
+                  text = builtins.readFile ./nix/scripts/test-integration.sh;
+                }
+                + "/bin/test-integration"
               );
             };
             nextest = {
@@ -389,16 +419,7 @@
           inherit checks;
 
           # Export applications using nix-lib
-          apps = utilityApps // {
-            coverage-unit = {
-              type = "app";
-              program = toString (
-                pkgs.writeShellScript "coverage-unit" ''
-                  nix develop .#coverage -c cargo llvm-cov --workspace --lib --lcov --output-path coverage.lcov
-                ''
-              );
-            };
-          };
+          apps = utilityApps;
 
           # Export packages
           packages = packages // {
