@@ -191,9 +191,9 @@ where
 
     /// Builds a test-only withdrawal request after replacing the configured verifier with an accept-all runtime.
     ///
-    /// The public signals follow Curvy's withdrawal circuit layout: token, input nullifiers, recipient, amount, and
-    /// the referenced committed-note root. Production callers must generate these values and a valid proof from the
-    /// owned notes instead of replacing verifier bytecode.
+    /// The public signals follow Curvy's withdrawal circuit layout: amount, input nullifiers, the referenced
+    /// committed-note root, recipient, and token. Production callers must generate these values and a valid proof from
+    /// the owned notes instead of replacing verifier bytecode.
     pub async fn prepare_withdrawal_request(
         &self,
         rpc: &RpcClient,
@@ -215,7 +215,6 @@ where
             amount: U256::from(CURVY_TEST_AMOUNT),
             notes_root: self.aggregator.currentNotesTreeRoot().call().await?,
         };
-
         Ok((request, nullifiers))
     }
 
