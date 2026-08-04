@@ -50,7 +50,6 @@ enum DepositEventKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DepositEventFilter {
     kinds: Vec<DepositEventKind>,
-    deposit_note_ids: Option<Vec<String>>,
 }
 
 impl DepositEventFilter {
@@ -58,7 +57,6 @@ impl DepositEventFilter {
     pub fn lifecycle() -> Self {
         Self {
             kinds: vec![DepositEventKind::DetectionCandidate, DepositEventKind::Completed],
-            deposit_note_ids: None,
         }
     }
 
@@ -66,24 +64,18 @@ impl DepositEventFilter {
     pub fn detection_candidates() -> Self {
         Self {
             kinds: vec![DepositEventKind::DetectionCandidate],
-            deposit_note_ids: None,
         }
     }
 
-    /// Selects completion events for note IDs already correlated by `hopr-chain-connector`.
-    pub fn completions(deposit_note_ids: Vec<String>) -> Self {
+    /// Selects completion events. Callers must correlate owned note IDs locally.
+    pub fn completions() -> Self {
         Self {
             kinds: vec![DepositEventKind::Completed],
-            deposit_note_ids: Some(deposit_note_ids),
         }
     }
 
     pub(crate) fn event_kind_count(&self) -> usize {
         self.kinds.len()
-    }
-
-    pub(crate) fn deposit_note_id_count(&self) -> usize {
-        self.deposit_note_ids.as_ref().map_or(0, Vec::len)
     }
 }
 
@@ -100,7 +92,6 @@ impl From<DepositEventFilter> for CurvyNoteEventFilter {
                     })
                     .collect(),
             ),
-            note_ids: filter.deposit_note_ids,
         }
     }
 }
@@ -217,13 +208,12 @@ mod tests {
 
     #[test]
     fn filter_maps_strategy_stages_to_raw_event_kinds() {
-        let raw = CurvyNoteEventFilter::from(DepositEventFilter::completions(vec!["42".to_string()]));
+        let raw = CurvyNoteEventFilter::from(DepositEventFilter::completions());
 
         assert_eq!(
             raw,
             CurvyNoteEventFilter {
                 kinds: Some(vec![CurvyNoteEventKind::Committed]),
-                note_ids: Some(vec!["42".to_string()]),
             }
         );
     }
@@ -236,7 +226,6 @@ mod tests {
             raw,
             CurvyNoteEventFilter {
                 kinds: Some(vec![CurvyNoteEventKind::Pending, CurvyNoteEventKind::Committed]),
-                note_ids: None,
             }
         );
     }
@@ -249,17 +238,15 @@ mod tests {
             raw,
             CurvyNoteEventFilter {
                 kinds: Some(vec![CurvyNoteEventKind::Pending]),
-                note_ids: None,
             }
         );
     }
 
     #[test]
-    fn filter_summary_does_not_expose_note_ids() {
-        let filter = DepositEventFilter::completions(vec!["42".to_string(), "43".to_string()]);
+    fn completion_filter_only_selects_event_kind() {
+        let filter = DepositEventFilter::completions();
 
         assert_eq!(filter.event_kind_count(), 1);
-        assert_eq!(filter.deposit_note_id_count(), 2);
     }
 
     #[test]

@@ -135,7 +135,6 @@ impl BlokliSubscriptionClient for BlokliClient {
         fields(
             ?after,
             event_kind_count = filter.event_kind_count(),
-            deposit_note_id_count = filter.deposit_note_id_count(),
         )
     )]
     fn subscribe_deposit_events(
@@ -160,7 +159,7 @@ mod tests {
     fn deposit_subscription_serializes_cursor_and_filter_variables() {
         let operation = GraphQlQueries::subscribe_deposit_events(
             Some(DepositEventCursor("9:0:0:0".to_string())),
-            DepositEventFilter::completions(vec!["42".to_string(), "43".to_string()]),
+            DepositEventFilter::completions(),
         );
 
         let serialized = serde_json::to_value(operation).expect("subscription operation should serialize");
@@ -171,7 +170,6 @@ mod tests {
                 "after": "9:0:0:0",
                 "filter": {
                     "kinds": ["COMMITTED"],
-                    "noteIds": ["42", "43"],
                 },
             })
         );

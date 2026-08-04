@@ -22,8 +22,6 @@ pub enum CurvyNoteEventKind {
 pub struct CurvyNoteEventFilter {
     /// Restrict delivery by raw event kind.
     pub kinds: Option<Vec<CurvyNoteEventKind>>,
-    /// Restrict delivery to known decimal `uint256` note identifiers.
-    pub note_ids: Option<Vec<String>>,
 }
 
 /// Variables for the resumable Curvy note subscription.

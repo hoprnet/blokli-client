@@ -198,7 +198,7 @@ where
         &self,
         rpc: &RpcClient,
         recipient: Address,
-    ) -> Result<(CurvyWithdrawalRequest<2>, [U256; 2])> {
+    ) -> Result<(CurvyWithdrawalRequest, [U256; 2])> {
         let verifier = self
             .aggregator
             .getWithdrawalVerifier(WITHDRAWAL_MAX_INPUTS)

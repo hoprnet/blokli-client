@@ -61,7 +61,7 @@ url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.23.4", features = ["serde", "v4"] }
 
 [patch.crates-io]
-hopr-bindings = { git = "https://www.github.com/hoprnet/contracts", rev = "5c5bd640a35b07c426e67c3755af6c5955c2f201" }
+hopr-bindings = { git = "https://www.github.com/hoprnet/contracts", rev = "ac76d1cd9e066bc8f4ed8e88724ebc3e143590ab" }
 
 [profile.dev]
 panic = "abort"
