@@ -14,7 +14,6 @@ anyhow = { workspace = true }
 blokli-client = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-curvy-bindings = { workspace = true }
 futures = { workspace = true }
 futures-time = { workspace = true }
 hex = { workspace = true }

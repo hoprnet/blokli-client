@@ -13,14 +13,14 @@ use blokli_client::{
         types::{ReadinessState, Safe},
     },
 };
-use curvy_bindings::{
-    curvy_aggregator_alpha_v2::CurvyAggregatorAlphaV2::CurvyAggregatorAlphaV2Instance,
-    portal_factory::{CurvyTypes, PortalFactory::PortalFactoryInstance},
-};
 use futures::StreamExt;
 use futures_time::future::FutureExt as FutureTimeoutExt;
 use hopli_lib::methods::transfer_or_mint_tokens;
 use hopr_bindings::{
+    curvy::{
+        CurvyAggregatorAlphaV2Instance, CurvyTypes, CurvyWithdrawalRequest, Groth16Proof, PortalFactoryInstance,
+        WITHDRAWAL_MAX_INPUTS,
+    },
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
         primitives::{Address, U256, keccak256},
@@ -79,16 +79,18 @@ struct IntegrationFixtureInner {
     contract_addrs: ContractAddresses,
 }
 
-const DEFAULT_MAX_FEE_PER_GAS: u128 = 2_000_000_000;
-const DEFAULT_MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
-const DEFAULT_GAS_LIMIT: u64 = 10_000_000;
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const CURVY_COMMITMENT_BATCH_SIZE: usize = 5;
 /// Curvy's local development configuration registers native ETH as token ID 1.
 const CURVY_TEST_NATIVE_TOKEN_ID: u64 = 1;
-const CURVY_TEST_DEPOSIT_AMOUNT: u128 = 1_000_000_000_000_000_000;
-/// Minimal EVM runtime returning ABI-encoded `true` for any verifier call.
-const ACCEPT_ALL_VERIFIER_CODE: [u8; 10] = [0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+const CURVY_TEST_AMOUNT: u128 = 1_000_000_000_000_000_000;
+
+async fn install_accept_all_verifier(rpc: &RpcClient, verifier: Address) -> Result<()> {
+    // Minimal EVM runtime returning ABI-encoded `true` for any verifier call.
+    const CODE: [u8; 10] = [0x60, 0x01, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3];
+
+    rpc.set_anvil_code(&verifier, &CODE).await
+}
 
 /// Test-only direct Curvy access replacing connector transaction construction and external operator actions.
 pub struct CurvyTestChain<P> {
@@ -112,7 +114,7 @@ where
     /// transaction, and `blokli-client` submits the signed bytes. None of those components calls this helper.
     pub async fn submit_deposit_batch(&self) -> Result<()> {
         let token = U256::from(CURVY_TEST_NATIVE_TOKEN_ID);
-        let amount = U256::from(CURVY_TEST_DEPOSIT_AMOUNT);
+        let amount = U256::from(CURVY_TEST_AMOUNT);
 
         for index in 0..CURVY_COMMITMENT_BATCH_SIZE {
             let index = U256::from(index);
@@ -166,7 +168,7 @@ where
             .getPendingNotesCommitmentVerifier(batch_size)
             .call()
             .await?;
-        rpc.set_anvil_code(&verifier, &ACCEPT_ALL_VERIFIER_CODE).await?;
+        install_accept_all_verifier(rpc, verifier).await?;
 
         self.aggregator
             .commitPendingNotes(
@@ -186,6 +188,44 @@ where
 
         Ok(())
     }
+
+    /// Builds a test-only withdrawal request after replacing the configured verifier with an accept-all runtime.
+    ///
+    /// The public signals follow Curvy's withdrawal circuit layout: token, input nullifiers, recipient, amount, and
+    /// the referenced committed-note root. Production callers must generate these values and a valid proof from the
+    /// owned notes instead of replacing verifier bytecode.
+    pub async fn prepare_withdrawal_request(
+        &self,
+        rpc: &RpcClient,
+        recipient: Address,
+    ) -> Result<(CurvyWithdrawalRequest<2>, [U256; 2])> {
+        let verifier = self
+            .aggregator
+            .getWithdrawalVerifier(WITHDRAWAL_MAX_INPUTS)
+            .call()
+            .await?;
+        install_accept_all_verifier(rpc, verifier).await?;
+
+        let nullifiers = [U256::from(401), U256::from(402)];
+        let request = CurvyWithdrawalRequest {
+            proof: Groth16Proof::default(),
+            token: U256::from(CURVY_TEST_NATIVE_TOKEN_ID),
+            nullifiers,
+            recipient,
+            amount: U256::from(CURVY_TEST_AMOUNT),
+            notes_root: self.aggregator.currentNotesTreeRoot().call().await?,
+        };
+
+        Ok((request, nullifiers))
+    }
+
+    pub fn aggregator_address(&self) -> Address {
+        *self.aggregator.address()
+    }
+
+    pub async fn is_nullifier_registered(&self, nullifier: U256) -> Result<bool> {
+        Ok(self.aggregator.nullifiers(nullifier).call().await?)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,9 +238,9 @@ pub struct Eip1559GasParameters {
 impl Default for Eip1559GasParameters {
     fn default() -> Self {
         Self {
-            max_fee_per_gas: DEFAULT_MAX_FEE_PER_GAS,
-            max_priority_fee_per_gas: DEFAULT_MAX_PRIORITY_FEE_PER_GAS,
-            gas_limit: DEFAULT_GAS_LIMIT,
+            max_fee_per_gas: 2_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            gas_limit: 10_000_000,
         }
     }
 }

@@ -10,11 +10,16 @@ use blokli_client::{
 };
 use blokli_integration_tests::{
     constants::subscription_timeout,
-    fixtures::{IntegrationFixture, integration_fixture as fixture},
+    fixtures::{Eip1559GasParameters, IntegrationFixture, integration_fixture as fixture},
+    transaction::TransactionBuilder,
 };
-use curvy_bindings::exports::alloy::primitives::U256;
 use futures::StreamExt;
 use futures_time::future::FutureExt as FutureTimeoutExt;
+use hex::FromHex;
+use hopr_bindings::{
+    curvy::CurvyPayloadGenerator,
+    exports::alloy::{network::TransactionBuilder as AlloyTransactionBuilder, primitives::U256},
+};
 use rstest::rstest;
 use serial_test::serial;
 use tokio::sync::oneshot;
@@ -102,7 +107,9 @@ async fn watch_deposit_lifecycle(
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-async fn deposit_subscription_detects_resumes_and_completes(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+async fn deposit_subscription_detects_resumes_completes_and_withdraws(
+    #[future(awt)] fixture: IntegrationFixture,
+) -> Result<()> {
     // TEST HARNESS SETUP — performed by neither PIX, the connector, nor blokli-client.
     // It creates privileged contract access used only to drive the combined Anvil+Curvy test chain.
     let test_chain = fixture.curvy_test_chain().await?;
@@ -152,6 +159,51 @@ async fn deposit_subscription_detects_resumes_and_completes(#[future(awt)] fixtu
         .context("completion cursor is not parsable")?;
     let last_candidate_components = cursor.components().context("candidate cursor is not parsable")?;
     assert!(completion_components > last_candidate_components);
+
+    // PIX STRATEGY + HOPR CONNECTOR + BLOKLI CLIENT — simulated withdrawal submission.
+    // The connector would normally derive the nullifiers and produce a real proof from the Exit's BJJ identity. The
+    // test stack has no prover, so the helper installs an accept-all verifier while retaining the aggregator's public
+    // signal, root, duplicate-nullifier, vault, and transfer checks.
+    let sender = &fixture.accounts()[0];
+    let recipient = &fixture.accounts()[1];
+    let recipient_address = recipient.to_alloy_address();
+    let initial_recipient_balance = fixture.rpc().get_balance(&recipient.address).await?;
+    let (withdrawal_request, nullifiers) = test_chain
+        .prepare_withdrawal_request(fixture.rpc(), recipient_address)
+        .await?;
+    let withdrawal_transaction =
+        CurvyPayloadGenerator::new(test_chain.aggregator_address()).withdraw(withdrawal_request);
+    let withdrawal_target =
+        AlloyTransactionBuilder::to(&withdrawal_transaction).context("withdrawal transaction is missing its target")?;
+    let withdrawal_calldata = AlloyTransactionBuilder::input(&withdrawal_transaction)
+        .context("withdrawal transaction is missing its calldata")?
+        .to_vec();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let gas = Eip1559GasParameters::default();
+    let raw_transaction = TransactionBuilder::new(&sender.keypair)?
+        .build_eip1559_call_hex(
+            fixture.rpc().chain_id().await?,
+            nonce,
+            withdrawal_target,
+            AlloyTransactionBuilder::value(&withdrawal_transaction).unwrap_or_default(),
+            withdrawal_calldata,
+            gas.max_fee_per_gas,
+            gas.max_priority_fee_per_gas,
+            gas.gas_limit,
+        )
+        .await?;
+    let signed_bytes =
+        Vec::from_hex(raw_transaction.trim_start_matches("0x")).context("failed to decode withdrawal transaction")?;
+
+    fixture
+        .submit_and_confirm_tx(&signed_bytes, fixture.config().tx_confirmations)
+        .await?;
+
+    for nullifier in nullifiers {
+        assert!(test_chain.is_nullifier_registered(nullifier).await?);
+    }
+    let final_recipient_balance = fixture.rpc().get_balance(&recipient.address).await?;
+    assert!(final_recipient_balance > initial_recipient_balance);
 
     // TEST HARNESS TEARDOWN — performed by neither PIX, the connector, nor blokli-client.
     // IntegrationFixture captures the container logs and stops the combined environment when this test process exits.
