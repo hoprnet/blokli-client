@@ -277,12 +277,20 @@ mod tests {
 
     use super::{
         DEFAULT_INTEGRATION_CONFIG, ExternalStackAssignment, IntegrationServiceConfig, TestConfig,
-        external_stack_assignment, validate_workspace_root,
+        external_stack_assignment, resolve_paths, validate_workspace_root,
     };
 
+    /// Resolves `config-integration-anvil.toml`'s path the same way [`TestConfig::load`] does
+    /// (respecting `BLOKLI_TEST_WORKSPACE_ROOT` at runtime), rather than `env!("CARGO_MANIFEST_DIR")`,
+    /// which bakes in the compile-time (e.g. Nix sandbox) path and can be absent at test-run time.
+    fn integration_config_path() -> PathBuf {
+        let (_, integration_dir) = resolve_paths().expect("integration workspace root should be resolvable");
+        integration_dir.join(DEFAULT_INTEGRATION_CONFIG)
+    }
+
     fn read_integration_service_config() -> IntegrationServiceConfig {
-        let toml_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_INTEGRATION_CONFIG);
-        let contents = fs::read_to_string(&toml_path).expect("config-integration-anvil.toml should be readable");
+        let contents =
+            fs::read_to_string(integration_config_path()).expect("config-integration-anvil.toml should be readable");
         toml_edit::de::from_str(&contents).expect("config-integration-anvil.toml should parse")
     }
 
@@ -324,7 +332,7 @@ mod tests {
             )
         });
 
-        let toml_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_INTEGRATION_CONFIG);
+        let toml_path = integration_config_path();
         let contents = fs::read_to_string(&toml_path).expect("config-integration-anvil.toml should be readable");
         let mut doc = contents
             .parse::<toml_edit::DocumentMut>()
