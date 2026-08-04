@@ -14,7 +14,7 @@ use blokli_client::{
     },
 };
 use futures::{StreamExt, future::try_join_all};
-use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
+use hopli_lib::methods::transfer_or_mint_tokens;
 use hopr_bindings::{
     config::ContractInstances,
     erc677_mock::ERC677Mock::transferCall,
@@ -37,7 +37,7 @@ use hopr_types::{
         prelude::SignableTransaction,
     },
     crypto::{
-        keypairs::{ChainKeypair, Keypair},
+        keypairs::Keypair,
         types::{HalfKey, Hash, Response},
     },
     internal::{Multiaddr, announcement::AnnouncementData, tickets::TicketBuilder},
@@ -794,8 +794,10 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
 
     let rpc = RpcClient::new(config.rpc_url().as_str(), config.http_timeout)?;
 
-    let common_deployer_signer = PrivateKeySigner::from_slice(accounts[1].keypair.secret().as_ref()).expect("failed to construct common_deployer wallet");
-    let hopr_deployer_signer = PrivateKeySigner::from_slice(accounts[0].keypair.secret().as_ref()).expect("failed to construct hopr_deployer wallet");
+    let common_deployer_signer = PrivateKeySigner::from_slice(accounts[1].keypair.secret().as_ref())
+        .expect("failed to construct common_deployer wallet");
+    let hopr_deployer_signer = PrivateKeySigner::from_slice(accounts[0].keypair.secret().as_ref())
+        .expect("failed to construct hopr_deployer wallet");
     let mut wallet = EthereumWallet::from(common_deployer_signer.clone());
     wallet.register_default_signer(hopr_deployer_signer.clone());
 
