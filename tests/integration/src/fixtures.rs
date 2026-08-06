@@ -14,11 +14,12 @@ use blokli_client::{
     },
 };
 use futures::{StreamExt, future::try_join_all};
-use hopli_lib::{methods::transfer_or_mint_tokens, utils::a2h};
+use hopli_lib::methods::transfer_or_mint_tokens;
 use hopr_bindings::{
     config::ContractInstances,
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
+        network::EthereumWallet,
         primitives::{Address, U256, keccak256},
         providers::{
             Provider, ProviderBuilder,
@@ -36,7 +37,7 @@ use hopr_types::{
         prelude::SignableTransaction,
     },
     crypto::{
-        keypairs::{ChainKeypair, Keypair},
+        keypairs::Keypair,
         types::{HalfKey, Hash, Response},
     },
     internal::{Multiaddr, announcement::AnnouncementData, tickets::TicketBuilder},
@@ -793,8 +794,12 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
 
     let rpc = RpcClient::new(config.rpc_url().as_str(), config.http_timeout)?;
 
-    let deployer: ChainKeypair = accounts[0].keypair.clone();
-    let wallet = PrivateKeySigner::from_slice(deployer.secret().as_ref()).expect("failed to construct wallet");
+    let common_deployer_signer = PrivateKeySigner::from_slice(accounts[1].keypair.secret().as_ref())
+        .expect("failed to construct common_deployer wallet");
+    let hopr_deployer_signer = PrivateKeySigner::from_slice(accounts[0].keypair.secret().as_ref())
+        .expect("failed to construct hopr_deployer wallet");
+    let mut wallet = EthereumWallet::from(common_deployer_signer.clone());
+    wallet.register_default_signer(hopr_deployer_signer.clone());
 
     // Build default JSON RPC provider
     let provider = ProviderBuilder::new()
@@ -836,8 +841,8 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     } else {
         let instances = ContractInstances::deploy_for_testing(
             provider,
-            accounts[0].to_alloy_address(),
-            accounts[0].to_alloy_address(),
+            hopr_deployer_signer.clone().address(),
+            common_deployer_signer.address(),
         )
         .await
         .expect("failed to deploy hopr contracts for testing");
@@ -854,7 +859,7 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
         let encoded_minter_role = keccak256(b"MINTER_ROLE");
         contract_instances
             .token
-            .grantRole(encoded_minter_role, a2h(deployer.public().to_address()))
+            .grantRole(encoded_minter_role, hopr_deployer_signer.clone().address())
             .send()
             .await?
             .watch()

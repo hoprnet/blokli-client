@@ -55,8 +55,6 @@ services:
       - "8"
       - "--balance"
       - "10000"
-      - "--mnemonic"
-      - "gentle wisdom move brush express similar canal dune emotion series because parrot"
     healthcheck:
       test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8546"]
       interval: 2s
@@ -77,8 +75,8 @@ services:
       - "--rpc-url"
       - "http://anvil:8546"
       - "--private-key"
-      - "0x7b47dca8772f76990ac12f3eea327481ddc40fad1aa745d4d8d3013c1706c167"
-      - "0xa64AA16c6946129AA2BE8b69cb025f295E6aac83"
+      - "0x4bbbf85ce3377467afe5d46f804f221813b2bb87f24d81f60f1fcdbf7cbf4356"
+      - "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
       - "--value"
       - "1"
     depends_on:

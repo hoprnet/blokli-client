@@ -45,6 +45,11 @@ struct ExternalStackAssignment {
 
 #[derive(Deserialize)]
 struct IntegrationServiceConfig {
+    /// Network name the pinned `contracts` addresses below should match in hopr-bindings'
+    /// `contracts-addresses.json`. Only read by the `tests` module below (see
+    /// `regenerate_contract_addresses_toml` and `config_contract_addresses_match_hopr_bindings`).
+    #[allow(dead_code)]
+    network: String,
     contracts: ContractAddresses,
 }
 
@@ -270,7 +275,84 @@ mod tests {
     use clap::Parser;
     use tempfile::{TempDir, tempdir};
 
-    use super::{ExternalStackAssignment, TestConfig, external_stack_assignment, validate_workspace_root};
+    use super::{
+        DEFAULT_INTEGRATION_CONFIG, ExternalStackAssignment, IntegrationServiceConfig, TestConfig,
+        external_stack_assignment, resolve_paths, validate_workspace_root,
+    };
+
+    /// Resolves `config-integration-anvil.toml`'s path the same way [`TestConfig::load`] does
+    /// (respecting `BLOKLI_TEST_WORKSPACE_ROOT` at runtime), rather than `env!("CARGO_MANIFEST_DIR")`,
+    /// which bakes in the compile-time (e.g. Nix sandbox) path and can be absent at test-run time.
+    fn integration_config_path() -> PathBuf {
+        let (_, integration_dir) = resolve_paths().expect("integration workspace root should be resolvable");
+        integration_dir.join(DEFAULT_INTEGRATION_CONFIG)
+    }
+
+    fn read_integration_service_config() -> IntegrationServiceConfig {
+        let contents =
+            fs::read_to_string(integration_config_path()).expect("config-integration-anvil.toml should be readable");
+        toml_edit::de::from_str(&contents).expect("config-integration-anvil.toml should parse")
+    }
+
+    /// Guards against the addresses pinned in `config-integration-anvil.toml` silently drifting
+    /// from hopr-bindings' `contracts-addresses.json` (e.g. after a `hopr-bindings` version bump
+    /// changes the deployment order). Such drift makes `bloklid` watch the wrong addresses, so
+    /// safe/channel/account indexing silently times out instead of failing fast.
+    #[test]
+    fn config_contract_addresses_match_hopr_bindings() {
+        let config = read_integration_service_config();
+
+        let (_, expected) = hopr_types::chain::contract_addresses_for_network(&config.network).unwrap_or_else(|| {
+            panic!(
+                "hopr-bindings contracts-addresses.json has no entry for network '{}'",
+                config.network
+            )
+        });
+
+        assert_eq!(
+            config.contracts, expected,
+            "{DEFAULT_INTEGRATION_CONFIG}'s [contracts] addresses have drifted from hopr-bindings' \
+             contracts-addresses.json for network '{}'. Run `just regen-integration-contracts` to refresh them.",
+            config.network
+        );
+    }
+
+    /// Rewrites `config-integration-anvil.toml`'s `[contracts]` addresses from hopr-bindings'
+    /// bundled `contracts-addresses.json`. Run via `just regen-integration-contracts` after
+    /// bumping `hopr-bindings` (or whenever `config_contract_addresses_match_hopr_bindings` fails).
+    #[test]
+    #[ignore = "run explicitly via `just regen-integration-contracts`"]
+    fn regenerate_contract_addresses_toml() {
+        let config = read_integration_service_config();
+
+        let (_, addresses) = hopr_types::chain::contract_addresses_for_network(&config.network).unwrap_or_else(|| {
+            panic!(
+                "hopr-bindings contracts-addresses.json has no entry for network '{}'",
+                config.network
+            )
+        });
+
+        let toml_path = integration_config_path();
+        let contents = fs::read_to_string(&toml_path).expect("config-integration-anvil.toml should be readable");
+        let mut doc = contents
+            .parse::<toml_edit::DocumentMut>()
+            .expect("config-integration-anvil.toml should parse as a TOML document");
+        let contracts = doc["contracts"]
+            .as_table_mut()
+            .expect("config-integration-anvil.toml should have a [contracts] table");
+        contracts["announcements"] = toml_edit::value(addresses.announcements.to_string());
+        contracts["channels"] = toml_edit::value(addresses.channels.to_string());
+        contracts["module_implementation"] = toml_edit::value(addresses.module_implementation.to_string());
+        contracts["node_safe_migration"] = toml_edit::value(addresses.node_safe_migration.to_string());
+        contracts["node_safe_registry"] = toml_edit::value(addresses.node_safe_registry.to_string());
+        contracts["node_stake_factory"] = toml_edit::value(addresses.node_stake_factory.to_string());
+        contracts["ticket_price_oracle"] = toml_edit::value(addresses.ticket_price_oracle.to_string());
+        contracts["token"] = toml_edit::value(addresses.token.to_string());
+        contracts["winning_probability_oracle"] = toml_edit::value(addresses.winning_probability_oracle.to_string());
+        contracts["xhopr_token"] = toml_edit::value(addresses.xhopr_token.to_string());
+
+        fs::write(&toml_path, doc.to_string()).expect("config-integration-anvil.toml should be writable");
+    }
 
     fn workspace_fixture(include_integration_dir: bool) -> TempDir {
         let workspace = tempdir().expect("temporary workspace should be created");

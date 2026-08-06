@@ -87,6 +87,12 @@ nextest-package package:
 test-integration:
     nix run -L .#test-integration
 
+# Refresh the Anvil contract addresses pinned in tests/integration/config-integration-anvil.toml
+# from hopr-bindings' bundled contracts-addresses.json. Run after bumping hopr-bindings, or
+# whenever `cargo test -p blokli-integration-tests config_contract_addresses_match_hopr_bindings` fails.
+regen-integration-contracts:
+    cargo test -p blokli-integration-tests --lib regenerate_contract_addresses_toml -- --exact --ignored
+
 # ============================================================================
 # Code Quality
 # ============================================================================
