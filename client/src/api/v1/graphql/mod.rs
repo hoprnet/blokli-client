@@ -77,6 +77,11 @@ pub struct TokenValueString(pub String);
 #[cynic(graphql_type = "UInt64")]
 pub struct Uint64(pub String);
 
+/// Unsigned 256-bit integer encoded as a decimal string by the GraphQL API.
+#[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
+#[cynic(graphql_type = "UInt256")]
+pub struct Uint256(pub String);
+
 /// 32-byte hex value as returned by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 pub struct Hex32(pub String);

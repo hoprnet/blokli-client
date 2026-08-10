@@ -47,24 +47,25 @@
 
 use std::{fmt::Formatter, time::Duration};
 
-mod deposits;
 mod graphql;
 pub mod types {
-    pub use super::{
-        deposits::{
-            DepositCompletion, DepositDetectionCandidate, DepositEvent, DepositEventCursor, DepositEventFilter,
+    pub use super::graphql::{
+        ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64, Uint256,
+        accounts::Account,
+        balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
+        channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
+        curvy::{
+            CurvyAddress, CurvyAggregatorFees, CurvyAggregatorState, CurvyBooleanValue, CurvyCommittedNote,
+            CurvyCommittedNotes, CurvyCommittedNullifier, CurvyCommittedNullifiers, CurvyEventCursor,
+            CurvyEventPosition, CurvyGasFees, CurvyNoteStatus, CurvyPendingNote, CurvyPendingNotes, CurvyShardRoot,
+            CurvyShardRootPage, CurvySyncCheckpoint, CurvySyncNote, CurvySyncNotePage, CurvySyncNullifierPage,
+            CurvyVaultFees, CurvyVaultToken, CurvyVaultTokenCount,
         },
-        graphql::{
-            ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64,
-            accounts::Account,
-            balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
-            channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
-            graph::OpenedChannelsGraphEntry,
-            info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
-            safe::{ModuleAddress, Safe},
-            tickets::{RedeemTicketDetails, RedemptionResult},
-            txs::{SafeExecution, Transaction, TransactionStatus},
-        },
+        graph::OpenedChannelsGraphEntry,
+        info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
+        safe::{ModuleAddress, Safe},
+        tickets::{RedeemTicketDetails, RedemptionResult},
+        txs::{SafeExecution, Transaction, TransactionStatus},
     };
 }
 
@@ -81,7 +82,17 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
-        curvy::{CurvyEventCursor, CurvyNoteEventFilter, CurvyNoteEventVariables, SubscribeCurvyNoteEvents},
+        curvy::{
+            CurvyCheckpointVariables, CurvyEntryPortalVariables, CurvyEventPageVariables,
+            CurvyEventSubscriptionVariables, CurvyExitPortalVariables, CurvyNoteIdVariables, CurvyNullifierVariables,
+            CurvyPortalVariables, CurvyRootVariables, CurvySyncPageVariables, CurvyVaultTokenVariables,
+            QueryCurvyAggregatorFees, QueryCurvyAggregatorState, QueryCurvyCommittedNotes,
+            QueryCurvyCommittedNullifiers, QueryCurvyEntryPortalAddress, QueryCurvyExitPortalAddress,
+            QueryCurvyNoteStatus, QueryCurvyNullifierSpent, QueryCurvyPendingNotes, QueryCurvyPortalRegistered,
+            QueryCurvyShardRoots, QueryCurvySyncCheckpoint, QueryCurvySyncNotes, QueryCurvySyncNullifiers,
+            QueryCurvyValidNotesRoot, QueryCurvyVaultFees, QueryCurvyVaultToken, QueryCurvyVaultTokenCount,
+            SubscribeCurvyCommittedNote, SubscribeCurvyCommittedNullifier, SubscribeCurvyPendingNote,
+        },
         graph::SubscribeGraph,
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
@@ -322,6 +333,80 @@ pub(crate) type Result<T> = std::result::Result<T, crate::errors::BlokliClientEr
 /// GraphQL union errors are returned as [`BlokliClientError`](crate::errors::BlokliClientError).
 #[async_trait::async_trait]
 pub trait BlokliQueryClient {
+    /// Returns a chain-ordered page of Curvy pending notes.
+    ///
+    /// `after` is exclusive and `first` must be between 1 and 1000. Pending
+    /// notes are ownership candidates; callers must filter them with Curvy's SDK.
+    async fn query_curvy_pending_notes(
+        &self,
+        from_block: Option<u64>,
+        after: Option<types::CurvyEventCursor>,
+        first: u32,
+    ) -> Result<types::CurvyPendingNotes>;
+    /// Returns a chain-ordered page of committed Curvy notes.
+    async fn query_curvy_committed_notes(
+        &self,
+        from_block: Option<u64>,
+        after: Option<types::CurvyEventCursor>,
+        first: u32,
+    ) -> Result<types::CurvyCommittedNotes>;
+    /// Returns a chain-ordered page of committed Curvy nullifiers.
+    async fn query_curvy_committed_nullifiers(
+        &self,
+        from_block: Option<u64>,
+        after: Option<types::CurvyEventCursor>,
+        first: u32,
+    ) -> Result<types::CurvyCommittedNullifiers>;
+    /// Returns the latest finalized Curvy sync checkpoint, or the checkpoint pinned by block hash.
+    async fn query_curvy_sync_checkpoint(&self, block_hash: Option<String>) -> Result<types::CurvySyncCheckpoint>;
+    /// Returns a checkpoint-pinned page of dense committed notes.
+    async fn query_curvy_sync_notes(
+        &self,
+        checkpoint: String,
+        from_index: Option<u64>,
+        first: u32,
+    ) -> Result<types::CurvySyncNotePage>;
+    /// Returns a checkpoint-pinned page of dense committed nullifiers.
+    async fn query_curvy_sync_nullifiers(
+        &self,
+        checkpoint: String,
+        from_index: Option<u64>,
+        first: u32,
+    ) -> Result<types::CurvySyncNullifierPage>;
+    /// Returns a checkpoint-pinned page of completed notes-tree shard roots.
+    async fn query_curvy_shard_roots(
+        &self,
+        checkpoint: String,
+        from_index: Option<u64>,
+        first: u32,
+    ) -> Result<types::CurvyShardRootPage>;
+    /// Reads current Curvy Aggregator indices and notes-tree root from chain.
+    async fn query_curvy_aggregator_state(&self) -> Result<types::CurvyAggregatorState>;
+    /// Reads a Curvy note's raw status from chain.
+    async fn query_curvy_note_status(&self, note_id: String) -> Result<types::CurvyNoteStatus>;
+    /// Checks whether a Curvy notes-tree root is valid.
+    async fn query_curvy_valid_notes_root(&self, root: String) -> Result<bool>;
+    /// Checks whether a Curvy nullifier has already been spent.
+    async fn query_curvy_nullifier_spent(&self, nullifier: String) -> Result<bool>;
+    /// Reads Curvy Vault protocol-level fees.
+    async fn query_curvy_vault_fees(&self) -> Result<types::CurvyVaultFees>;
+    /// Reads Curvy Aggregator proof fee configuration.
+    async fn query_curvy_aggregator_fees(&self) -> Result<types::CurvyAggregatorFees>;
+    /// Reads the number of registered Curvy Vault tokens.
+    async fn query_curvy_vault_token_count(&self) -> Result<types::CurvyVaultTokenCount>;
+    /// Reads one Curvy Vault token and its gas fee configuration.
+    async fn query_curvy_vault_token(&self, token_id: String) -> Result<types::CurvyVaultToken>;
+    /// Derives a Curvy entry portal address.
+    async fn query_curvy_entry_portal_address(&self, owner_hash: String, recovery: String) -> Result<String>;
+    /// Derives a Curvy exit portal address.
+    async fn query_curvy_exit_portal_address(
+        &self,
+        exit_address: String,
+        exit_chain_id: String,
+        recovery: String,
+    ) -> Result<String>;
+    /// Checks whether a portal is registered with Curvy PortalFactory.
+    async fn query_curvy_portal_registered(&self, portal_address: String) -> Result<bool>;
     /// Counts accounts matching the given [`AccountSelector`].
     ///
     /// [`AccountSelector::Any`] is accepted here and counts every indexed account.
@@ -462,19 +547,31 @@ pub trait BlokliSubscriptionClient {
         &self,
         selector: TicketSelector,
     ) -> Result<impl futures::Stream<Item = Result<types::RedeemTicketDetails>> + Send>;
-    /// Subscribes to strategy-oriented deposit lifecycle events.
+    /// Streams all pending Curvy notes from an optional inclusive block.
     ///
-    /// `after` is exclusive. Persist the cursor from each processed event and pass
-    /// it back after disconnection. Detection candidates must be checked for local
-    /// BJJ ownership by `hopr-chain-connector` before their note IDs are used to
-    /// correlate completion events and notify the PIX strategy.
-    /// Use [`types::DepositEventFilter::lifecycle`] to consume both stages through
-    /// one stream and perform that correlation locally.
-    fn subscribe_deposit_events(
+    /// Blokli does not know which node owns a note. The connector must pass each
+    /// note to the Curvy SDK ownership scanner and retain only matching note IDs.
+    /// Because `from_block` is inclusive, reconnecting consumers must deduplicate by
+    /// [`types::CurvyEventPosition`] or catch up through the exclusive paginated cursor.
+    fn subscribe_curvy_pending_notes(
         &self,
-        after: Option<types::DepositEventCursor>,
-        filter: types::DepositEventFilter,
-    ) -> Result<impl futures::Stream<Item = Result<types::DepositEvent>> + Send>;
+        from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<types::CurvyPendingNote>> + Send>;
+    /// Streams all committed Curvy notes from an optional inclusive block.
+    ///
+    /// The connector must discard committed notes whose note IDs were not retained
+    /// after successful local ownership detection.
+    /// Because `from_block` is inclusive, reconnecting consumers must deduplicate
+    /// previously processed positions.
+    fn subscribe_curvy_committed_notes(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<types::CurvyCommittedNote>> + Send>;
+    /// Streams committed Curvy nullifiers from an optional inclusive block.
+    fn subscribe_curvy_committed_nullifiers(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<types::CurvyCommittedNullifier>> + Send>;
 }
 
 /// Signed transaction submission and tracking through Blokli.

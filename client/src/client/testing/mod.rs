@@ -512,6 +512,113 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
 
 #[async_trait::async_trait]
 impl<M: BlokliTestStateMutator + Send + Sync> BlokliQueryClient for BlokliTestClient<M> {
+    async fn query_curvy_pending_notes(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyPendingNotes> {
+        Ok(CurvyPendingNotes { notes: Vec::new() })
+    }
+
+    async fn query_curvy_committed_notes(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyCommittedNotes> {
+        Ok(CurvyCommittedNotes { notes: Vec::new() })
+    }
+
+    async fn query_curvy_committed_nullifiers(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyCommittedNullifiers> {
+        Ok(CurvyCommittedNullifiers { nullifiers: Vec::new() })
+    }
+
+    async fn query_curvy_sync_checkpoint(&self, _block_hash: Option<String>) -> Result<CurvySyncCheckpoint> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_sync_notes(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvySyncNotePage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_sync_nullifiers(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvySyncNullifierPage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_shard_roots(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvyShardRootPage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_aggregator_state(&self) -> Result<CurvyAggregatorState> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_note_status(&self, _note_id: String) -> Result<CurvyNoteStatus> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_valid_notes_root(&self, _root: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_nullifier_spent(&self, _nullifier: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_vault_fees(&self) -> Result<CurvyVaultFees> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_aggregator_fees(&self) -> Result<CurvyAggregatorFees> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_vault_token_count(&self) -> Result<CurvyVaultTokenCount> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_vault_token(&self, _token_id: String) -> Result<CurvyVaultToken> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_entry_portal_address(&self, _owner_hash: String, _recovery: String) -> Result<String> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_exit_portal_address(
+        &self,
+        _exit_address: String,
+        _exit_chain_id: String,
+        _recovery: String,
+    ) -> Result<String> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    async fn query_curvy_portal_registered(&self, _portal_address: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
     async fn count_accounts(&self, selector: AccountSelector) -> Result<u32> {
         Ok(match selector {
             AccountSelector::Any => self.state.read().accounts.len() as u32,
@@ -533,7 +640,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliQueryClient for BlokliTestCl
             .ok_or_else(|| ErrorKind::NoData.into())
     }
 
-    async fn query_token_balance(&self, address: &ChainAddress, token: Token) -> Result<HoprBalance> {
+    async fn query_token_balance(&self, address: &ChainAddress, _token: Token) -> Result<HoprBalance> {
         let address = hex::encode(address);
         self.state
             .read()
@@ -848,11 +955,24 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
         Ok(futures::stream::empty())
     }
 
-    fn subscribe_deposit_events(
+    fn subscribe_curvy_pending_notes(
         &self,
-        _after: Option<DepositEventCursor>,
-        _filter: DepositEventFilter,
-    ) -> Result<impl futures::Stream<Item = Result<DepositEvent>> + Send> {
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyPendingNote>> + Send> {
+        Ok(futures::stream::empty())
+    }
+
+    fn subscribe_curvy_committed_notes(
+        &self,
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNote>> + Send> {
+        Ok(futures::stream::empty())
+    }
+
+    fn subscribe_curvy_committed_nullifiers(
+        &self,
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNullifier>> + Send> {
         Ok(futures::stream::empty())
     }
 }

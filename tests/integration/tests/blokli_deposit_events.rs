@@ -5,7 +5,7 @@ use blokli_client::{
     BlokliClient,
     api::{
         BlokliSubscriptionClient,
-        types::{DepositCompletion, DepositDetectionCandidate, DepositEvent, DepositEventFilter},
+        types::{CurvyCommittedNote, CurvyPendingNote},
     },
 };
 use blokli_integration_tests::{
@@ -27,59 +27,38 @@ use tokio::sync::oneshot;
 async fn watch_deposit_lifecycle(
     client: BlokliClient,
     expected_count: usize,
-    candidates_tx: oneshot::Sender<Vec<DepositDetectionCandidate>>,
-) -> Result<DepositCompletion> {
-    // BLOKLI CLIENT: opens the single server subscription and translates raw PendingNotes/CommittedNotes into the
-    // connector-facing DetectionCandidate/Completed vocabulary. It does not retain wallet-specific state.
-    let mut stream = client.subscribe_deposit_events(None, DepositEventFilter::lifecycle())?;
+    candidates_tx: oneshot::Sender<Vec<CurvyPendingNote>>,
+) -> Result<CurvyCommittedNote> {
+    // BLOKLI CLIENT: opens the two streams exposed by the canonical Blokli API.
+    let mut candidates_stream = client.subscribe_curvy_pending_notes(None)?;
+    let mut completions_stream = client.subscribe_curvy_committed_notes(None)?;
 
-    // HOPR CONNECTOR: consumes the client stream and inspects each candidate for local BJJ ownership. The test uses
-    // the first synthetic candidate as the locally owned one instead of performing the real cryptographic check.
-    let first_candidate = loop {
-        let event = stream
-            .next()
-            .timeout(subscription_timeout())
-            .await
-            .context("timed out waiting for the first deposit detection candidate")?
-            .ok_or_else(|| anyhow!("deposit lifecycle subscription ended"))??;
-        if let DepositEvent::DetectionCandidate(candidate) = event {
-            break candidate;
-        }
-    };
+    // HOPR CONNECTOR: consumes the client stream and inspects each note for local BJJ ownership. The test uses
+    // the first synthetic note as the locally owned one instead of performing the real cryptographic check.
+    let first_candidate = candidates_stream
+        .next()
+        .timeout(subscription_timeout())
+        .await
+        .context("timed out waiting for the first pending note")?
+        .ok_or_else(|| anyhow!("pending-note subscription ended"))??;
 
-    // HOPR CONNECTOR: persists the owned note ID and latest processed cursor. On connection loss it asks blokli-client
-    // to reopen the same lifecycle subscription exclusively after that cursor.
-    let resume_cursor = first_candidate.cursor.clone();
-    let resume_components = resume_cursor.components().context("resume cursor is not parsable")?;
-    let owned_note_id = first_candidate.deposit_note_id.clone();
+    // HOPR CONNECTOR: the real implementation calls Curvy's ownership scanner here.
+    let owned_note_id = first_candidate.note_id.0.clone();
     let mut candidate_note_ids = HashSet::from([owned_note_id.clone()]);
-    drop(stream);
-    let mut stream = client.subscribe_deposit_events(Some(resume_cursor), DepositEventFilter::lifecycle())?;
     let mut candidates = Vec::with_capacity(expected_count);
     candidates.push(first_candidate);
 
     while candidates.len() < expected_count {
-        let event = stream
+        let candidate = candidates_stream
             .next()
             .timeout(subscription_timeout())
             .await
-            .context("timed out waiting for a deposit detection candidate")?
-            .ok_or_else(|| anyhow!("deposit lifecycle subscription ended"))??;
-        if let DepositEvent::DetectionCandidate(candidate) = event {
-            let components = candidate
-                .cursor
-                .components()
-                .context("resumed candidate cursor is not parsable")?;
-            if components <= resume_components {
-                return Err(anyhow!(
-                    "resumed subscription re-delivered a candidate at or before the resume cursor"
-                ));
-            }
-            if !candidate_note_ids.insert(candidate.deposit_note_id.clone()) {
-                return Err(anyhow!("resumed subscription re-delivered a candidate note ID"));
-            }
-            candidates.push(candidate);
+            .context("timed out waiting for a pending note")?
+            .ok_or_else(|| anyhow!("pending-note subscription ended"))??;
+        if !candidate_note_ids.insert(candidate.note_id.0.clone()) {
+            return Err(anyhow!("pending-note subscription re-delivered a note ID"));
         }
+        candidates.push(candidate);
     }
 
     // TEST HARNESS: gives the note IDs to the fake Curvy operator below so it can commit this circuit-sized batch.
@@ -90,16 +69,14 @@ async fn watch_deposit_lifecycle(
     // HOPR CONNECTOR: discards commitments for other wallets, correlates the locally owned note ID, and returns the
     // matching completion. In production it translates this result into DepositCompleted for the PIX strategy.
     loop {
-        let event = stream
+        let completion = completions_stream
             .next()
             .timeout(subscription_timeout())
             .await
-            .context("timed out waiting for deposit completion")?
-            .ok_or_else(|| anyhow!("deposit lifecycle subscription ended"))??;
-        if let DepositEvent::Completed(completion) = event {
-            if completion.deposit_note_id == owned_note_id {
-                return Ok(completion);
-            }
+            .context("timed out waiting for a committed note")?
+            .ok_or_else(|| anyhow!("committed-note subscription ended"))??;
+        if completion.note_id.0 == owned_note_id {
+            return Ok(completion);
         }
     }
 }
@@ -107,9 +84,7 @@ async fn watch_deposit_lifecycle(
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-async fn deposit_subscription_detects_resumes_completes_and_withdraws(
-    #[future(awt)] fixture: IntegrationFixture,
-) -> Result<()> {
+async fn deposit_subscriptions_detect_complete_and_withdraw(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     // TEST HARNESS SETUP — performed by neither PIX, the connector, nor blokli-client.
     // It creates privileged contract access used only to drive the combined Anvil+Curvy test chain.
     let test_chain = fixture.curvy_test_chain().await?;
@@ -128,20 +103,16 @@ async fn deposit_subscription_detects_resumes_completes_and_withdraws(
     test_chain.submit_deposit_batch().await?;
 
     // HOPR CONNECTOR — local ownership, correlation, and lifecycle state.
-    // The connector, not blokli-client or PIX, owns the BJJ check, matching note IDs, and resumable cursor. This test
+    // The connector, not blokli-client or PIX, owns the BJJ check, matching note IDs, and catch-up cursor. This test
     // receives those synthetic candidates only to tell the fake Curvy operator which batch it must commit.
     let candidates = candidates_rx
         .await
         .context("deposit lifecycle task ended before detecting candidates")?;
-    let candidate = candidates.first().context("no deposit detection candidates received")?;
-    let cursor = candidates
-        .last()
-        .context("no deposit detection candidates received")?
-        .cursor
-        .clone();
+    let candidate = candidates.first().context("no pending notes received")?;
+    let last_candidate_position = candidates.last().context("no pending notes received")?.position.clone();
     let note_ids = candidates
         .iter()
-        .map(|candidate| candidate.deposit_note_id.parse::<U256>())
+        .map(|candidate| candidate.note_id.0.parse::<U256>())
         .collect::<Result<Vec<_>, _>>()?;
 
     // TEST HARNESS CHAIN ADVANCEMENT — performed by none of PIX, the connector, or blokli-client.
@@ -152,13 +123,10 @@ async fn deposit_subscription_detects_resumes_completes_and_withdraws(
     // HOPR CONNECTOR -> PIX STRATEGY — deliver DepositCompleted.
     // Blokli-client reports a committed note; the connector correlates it and emits the strategy-level signal.
     let completion = lifecycle_handle.await??;
-    assert_eq!(completion.deposit_note_id, candidate.deposit_note_id);
-    let completion_components = completion
-        .cursor
-        .components()
-        .context("completion cursor is not parsable")?;
-    let last_candidate_components = cursor.components().context("candidate cursor is not parsable")?;
-    assert!(completion_components > last_candidate_components);
+    assert_eq!(completion.note_id, candidate.note_id);
+    let completion_block = completion.position.block.0.parse::<u64>()?;
+    let last_candidate_block = last_candidate_position.block.0.parse::<u64>()?;
+    assert!(completion_block >= last_candidate_block);
 
     // PIX STRATEGY + HOPR CONNECTOR + BLOKLI CLIENT — simulated withdrawal submission.
     // The connector would normally derive the nullifiers and produce a real proof from the Exit's BJJ identity. The

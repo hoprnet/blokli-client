@@ -11,9 +11,13 @@ release = false
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 blokli-client = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+curvy-chain-api = { workspace = true }
+curvy-sdk = { workspace = true }
+curvy-types = { workspace = true }
 futures = { workspace = true }
 futures-time = { workspace = true }
 hex = { workspace = true }

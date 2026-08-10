@@ -13,6 +13,9 @@ bytes              = "1.12.1"
 chrono             = "0.4.45"
 clap               = { version = "4.6.1", features = ["derive", "env", "string"] }
 comfy-table        = { version = "7.2.2", default-features = false }
+curvy-chain-api    = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
+curvy-sdk          = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
+curvy-types        = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
 cynic              = "3.13.2"
 cynic-codegen      = "3.13.2"
 eventsource-client = { version = "0.17.5", default-features = false }
@@ -34,7 +37,7 @@ rand = "0.10.2"
 reqwest = { version = "0.13.4", features = ["json"] }
 rstest = "0.26.1"
 semver = "1.0.28"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 serial_test = "3.5.0"
