@@ -26,15 +26,14 @@ impl DockerEnvironment {
     }
 
     pub fn ensure_image_available(&self) -> Result<()> {
-        if self.try_load_local_image()? {
-            return Ok(());
-        }
         if let Some(remote) = &self.config.remote_image {
             return self.pull_remote_image(remote);
         }
+        if self.try_load_local_image()? {
+            return Ok(());
+        }
         bail!(
-            "No local bloklid Docker image found at {} and BLOKLI_TEST_REMOTE_IMAGE is not set. Please run `nix build \
-             .#bloklid-docker-${{arch}}` before running integration tests.",
+            "No usable local bloklid Docker image found at {} and BLOKLI_TEST_REMOTE_IMAGE is not set",
             self.config.project_root.join("result").display()
         );
     }
@@ -63,7 +62,7 @@ impl DockerEnvironment {
                 warn!(
                     error = ?err,
                     path = %result_path.display(),
-                    "failed to load local Docker image, falling back to remote image"
+                    "failed to load local Docker image"
                 );
                 Ok(false)
             }
@@ -161,8 +160,6 @@ impl DockerEnvironment {
         cmd.current_dir(&self.config.integration_dir);
         cmd.env("STACK_ID", &self.config.stack_id);
         cmd.env("BLOKLID_IMAGE", &self.config.bloklid_image);
-        cmd.env("INTEGRATION_CONFIG", &self.config.integration_config);
-        cmd.env("REGISTRY_PORT", self.config.registry_port().to_string());
         cmd.env(
             "ANVIL_PORT",
             self.config
@@ -183,7 +180,7 @@ impl DockerEnvironment {
     }
 
     pub fn fetch_anvil_accounts(&self) -> Result<Vec<AnvilAccount>> {
-        let container = self.container_name("anvil");
+        let container = self.container_name("bloklid");
         let cmd = build_command("docker", &["logs", &container]);
         let logs = capture_command(cmd, &format!("docker logs {container}"))?;
         parse_anvil_accounts(&logs)
@@ -196,12 +193,6 @@ impl Drop for DockerEnvironment {
         if self.running {
             if let Err(err) = self.collect_logs("bloklid", timestamp) {
                 warn!(error = ?err, "failed to collect bloklid logs");
-            }
-            if let Err(err) = self.collect_logs("anvil", timestamp) {
-                warn!(error = ?err, "failed to collect anvil logs");
-            }
-            if let Err(err) = self.collect_logs("registry", timestamp) {
-                warn!(error = ?err, "failed to collect registry logs");
             }
             if let Err(err) = self.compose_down() {
                 warn!(error = ?err, "failed to stop docker-compose stack");
