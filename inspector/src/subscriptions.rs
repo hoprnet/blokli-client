@@ -2,7 +2,7 @@ use blokli_client::{BlokliClient, api::BlokliSubscriptionClient};
 use clap::{Subcommand, ValueEnum};
 use futures::{StreamExt, TryStreamExt};
 
-use crate::{AccountArgs, AltAccount, ChannelArgs, Formats};
+use crate::{AccountArgs, AltAccount, ChannelArgs, Formats, ServiceArgs, ServiceTypeArgs};
 
 #[derive(Debug, Copy, Clone, ValueEnum)]
 pub(crate) enum ChannelAllowedStates {
@@ -26,6 +26,10 @@ pub(crate) enum SubscriptionTarget {
     Health,
     /// Subscribe to Safe deployments.
     SafeDeployments,
+    /// Subscribe to service registry entry changes.
+    Services(ServiceArgs),
+    /// Subscribe to service type and registry-wide configuration changes.
+    ServiceTypes(ServiceTypeArgs),
     /// Subscribe to ticket parameter updates.
     TicketParams,
 }
@@ -102,6 +106,28 @@ impl SubscriptionTarget {
                 })
                 .boxed()),
 
+            SubscriptionTarget::Services(sel) => Ok(client
+                .subscribe_services(sel.try_into()?)?
+                .map_err(anyhow::Error::from)
+                .filter_map(move |f| {
+                    futures::future::ready(
+                        f.and_then(|v| format.serialize(v))
+                            .inspect_err(|e| eprintln!("failed to decode service event: {e}"))
+                            .ok(),
+                    )
+                })
+                .boxed()),
+            SubscriptionTarget::ServiceTypes(sel) => Ok(client
+                .subscribe_service_types(sel.try_into()?)?
+                .map_err(anyhow::Error::from)
+                .filter_map(move |f| {
+                    futures::future::ready(
+                        f.and_then(|v| format.serialize(v))
+                            .inspect_err(|e| eprintln!("failed to decode service type event: {e}"))
+                            .ok(),
+                    )
+                })
+                .boxed()),
             SubscriptionTarget::TicketParams => Ok(client
                 .subscribe_ticket_params()?
                 .map_err(anyhow::Error::from)

@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
-    api::{BlokliQueryClient, SafeSelector, types::Token},
+    api::{BlokliQueryClient, SafeSelector, ServiceSelector, types::Token},
 };
 use mockito::Matcher;
 use tokio::{
@@ -153,6 +153,182 @@ async fn query_safe_returns_empty_vec_when_safe_by_is_null() -> anyhow::Result<(
     assert!(safes.is_empty());
 
     mock.assert_async().await;
+    Ok(())
+}
+
+/// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
+const GVPN_EXIT: [u8; 32] = [
+    0x67, 0x76, 0x70, 0x6e, 0x3a, 0x65, 0x78, 0x69, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0,
+];
+
+#[tokio::test]
+async fn query_services_returns_registry_entries() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+    let recorder = RequestRecorder::default();
+
+    let mock = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("QueryServices".into()))
+        .match_request(recorder.as_matcher())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+              "data": {
+                "services": {
+                  "__typename": "ServicesList",
+                  "services": [
+                    {
+                      "serviceType": "gvpn:exit",
+                      "node": "0x1111111111111111111111111111111111111111",
+                      "safe": "0x3333333333333333333333333333333333333333",
+                      "metadata": "0xdeadbeef",
+                      "registeredAt": 1700000000,
+                      "updatedAt": 1700000100
+                    }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .create_async()
+        .await;
+
+    let entries = cli.query_services(ServiceSelector::ServiceType(GVPN_EXIT)).await?;
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].service_type, "gvpn:exit");
+    assert_eq!(entries[0].node, "0x1111111111111111111111111111111111111111");
+    assert_eq!(entries[0].metadata, "0xdeadbeef");
+    assert_eq!(entries[0].registered_at, 1700000000);
+    assert_eq!(entries[0].updated_at, 1700000100);
+
+    mock.assert_async().await;
+    insta::assert_yaml_snapshot!(recorder.requests());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_services_surfaces_the_missing_filter_error() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+
+    let mock = server
+        .mock("POST", "/graphql")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+              "data": {
+                "services": {
+                  "__typename": "MissingFilterError",
+                  "code": "MISSING_REQUIRED_FILTER",
+                  "message": "at least one of serviceType or node must be provided"
+                }
+              }
+            }"#,
+        )
+        .create_async()
+        .await;
+
+    let error = cli
+        .query_services(ServiceSelector::Node([0x11; 20]))
+        .await
+        .expect_err("a MissingFilterError payload must not decode as a success");
+
+    assert!(error.to_string().contains("MISSING_REQUIRED_FILTER"));
+
+    mock.assert_async().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_services_rejects_an_unfiltered_selector_without_calling_the_server() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+
+    let mock = server.mock("POST", "/graphql").expect(0).create_async().await;
+
+    assert!(cli.query_services(ServiceSelector::Any).await.is_err());
+
+    mock.assert_async().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn count_services_accepts_an_unfiltered_selector() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+    let recorder = RequestRecorder::default();
+
+    let mock = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("QueryServiceCount".into()))
+        .match_request(recorder.as_matcher())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"data":{"serviceCount":{"__typename":"Count","count":7}}}"#)
+        .create_async()
+        .await;
+
+    assert_eq!(cli.count_services(ServiceSelector::Any).await?, 7);
+
+    mock.assert_async().await;
+    insta::assert_yaml_snapshot!(recorder.requests());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_service_types_returns_type_configuration() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+    let recorder = RequestRecorder::default();
+
+    let mock = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("QueryServiceTypes".into()))
+        .match_request(recorder.as_matcher())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+              "data": {
+                "serviceTypes": {
+                  "__typename": "ServiceTypesList",
+                  "serviceTypes": [
+                    {
+                      "serviceType": "gvpn:exit",
+                      "owner": "0x4444444444444444444444444444444444444444",
+                      "requirement": null,
+                      "registrationBurn": "1 wxHOPR",
+                      "updateBurn": "0 wxHOPR"
+                    }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .create_async()
+        .await;
+
+    let types = cli.query_service_types(Some(GVPN_EXIT)).await?;
+
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].service_type, "gvpn:exit");
+    assert_eq!(
+        types[0].owner.as_deref(),
+        Some("0x4444444444444444444444444444444444444444")
+    );
+    assert!(types[0].requirement.is_none());
+    assert_eq!(types[0].registration_burn, "1 wxHOPR");
+
+    mock.assert_async().await;
+    insta::assert_yaml_snapshot!(recorder.requests());
+
     Ok(())
 }
 

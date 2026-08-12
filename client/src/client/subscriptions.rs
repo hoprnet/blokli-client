@@ -3,14 +3,16 @@ use futures::{Stream, TryStreamExt};
 
 use super::{BlokliClient, GraphQlQueries};
 use crate::api::{
-    AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, TicketSelector, TxId,
+    AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId, TicketSelector,
+    TxId,
     internal::{
-        AccountVariables, ChannelsVariables, SubscribeAccounts, SubscribeChannels, SubscribeGraph, SubscribeHealth,
-        SubscribeSafeDeployment, SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
+        AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
+        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceTypes,
+        SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, TicketParameters,
-        Transaction,
+        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceTypeUpdate,
+        ServiceUpdate, TicketParameters, Transaction,
     },
 };
 
@@ -47,6 +49,20 @@ impl GraphQlQueries {
     /// `SubscribeSafeDeployment` subscription GraphQL query.
     pub fn subscribe_safe_deployments() -> cynic::StreamingOperation<SubscribeSafeDeployment, ()> {
         SubscribeSafeDeployment::build(())
+    }
+
+    /// `SubscribeServices` subscription GraphQL query.
+    pub fn subscribe_services(
+        selector: ServiceSelector,
+    ) -> cynic::StreamingOperation<SubscribeServices, ServiceVariables> {
+        SubscribeServices::build(ServiceVariables::from(selector))
+    }
+
+    /// `SubscribeServiceTypes` subscription GraphQL query.
+    pub fn subscribe_service_types(
+        service_type: Option<ServiceTypeId>,
+    ) -> cynic::StreamingOperation<SubscribeServiceTypes, ServiceTypeVariables> {
+        SubscribeServiceTypes::build(ServiceTypeVariables::from(service_type))
     }
 
     /// `SubscribeTicketRedeemed` subscription GraphQL query.
@@ -98,6 +114,26 @@ impl BlokliSubscriptionClient for BlokliClient {
         Ok(self
             .build_subscription_stream(GraphQlQueries::subscribe_safe_deployments())?
             .try_filter_map(|item| futures::future::ok(Some(item.safe_deployed))))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_services(
+        &self,
+        selector: ServiceSelector,
+    ) -> Result<impl Stream<Item = Result<ServiceUpdate>> + Send> {
+        Ok(self
+            .build_subscription_stream(GraphQlQueries::subscribe_services(selector))?
+            .try_filter_map(|item| futures::future::ok(Some(item.service_updated))))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_service_types(
+        &self,
+        service_type: Option<ServiceTypeId>,
+    ) -> Result<impl Stream<Item = Result<ServiceTypeUpdate>> + Send> {
+        Ok(self
+            .build_subscription_stream(GraphQlQueries::subscribe_service_types(service_type))?
+            .try_filter_map(|item| futures::future::ok(Some(item.service_type_updated))))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]

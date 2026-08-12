@@ -3,9 +3,11 @@ use std::{str::FromStr, time::Duration};
 use anyhow::{Context, Result};
 use blokli_client::api::{
     AccountSelector, BlokliQueryClient, ChannelFilter, ChannelSelector, RedeemedStatsSelector, SafeSelector,
+    ServiceSelector,
     types::{ChannelStatus, Token, TransactionStatus},
 };
 use blokli_integration_tests::{
+    anvil::AnvilAccount,
     constants::parsed_safe_balance,
     fixtures::{IntegrationFixture, integration_fixture as fixture, poll_until},
 };
@@ -13,7 +15,10 @@ use hex::{FromHex, ToHex};
 use hopr_bindings::exports::alloy::primitives::{Address, U256};
 use hopr_types::{
     crypto::keypairs::Keypair,
-    internal::channels::generate_channel_id,
+    internal::{
+        channels::generate_channel_id,
+        service::{ServiceMetadata, ServiceType},
+    },
     primitive::prelude::{HoprBalance, XDaiBalance, XHoprBalance},
 };
 use rstest::*;
@@ -863,5 +868,158 @@ async fn query_compatibility_should_be_parsable(#[future(awt)] fixture: Integrat
 /// verifies that the health status returned by blokli is "ok".
 async fn query_health_should_be_ok(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     assert_eq!(fixture.client().query_health().await?, "ok");
+    Ok(())
+}
+
+/// Builds a service type id that no other test in the same stack claims.
+///
+/// A type claim is one-shot and first come, first served, so a shared id makes the second test to run revert with
+/// `TypeAlreadyRegistered`. Deriving the id from the node keeps it unique per test and per sampled account.
+fn unique_service_type(prefix: &str, node: &AnvilAccount) -> Result<ServiceType> {
+    let node_hex = node.address.to_string();
+    let suffix = node_hex
+        .trim_start_matches("0x")
+        .get(..8)
+        .context("node address is shorter than expected")?;
+
+    Ok(format!("{prefix}:{suffix}").parse()?)
+}
+
+fn hex_eq(actual: &str, expected: &str) -> bool {
+    actual
+        .trim_start_matches("0x")
+        .eq_ignore_ascii_case(expected.trim_start_matches("0x"))
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// claims a service type, registers a node under it through the safe bound to the node, and verifies that blokli
+/// indexes the entry and serves it through `services` and `serviceTypes`.
+async fn query_services_returns_a_registered_entry(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [node] = fixture.sample_accounts::<1>();
+    let safe = fixture.deploy_safe_and_announce(node, parsed_safe_balance()).await?;
+    let service_type = unique_service_type("qsvc", node)?;
+    let metadata = ServiceMetadata::try_from(b"blokli-client integration".to_vec())?;
+
+    fixture.register_service_type(node, &service_type).await?;
+    fixture
+        .self_register_service(&safe.address, node, &service_type, &metadata)
+        .await?;
+
+    let client = fixture.client().clone();
+    let selector = ServiceSelector::ServiceType(service_type.as_encoded());
+    let entry = poll_until(
+        "service registry entry indexing",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let client = client.clone();
+            async move { Ok(client.query_services(selector).await?.into_iter().next()) }
+        },
+    )
+    .await?;
+
+    assert_eq!(entry.service_type, service_type.to_string());
+    assert!(
+        hex_eq(&entry.node, &node.address.to_string()),
+        "indexed entry node {} should be the registering node",
+        entry.node
+    );
+    assert!(
+        hex_eq(&entry.safe, &safe.address),
+        "indexed entry safe {} should be the safe bound to the node",
+        entry.safe
+    );
+    assert!(hex_eq(&entry.metadata, &metadata.as_ref().encode_hex::<String>()));
+    assert_eq!(
+        entry.registered_at, entry.updated_at,
+        "a fresh registration has not been updated yet"
+    );
+
+    assert_eq!(fixture.client().count_services(selector).await?, 1);
+
+    let types = fixture
+        .client()
+        .query_service_types(Some(service_type.as_encoded()))
+        .await?;
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].service_type, service_type.to_string());
+    assert!(
+        types[0]
+            .owner
+            .as_deref()
+            .is_some_and(|owner| hex_eq(owner, &node.address.to_string())),
+        "the claiming account owns the type"
+    );
+    assert_eq!(types[0].registration_burn, "0");
+    assert_eq!(types[0].update_burn, "0");
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// registers an entry, replaces its metadata, and verifies that blokli reports the new metadata while keeping the
+/// original registration timestamp.
+async fn query_services_reflects_a_metadata_update(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [node] = fixture.sample_accounts::<1>();
+    let safe = fixture.deploy_safe_and_announce(node, parsed_safe_balance()).await?;
+    let service_type = unique_service_type("usvc", node)?;
+    let initial = ServiceMetadata::try_from(b"initial".to_vec())?;
+    let replacement = ServiceMetadata::try_from(b"replacement".to_vec())?;
+
+    fixture.register_service_type(node, &service_type).await?;
+    fixture
+        .self_register_service(&safe.address, node, &service_type, &initial)
+        .await?;
+
+    let client = fixture.client().clone();
+    let selector = ServiceSelector::ServiceTypeAndNode {
+        service_type: service_type.as_encoded(),
+        node: node.to_alloy_address().into(),
+    };
+    let registered = poll_until(
+        "service registry entry indexing",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let client = client.clone();
+            async move { Ok(client.query_services(selector).await?.into_iter().next()) }
+        },
+    )
+    .await?;
+
+    fixture
+        .self_update_service(&safe.address, node, &service_type, &replacement)
+        .await?;
+
+    let expected_metadata = replacement.as_ref().encode_hex::<String>();
+    let client = fixture.client().clone();
+    let updated = poll_until(
+        "service registry metadata update indexing",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let client = client.clone();
+            let expected_metadata = expected_metadata.clone();
+            async move {
+                Ok(client
+                    .query_services(selector)
+                    .await?
+                    .into_iter()
+                    .find(|entry| hex_eq(&entry.metadata, &expected_metadata)))
+            }
+        },
+    )
+    .await?;
+
+    assert_eq!(updated.registered_at, registered.registered_at);
+    assert!(
+        updated.updated_at >= registered.updated_at,
+        "an update never moves updatedAt backwards"
+    );
+
     Ok(())
 }

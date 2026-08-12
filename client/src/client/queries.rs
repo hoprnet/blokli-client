@@ -189,6 +189,23 @@ impl GraphQlQueries {
         })
     }
 
+    /// `ServiceCount` GraphQL query.
+    pub fn count_services(selector: ServiceSelector) -> cynic::Operation<QueryServiceCount, ServiceVariables> {
+        QueryServiceCount::build(ServiceVariables::from(selector))
+    }
+
+    /// `Services` GraphQL query.
+    pub fn query_services(selector: ServiceSelector) -> cynic::Operation<QueryServices, ServiceVariables> {
+        QueryServices::build(ServiceVariables::from(selector))
+    }
+
+    /// `ServiceTypes` GraphQL query.
+    pub fn query_service_types(
+        service_type: Option<ServiceTypeId>,
+    ) -> cynic::Operation<QueryServiceTypes, ServiceTypeVariables> {
+        QueryServiceTypes::build(ServiceTypeVariables::from(service_type))
+    }
+
     /// `Transaction` GraphQL query.
     pub fn query_transaction(id: TxId) -> cynic::Operation<QueryTransaction, TransactionsVariables> {
         QueryTransaction::build(TransactionsVariables { id: id.into() })
@@ -342,6 +359,33 @@ impl BlokliQueryClient for BlokliClient {
         }
 
         Ok(channels)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn count_services(&self, selector: ServiceSelector) -> Result<u32> {
+        let resp = self.build_query(GraphQlQueries::count_services(selector))?.await?;
+
+        response_to_data(resp)?.service_count.into()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        if matches!(selector, ServiceSelector::Any) {
+            return Err(ErrorKind::InvalidInput("filter must be specified on service query").into());
+        }
+
+        let resp = self.build_query(GraphQlQueries::query_services(selector))?.await?;
+
+        response_to_data(resp)?.services.into()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn query_service_types(&self, service_type: Option<ServiceTypeId>) -> Result<Vec<ServiceTypeInfo>> {
+        let resp = self
+            .build_query(GraphQlQueries::query_service_types(service_type))?
+            .await?;
+
+        response_to_data(resp)?.service_types.into()
     }
 
     #[tracing::instrument(level = "debug", skip(self))]

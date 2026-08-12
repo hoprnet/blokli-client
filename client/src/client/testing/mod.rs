@@ -5,8 +5,8 @@
 //! when library consumers need deterministic tests without running a Blokli service.
 //!
 //! The client starts from a [`BlokliTestState`]. Submitted transactions are passed to a
-//! [`BlokliTestStateMutator`], which may update that state. The client then broadcasts account, channel, safe, and
-//! ticket-parameter changes to active subscriptions.
+//! [`BlokliTestStateMutator`], which may update that state. The client then broadcasts account, channel, safe,
+//! service-registry, and ticket-parameter changes to active subscriptions.
 //!
 //! This is a test double, not a byte-for-byte Blokli server emulator. It enforces basic consistency checks and keeps
 //! subscription behavior close to the public traits, but callers remain responsible for modeling the state transitions
@@ -25,7 +25,7 @@ use hopr_types::{crypto::types::Hash, primitive::prelude::HoprBalance as Primiti
 use indexmap::IndexMap;
 
 use crate::{
-    api::{types::*, *},
+    api::{types::*, v1::graphql::services::service_type_name, *},
     errors::{BlokliClientError, ErrorKind, InternalTxError, TrackingErrorKind},
 };
 
@@ -61,6 +61,10 @@ pub struct BlokliTestState {
     pub tx_counts: IndexMap<String, u64>,
     /// Contains ChannelId -> Channel.
     pub channels: IndexMap<String, Channel>,
+    /// Contains service registry entries, keyed by [`BlokliTestState::service_entry_key`].
+    pub services: IndexMap<String, ServiceEntry>,
+    /// Contains service type configuration, keyed by [`ServiceTypeInfo::service_type`].
+    pub service_types: IndexMap<String, ServiceTypeInfo>,
     /// Contains chain info.
     pub chain_info: ChainInfo,
     /// Version of the Blokli server.
@@ -86,6 +90,8 @@ impl PartialEq for BlokliTestState {
             && self.safe_redeem_stats == other.safe_redeem_stats
             && self.tx_counts == other.tx_counts
             && self.channels == other.channels
+            && self.services == other.services
+            && self.service_types == other.service_types
             && self.chain_info == other.chain_info
             && self.version == other.version
             && self.health == other.health
@@ -103,6 +109,8 @@ impl Default for BlokliTestState {
             safe_redeem_stats: Default::default(),
             tx_counts: Default::default(),
             channels: Default::default(),
+            services: Default::default(),
+            service_types: Default::default(),
             chain_info: ChainInfo {
                 channel_closure_grace_period: Uint64("300".into()),
                 channel_dst: Some("0000000000000000000000000000000000000000000000000000000000000000".into()),
@@ -126,9 +134,11 @@ impl Default for BlokliTestState {
                     "node_safe_registry": "0x4F7C7dE3BA2B29ED8B2448dF2213cA43f94E45c0",
                     "node_stake_factory": "0x791d190b2c95397F4BcE7bD8032FD67dCEA7a5F2",
                     "node_safe_migration": "0x0000000000000000000000000000000000000000",
+                    "service_registry": "0x9A676e781A523b5d0C0e43731313A708CB607508",
                     "token": "0xD4fdec44DB9D44B8f2b6d529620f9C0C7066A2c1",
                     "ticket_price_oracle": "0x442df1d946303fB088C9377eefdaeA84146DA0A6",
-                    "winning_probability_oracle": "0xC15675d4CCa538D91a91a8D3EcFBB8499C3B0471"
+                    "winning_probability_oracle": "0xC15675d4CCa538D91a91a8D3EcFBB8499C3B0471",
+                    "xhopr_token": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0"
                 }"#
                     .into(),
                 ),
@@ -146,6 +156,46 @@ impl Default for BlokliTestState {
 impl BlokliTestState {
     fn safe_matches_owner(safe: &Safe, owner_hex: &str) -> bool {
         safe.chain_key == owner_hex || safe.owners.iter().any(|owner| owner == owner_hex)
+    }
+
+    /// Builds the [`services`](BlokliTestState::services) key for a service type and node address.
+    ///
+    /// The key is `"<service type>/<node address>"`, where the service type is written the way Blokli renders it -
+    /// the ASCII name, or `0x`-prefixed hex - and the node address is hex, with or without a `0x` prefix.
+    pub fn service_entry_key(service_type: &str, node: &ChainAddress) -> String {
+        format!("{service_type}/{}", hex::encode(node))
+    }
+
+    /// Convenience method to return a reference to the [`ServiceEntry`] of a node for a service type.
+    pub fn get_service_entry(&self, service_type: &ServiceTypeId, node: &ChainAddress) -> Option<&ServiceEntry> {
+        self.services
+            .values()
+            .find(|entry| service_type_matches(&entry.service_type, service_type) && hex_matches(&entry.node, node))
+    }
+
+    /// Convenience method to return a mutable reference to the [`ServiceEntry`] of a node for a service type.
+    pub fn get_service_entry_mut(
+        &mut self,
+        service_type: &ServiceTypeId,
+        node: &ChainAddress,
+    ) -> Option<&mut ServiceEntry> {
+        self.services
+            .values_mut()
+            .find(|entry| service_type_matches(&entry.service_type, service_type) && hex_matches(&entry.node, node))
+    }
+
+    /// Convenience method to return a reference to the [`ServiceTypeInfo`] of a service type.
+    pub fn get_service_type(&self, service_type: &ServiceTypeId) -> Option<&ServiceTypeInfo> {
+        self.service_types
+            .values()
+            .find(|info| service_type_matches(&info.service_type, service_type))
+    }
+
+    /// Convenience method to return a mutable reference to the [`ServiceTypeInfo`] of a service type.
+    pub fn get_service_type_mut(&mut self, service_type: &ServiceTypeId) -> Option<&mut ServiceTypeInfo> {
+        self.service_types
+            .values_mut()
+            .find(|info| service_type_matches(&info.service_type, service_type))
     }
 
     /// Convenience method to return a reference to an [`Account`] with a given [`ChainAddress`].
@@ -280,6 +330,16 @@ type TicketParamEvents = (
 
 type SafeDeployEvents = (async_broadcast::Sender<Safe>, async_broadcast::InactiveReceiver<Safe>);
 
+type ServiceEvents = (
+    async_broadcast::Sender<ServiceUpdate>,
+    async_broadcast::InactiveReceiver<ServiceUpdate>,
+);
+
+type ServiceTypeEvents = (
+    async_broadcast::Sender<ServiceTypeUpdate>,
+    async_broadcast::InactiveReceiver<ServiceTypeUpdate>,
+);
+
 /// Snapshot of the [`BlokliTestState`] inside a [`BlokliTestClient`].
 ///
 /// Snapshots are cheap handles containing a cloned state view. Call [`refresh`](BlokliTestStateSnapshot::refresh) to
@@ -336,6 +396,8 @@ pub struct BlokliTestClient<M> {
     channels_channel: GraphEvents,
     ticket_channel: TicketParamEvents,
     safe_deployed_channel: SafeDeployEvents,
+    services_channel: ServiceEvents,
+    service_types_channel: ServiceTypeEvents,
     tx_simulation_delay: Duration,
     use_internal_txs: bool,
 }
@@ -368,6 +430,44 @@ fn account_matches(account: &Account, selector: &AccountSelector) -> bool {
     }
 }
 
+/// Compares a hexadecimal string from a fixture with raw bytes, tolerating a `0x` prefix and either case.
+fn hex_matches(value: &str, expected: &[u8]) -> bool {
+    value
+        .trim_start_matches("0x")
+        .eq_ignore_ascii_case(&hex::encode(expected))
+}
+
+/// Matches a service type as Blokli renders it against a raw [`ServiceTypeId`].
+///
+/// Both renderings are accepted, so a fixture can spell a type either as its ASCII name or as hex.
+fn service_type_matches(rendered: &str, wanted: &ServiceTypeId) -> bool {
+    hex_matches(rendered, wanted) || service_type_name(wanted).is_some_and(|name| rendered == name)
+}
+
+fn service_matches(service_type: &str, node: &str, selector: &ServiceSelector) -> bool {
+    match selector {
+        ServiceSelector::ServiceType(wanted) => service_type_matches(service_type, wanted),
+        ServiceSelector::Node(wanted) => hex_matches(node, wanted),
+        ServiceSelector::ServiceTypeAndNode {
+            service_type: wanted_type,
+            node: wanted_node,
+        } => service_type_matches(service_type, wanted_type) && hex_matches(node, wanted_node),
+        ServiceSelector::Any => true,
+    }
+}
+
+fn broadcast_or_log<T: Clone>(sender: &async_broadcast::Sender<T>, value: T, description: &str) {
+    match sender.try_broadcast(value) {
+        Err(TrySendError::Full(_)) => {
+            tracing::error!("failed to broadcast {description} - channel is full");
+        }
+        Err(TrySendError::Closed(_)) => {
+            tracing::error!("failed to broadcast {description} - channel is closed");
+        }
+        _ => {}
+    }
+}
+
 impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
     /// Constructs a new client that owns the given [`initial_state`](BlokliTestState).
     ///
@@ -390,6 +490,14 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
         safes_tx.set_await_active(false);
         safes_tx.set_overflow(false);
 
+        let (mut services_tx, services_rx) = async_broadcast::broadcast(1024);
+        services_tx.set_await_active(false);
+        services_tx.set_overflow(false);
+
+        let (mut service_types_tx, service_types_rx) = async_broadcast::broadcast(1024);
+        service_types_tx.set_await_active(false);
+        service_types_tx.set_overflow(false);
+
         Self {
             state: Arc::new(parking_lot::RwLock::new(initial_state)),
             mutator,
@@ -397,6 +505,8 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             channels_channel: (channels_tx, channels_rx.deactivate()),
             ticket_channel: (tickets_tx, tickets_rx.deactivate()),
             safe_deployed_channel: (safes_tx, safes_rx.deactivate()),
+            services_channel: (services_tx, services_rx.deactivate()),
+            service_types_channel: (service_types_tx, service_types_rx.deactivate()),
             tx_simulation_delay: Duration::from_secs(1),
             use_internal_txs: false,
         }
@@ -505,6 +615,17 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             .accounts
             .values()
             .filter(|a| account_matches(a, &selector))
+            .cloned()
+            .collect())
+    }
+
+    fn do_query_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        Ok(self
+            .state
+            .read()
+            .services
+            .values()
+            .filter(|entry| service_matches(&entry.service_type, &entry.node, &selector))
             .cloned()
             .collect())
     }
@@ -690,6 +811,32 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliQueryClient for BlokliTestCl
         })
     }
 
+    async fn count_services(&self, selector: ServiceSelector) -> Result<u32> {
+        Ok(match selector {
+            ServiceSelector::Any => self.state.read().services.len() as u32,
+            selector => self.do_query_services(selector)?.len() as u32,
+        })
+    }
+
+    async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        if matches!(selector, ServiceSelector::Any) {
+            return Err(ErrorKind::InvalidInput("filter must be specified on service query").into());
+        }
+
+        self.do_query_services(selector)
+    }
+
+    async fn query_service_types(&self, service_type: Option<ServiceTypeId>) -> Result<Vec<ServiceTypeInfo>> {
+        Ok(self
+            .state
+            .read()
+            .service_types
+            .values()
+            .filter(|info| service_type.is_none_or(|wanted| service_type_matches(&info.service_type, &wanted)))
+            .cloned()
+            .collect())
+    }
+
     async fn query_transaction_status(&self, tx_id: TxId) -> Result<Transaction> {
         self.state
             .read()
@@ -827,6 +974,48 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
             .map(Ok))
     }
 
+    /// Streams registry entry changes produced by simulated transactions.
+    ///
+    /// Unlike [`subscribe_channels`](BlokliTestClient::subscribe_channels), the stream does not replay the current
+    /// state first: the Blokli subscription only emits registrations, updates and deregistrations.
+    fn subscribe_services(
+        &self,
+        selector: ServiceSelector,
+    ) -> Result<impl Stream<Item = Result<ServiceUpdate>> + Send> {
+        Ok(self
+            .services_channel
+            .1
+            .activate_cloned()
+            .filter(move |update| {
+                futures::future::ready(service_matches(&update.service_type, &update.node, &selector))
+            })
+            .map(Ok))
+    }
+
+    /// Streams service type configuration changes produced by simulated transactions.
+    ///
+    /// The two registry-wide kinds, [`ServiceTypeUpdateKind::RegistrationFeeChanged`] and
+    /// [`ServiceTypeUpdateKind::RegistryPointerChanged`], are never emitted: [`BlokliTestState`] models per-type
+    /// configuration only.
+    fn subscribe_service_types(
+        &self,
+        service_type: Option<ServiceTypeId>,
+    ) -> Result<impl Stream<Item = Result<ServiceTypeUpdate>> + Send> {
+        Ok(self
+            .service_types_channel
+            .1
+            .activate_cloned()
+            .filter(move |update| {
+                futures::future::ready(service_type.is_none_or(|wanted| {
+                    update
+                        .service_type
+                        .as_deref()
+                        .is_some_and(|rendered| service_type_matches(rendered, &wanted))
+                }))
+            })
+            .map(Ok))
+    }
+
     fn subscribe_track_transaction(
         &self,
         tx_id: TxId,
@@ -849,14 +1038,117 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
     }
 }
 
+/// Broadcast senders that [`simulate_tx_execution`] notifies once the mutator has been applied.
+struct SubscriptionSenders<'a> {
+    accounts: &'a async_broadcast::Sender<Account>,
+    channels: &'a async_broadcast::Sender<(Account, Channel, Account)>,
+    tickets: &'a async_broadcast::Sender<TicketParameters>,
+    safes: &'a async_broadcast::Sender<Safe>,
+    services: &'a async_broadcast::Sender<ServiceUpdate>,
+    service_types: &'a async_broadcast::Sender<ServiceTypeUpdate>,
+}
+
+impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
+    fn subscription_senders(&self) -> SubscriptionSenders<'_> {
+        SubscriptionSenders {
+            accounts: &self.accounts_channel.0,
+            channels: &self.channels_channel.0,
+            tickets: &self.ticket_channel.0,
+            safes: &self.safe_deployed_channel.0,
+            services: &self.services_channel.0,
+            service_types: &self.service_types_channel.0,
+        }
+    }
+}
+
+/// Broadcasts the registry entry changes between two states.
+///
+/// Removals are broadcast as [`ServiceUpdateKind::Deregistered`] rather than rejected, unlike the removals guarded
+/// against in [`simulate_tx_execution`]: deregistration is a first-class registry operation.
+fn broadcast_service_changes(
+    old_state: &BlokliTestState,
+    state: &BlokliTestState,
+    services_channel: &async_broadcast::Sender<ServiceUpdate>,
+) {
+    for (key, old_entry) in &old_state.services {
+        if !state.services.contains_key(key) {
+            broadcast_or_log(
+                services_channel,
+                ServiceUpdate {
+                    kind: ServiceUpdateKind::Deregistered,
+                    service_type: old_entry.service_type.clone(),
+                    node: old_entry.node.clone(),
+                    entry: None,
+                },
+                "service deregistration",
+            );
+        }
+    }
+
+    for (key, new_entry) in &state.services {
+        let kind = match old_state.services.get(key) {
+            None => ServiceUpdateKind::Registered,
+            Some(old_entry) if old_entry != new_entry => ServiceUpdateKind::Updated,
+            Some(_) => continue,
+        };
+
+        broadcast_or_log(
+            services_channel,
+            ServiceUpdate {
+                kind,
+                service_type: new_entry.service_type.clone(),
+                node: new_entry.node.clone(),
+                entry: Some(new_entry.clone()),
+            },
+            "service entry change",
+        );
+    }
+}
+
+/// Broadcasts the per-type configuration changes between two states.
+///
+/// One event is emitted per changed field, matching the on-chain events. The two registry-wide kinds are never
+/// emitted, because [`BlokliTestState`] models per-type configuration only.
+fn broadcast_service_type_changes(
+    old_state: &BlokliTestState,
+    state: &BlokliTestState,
+    service_types_channel: &async_broadcast::Sender<ServiceTypeUpdate>,
+) {
+    for (key, new_type) in &state.service_types {
+        let kinds: Vec<ServiceTypeUpdateKind> = match old_state.service_types.get(key) {
+            None => vec![ServiceTypeUpdateKind::Registered],
+            Some(old_type) => [
+                (old_type.owner != new_type.owner).then_some(ServiceTypeUpdateKind::OwnerChanged),
+                (old_type.requirement != new_type.requirement).then_some(ServiceTypeUpdateKind::RequirementChanged),
+                (old_type.registration_burn != new_type.registration_burn)
+                    .then_some(ServiceTypeUpdateKind::RegistrationBurnChanged),
+                (old_type.update_burn != new_type.update_burn).then_some(ServiceTypeUpdateKind::UpdateBurnChanged),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        };
+
+        for kind in kinds {
+            broadcast_or_log(
+                service_types_channel,
+                ServiceTypeUpdate {
+                    kind,
+                    service_type: Some(new_type.service_type.clone()),
+                    config: Some(new_type.clone()),
+                    registry_config: None,
+                },
+                "service type change",
+            );
+        }
+    }
+}
+
 fn simulate_tx_execution(
     signed_tx: &[u8],
     state: &mut BlokliTestState,
     mutator: &dyn BlokliTestStateMutator,
-    accounts_channel: &async_broadcast::Sender<Account>,
-    channels_channel: &async_broadcast::Sender<(Account, Channel, Account)>,
-    ticket_channel: &async_broadcast::Sender<TicketParameters>,
-    safe_deployed_channel: &async_broadcast::Sender<Safe>,
+    senders: SubscriptionSenders<'_>,
 ) -> Result<()> {
     let old_state = state.clone();
     if let Err(error) = mutator.update_state(signed_tx, state) {
@@ -894,6 +1186,13 @@ fn simulate_tx_execution(
         return Err(ErrorKind::MockClientError(anyhow::anyhow!("mutation cannot remove active txs")).into());
     }
 
+    // Service registry entries are deliberately absent from these guards, because deregistration removes an entry.
+    // Service types are guarded, because abandoning a type clears its owner instead of removing the type.
+    if old_state.service_types.len() > state.service_types.len() {
+        *state = old_state;
+        return Err(ErrorKind::MockClientError(anyhow::anyhow!("mutation cannot remove service types")).into());
+    }
+
     // Compare accounts and broadcast changes
     state
         .accounts
@@ -906,7 +1205,7 @@ fn simulate_tx_execution(
             })
         })
         .for_each(
-            |(_, changed_account)| match accounts_channel.try_broadcast(changed_account.clone()) {
+            |(_, changed_account)| match senders.accounts.try_broadcast(changed_account.clone()) {
                 Err(TrySendError::Full(_)) => {
                     tracing::error!("failed to broadcast account change - channel is full");
                 }
@@ -935,7 +1234,7 @@ fn simulate_tx_execution(
                 .map(|(source, destination)| (source, changed_channel.clone(), destination))
         })
         .for_each(|(source, changed_channel, destination)| {
-            match channels_channel.try_broadcast((source, changed_channel, destination)) {
+            match senders.channels.try_broadcast((source, changed_channel, destination)) {
                 Err(TrySendError::Full(_)) => {
                     tracing::error!("failed to broadcast channel change - channel is full");
                 }
@@ -949,7 +1248,7 @@ fn simulate_tx_execution(
     if state.chain_info.min_ticket_winning_probability != old_state.chain_info.min_ticket_winning_probability
         || state.chain_info.ticket_price != old_state.chain_info.ticket_price
     {
-        match ticket_channel.try_broadcast(TicketParameters {
+        match senders.tickets.try_broadcast(TicketParameters {
             min_ticket_winning_probability: state.chain_info.min_ticket_winning_probability,
             ticket_price: state.chain_info.ticket_price.clone(),
         }) {
@@ -974,7 +1273,7 @@ fn simulate_tx_execution(
                 .is_none_or(|old_safe| old_safe != new_safe)
         })
         .for_each(
-            |(_, changed_safe)| match safe_deployed_channel.try_broadcast(changed_safe.clone()) {
+            |(_, changed_safe)| match senders.safes.try_broadcast(changed_safe.clone()) {
                 Err(TrySendError::Full(_)) => {
                     tracing::error!("failed to broadcast safe change - channel is full");
                 }
@@ -984,6 +1283,9 @@ fn simulate_tx_execution(
                 _ => {}
             },
         );
+
+    broadcast_service_changes(&old_state, state, senders.services);
+    broadcast_service_type_changes(&old_state, state, senders.service_types);
 
     Ok(())
 }
@@ -995,15 +1297,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
         rand::fill(&mut tx_receipt);
 
         let mut state = self.state.write();
-        if let Err(error) = simulate_tx_execution(
-            signed_tx,
-            &mut state,
-            &self.mutator,
-            &self.accounts_channel.0,
-            &self.channels_channel.0,
-            &self.ticket_channel.0,
-            &self.safe_deployed_channel.0,
-        ) {
+        if let Err(error) = simulate_tx_execution(signed_tx, &mut state, &self.mutator, self.subscription_senders()) {
             tracing::error!(%error, signed_tx_data = hex::encode(signed_tx), "failed to execute transaction, state reverted");
         } else {
             tracing::debug!("transaction execution succeeded");
@@ -1024,10 +1318,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
             signed_tx,
             &mut state,
             &self.mutator,
-            &self.accounts_channel.0,
-            &self.channels_channel.0,
-            &self.ticket_channel.0,
-            &self.safe_deployed_channel.0,
+            self.subscription_senders(),
         )
         .map(|_| {
             tracing::debug!("transaction execution succeeded");
@@ -1077,10 +1368,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
             signed_tx,
             &mut state,
             &self.mutator,
-            &self.accounts_channel.0,
-            &self.channels_channel.0,
-            &self.ticket_channel.0,
-            &self.safe_deployed_channel.0,
+            self.subscription_senders(),
         )
         .inspect_err(|error| {
             tracing::error!(%error, signed_tx_data = hex::encode(signed_tx), "failed to execute transaction, state reverted");
@@ -1111,5 +1399,272 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
             TransactionStatus::Reverted => Err(ErrorKind::TrackingError(TrackingErrorKind::Reverted).into()),
             _ => Err(ErrorKind::MockClientError(anyhow::anyhow!("unexpected transaction status")).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use futures::StreamExt;
+
+    use super::{
+        BlokliQueryClient, BlokliSubscriptionClient, BlokliTestClient, BlokliTestState, BlokliTransactionClient,
+        ChainAddress, NopStateMutator, Result, ServiceEntry, ServiceSelector, ServiceTypeInfo, ServiceTypeUpdateKind,
+        ServiceUpdateKind,
+    };
+
+    /// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
+    const GVPN_EXIT: [u8; 32] = [
+        0x67, 0x76, 0x70, 0x6e, 0x3a, 0x65, 0x78, 0x69, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
+    ];
+    const NODE: ChainAddress = [0x11; 20];
+    const OTHER_NODE: ChainAddress = [0x22; 20];
+
+    fn entry(service_type: &str, node: &ChainAddress) -> ServiceEntry {
+        ServiceEntry {
+            service_type: service_type.to_string(),
+            node: hex::encode(node),
+            safe: hex::encode([0x33; 20]),
+            metadata: "0xdeadbeef".to_string(),
+            registered_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
+        }
+    }
+
+    fn service_type_info(service_type: &str, owner: Option<&str>) -> ServiceTypeInfo {
+        ServiceTypeInfo {
+            service_type: service_type.to_string(),
+            owner: owner.map(str::to_string),
+            requirement: None,
+            registration_burn: "1 wxHOPR".to_string(),
+            update_burn: "0 wxHOPR".to_string(),
+        }
+    }
+
+    fn state_with_entries() -> BlokliTestState {
+        let mut state = BlokliTestState::default();
+        state.services.insert(
+            BlokliTestState::service_entry_key("gvpn:exit", &NODE),
+            entry("gvpn:exit", &NODE),
+        );
+        state.services.insert(
+            BlokliTestState::service_entry_key("gvpn:relay", &OTHER_NODE),
+            entry("gvpn:relay", &OTHER_NODE),
+        );
+        state
+    }
+
+    /// `hopr_types::chain::ContractAddresses` puts `#[serde(default)]` on none of its fields, so a key missing from
+    /// this blob is a runtime failure on the first transaction of any consumer test, not a compile error.
+    #[test]
+    fn default_contract_addresses_include_the_service_registry() -> anyhow::Result<()> {
+        let blob = BlokliTestState::default().chain_info.contract_addresses.0;
+        let addresses: BTreeMap<String, String> = serde_json::from_str(&blob)?;
+
+        // Consumers deserialize this blob into `hopr_types::chain::ContractAddresses`, which
+        // under `use-bindings` is the bindings struct and carries no `#[serde(default)]` on any
+        // field. A missing key is therefore a runtime failure on the first transaction of every
+        // test that builds a dynamic client without calling a `with_*_chain_info` builder - and
+        // it cannot fail to compile, because this is a string literal. This crate deliberately
+        // does not depend on `hopr-types/chain`, so the field list is spelled out here instead
+        // of being derived; keep it in step with that struct.
+        let required = [
+            "announcements",
+            "channels",
+            "module_implementation",
+            "node_safe_migration",
+            "node_safe_registry",
+            "node_stake_factory",
+            "service_registry",
+            "ticket_price_oracle",
+            "token",
+            "winning_probability_oracle",
+            "xhopr_token",
+        ];
+
+        let missing: Vec<&str> = required
+            .into_iter()
+            .filter(|key| !addresses.contains_key(*key))
+            .collect();
+
+        assert_eq!(Vec::<&str>::new(), missing);
+        insta::assert_yaml_snapshot!(addresses);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_services_rejects_the_any_selector() {
+        let client = BlokliTestClient::new(state_with_entries(), NopStateMutator);
+
+        assert!(client.query_services(ServiceSelector::Any).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn count_services_accepts_the_any_selector() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(state_with_entries(), NopStateMutator);
+
+        assert_eq!(client.count_services(ServiceSelector::Any).await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_services_matches_a_service_type_written_as_its_ascii_name() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(state_with_entries(), NopStateMutator);
+
+        let entries = client.query_services(ServiceSelector::ServiceType(GVPN_EXIT)).await?;
+
+        insta::assert_yaml_snapshot!(entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_services_matches_a_service_type_written_as_hex() -> anyhow::Result<()> {
+        let mut state = BlokliTestState::default();
+        let hex_id = format!("0x{}", hex::encode(GVPN_EXIT));
+        state.services.insert(
+            BlokliTestState::service_entry_key(&hex_id, &NODE),
+            entry(&hex_id, &NODE),
+        );
+        let client = BlokliTestClient::new(state, NopStateMutator);
+
+        let entries = client.query_services(ServiceSelector::ServiceType(GVPN_EXIT)).await?;
+
+        assert_eq!(entries.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_services_narrows_to_one_node() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(state_with_entries(), NopStateMutator);
+
+        let entries = client.query_services(ServiceSelector::Node(OTHER_NODE)).await?;
+
+        insta::assert_yaml_snapshot!(entries);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_service_types_returns_every_type_when_unfiltered() -> anyhow::Result<()> {
+        let mut state = BlokliTestState::default();
+        state
+            .service_types
+            .insert("gvpn:exit".to_string(), service_type_info("gvpn:exit", Some("0x4444")));
+        state
+            .service_types
+            .insert("gvpn:relay".to_string(), service_type_info("gvpn:relay", None));
+        let client = BlokliTestClient::new(state, NopStateMutator);
+
+        let types = client.query_service_types(None).await?;
+
+        insta::assert_yaml_snapshot!(types);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn subscribe_services_reports_registration_update_and_deregistration() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(
+            BlokliTestState::default(),
+            |signed_tx: &[u8], state: &mut BlokliTestState| {
+                let key = BlokliTestState::service_entry_key("gvpn:exit", &NODE);
+                match signed_tx {
+                    [0] => {
+                        state.services.insert(key, entry("gvpn:exit", &NODE));
+                    }
+                    [1] => {
+                        let mut updated = entry("gvpn:exit", &NODE);
+                        updated.metadata = "0xc0ffee".to_string();
+                        updated.updated_at = 1_700_000_100;
+                        state.services.insert(key, updated);
+                    }
+                    _ => {
+                        state.services.shift_remove(&key);
+                    }
+                }
+                Result::Ok(())
+            },
+        );
+
+        let mut stream = client.subscribe_services(ServiceSelector::ServiceType(GVPN_EXIT))?;
+        for step in [0u8, 1, 2] {
+            client.submit_transaction(&[step]).await?;
+        }
+
+        let updates = stream.by_ref().take(3).collect::<Vec<_>>().await;
+        let updates = updates.into_iter().collect::<Result<Vec<_>>>()?;
+
+        insta::assert_yaml_snapshot!(updates);
+        assert_eq!(
+            updates.iter().map(|update| update.kind).collect::<Vec<_>>(),
+            vec![
+                ServiceUpdateKind::Registered,
+                ServiceUpdateKind::Updated,
+                ServiceUpdateKind::Deregistered
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn subscribe_services_filters_out_other_nodes() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(BlokliTestState::default(), |_: &[u8], state: &mut BlokliTestState| {
+            state.services.insert(
+                BlokliTestState::service_entry_key("gvpn:exit", &OTHER_NODE),
+                entry("gvpn:exit", &OTHER_NODE),
+            );
+            state.services.insert(
+                BlokliTestState::service_entry_key("gvpn:exit", &NODE),
+                entry("gvpn:exit", &NODE),
+            );
+            Result::Ok(())
+        });
+
+        let mut stream = client.subscribe_services(ServiceSelector::Node(NODE))?;
+        client.submit_transaction(&[0]).await?;
+
+        let update = stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("service subscription ended early"))??;
+
+        assert_eq!(update.node, hex::encode(NODE));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn subscribe_service_types_reports_one_event_per_changed_field() -> anyhow::Result<()> {
+        let mut initial = BlokliTestState::default();
+        initial
+            .service_types
+            .insert("gvpn:exit".to_string(), service_type_info("gvpn:exit", Some("0x4444")));
+
+        let client = BlokliTestClient::new(initial, |_: &[u8], state: &mut BlokliTestState| {
+            let info = state
+                .service_types
+                .get_mut("gvpn:exit")
+                .ok_or_else(|| anyhow::anyhow!("missing service type"))
+                .map_err(|e| crate::errors::ErrorKind::MockClientError(e))?;
+            info.owner = None;
+            info.update_burn = "5 wei wxHOPR".to_string();
+            Result::Ok(())
+        });
+
+        let mut stream = client.subscribe_service_types(Some(GVPN_EXIT))?;
+        client.submit_transaction(&[0]).await?;
+
+        let updates = stream.by_ref().take(2).collect::<Vec<_>>().await;
+        let updates = updates.into_iter().collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(
+            updates.iter().map(|update| update.kind).collect::<Vec<_>>(),
+            vec![
+                ServiceTypeUpdateKind::OwnerChanged,
+                ServiceTypeUpdateKind::UpdateBurnChanged
+            ]
+        );
+        insta::assert_yaml_snapshot!(updates);
+        Ok(())
     }
 }

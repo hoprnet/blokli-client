@@ -346,6 +346,7 @@ mod tests {
         contracts["node_safe_migration"] = toml_edit::value(addresses.node_safe_migration.to_string());
         contracts["node_safe_registry"] = toml_edit::value(addresses.node_safe_registry.to_string());
         contracts["node_stake_factory"] = toml_edit::value(addresses.node_stake_factory.to_string());
+        contracts["service_registry"] = toml_edit::value(addresses.service_registry.to_string());
         contracts["ticket_price_oracle"] = toml_edit::value(addresses.ticket_price_oracle.to_string());
         contracts["token"] = toml_edit::value(addresses.token.to_string());
         contracts["winning_probability_oracle"] = toml_edit::value(addresses.winning_probability_oracle.to_string());
