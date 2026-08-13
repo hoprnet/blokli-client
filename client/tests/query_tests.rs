@@ -2,7 +2,10 @@ use std::net::IpAddr;
 
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
-    api::{BlokliQueryClient, SafeSelector, ServiceSelector, types::Token},
+    api::{
+        BlokliQueryClient, SafeSelector, ServiceSelector,
+        types::{Token, Uint64},
+    },
 };
 use mockito::Matcher;
 use tokio::{
@@ -185,10 +188,12 @@ async fn query_services_returns_registry_entries() -> anyhow::Result<()> {
                       "node": "0x1111111111111111111111111111111111111111",
                       "safe": "0x3333333333333333333333333333333333333333",
                       "metadata": "0xdeadbeef",
-                      "registeredAt": 1700000000,
-                      "updatedAt": 1700000100
+                      "registeredAt": "1700000000",
+                      "updatedAt": "1700000100"
                     }
-                  ]
+                  ],
+                  "watermark": "1234",
+                  "nextCursor": null
                 }
               }
             }"#,
@@ -202,8 +207,8 @@ async fn query_services_returns_registry_entries() -> anyhow::Result<()> {
     assert_eq!(entries[0].service_type, "gvpn:exit");
     assert_eq!(entries[0].node, "0x1111111111111111111111111111111111111111");
     assert_eq!(entries[0].metadata, "0xdeadbeef");
-    assert_eq!(entries[0].registered_at, 1700000000);
-    assert_eq!(entries[0].updated_at, 1700000100);
+    assert_eq!(entries[0].registered_at, Uint64("1700000000".into()));
+    assert_eq!(entries[0].updated_at, Uint64("1700000100".into()));
 
     mock.assert_async().await;
     insta::assert_yaml_snapshot!(recorder.requests());
@@ -246,13 +251,21 @@ async fn query_services_surfaces_the_missing_filter_error() -> anyhow::Result<()
 }
 
 #[tokio::test]
-async fn query_services_rejects_an_unfiltered_selector_without_calling_the_server() -> anyhow::Result<()> {
+async fn query_services_accepts_an_unfiltered_selector() -> anyhow::Result<()> {
     let mut server = mockito::Server::new_async().await;
     let cli = BlokliClient::new(server.url().parse()?, Default::default());
 
-    let mock = server.mock("POST", "/graphql").expect(0).create_async().await;
+    let mock = server
+        .mock("POST", "/graphql")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"data":{"services":{"__typename":"ServicesList","services":[],"watermark":"1234","nextCursor":null}}}"#,
+        )
+        .create_async()
+        .await;
 
-    assert!(cli.query_services(ServiceSelector::Any).await.is_err());
+    assert!(cli.query_services(ServiceSelector::Any).await?.is_empty());
 
     mock.assert_async().await;
     Ok(())
@@ -325,6 +338,43 @@ async fn query_service_types_returns_type_configuration() -> anyhow::Result<()> 
     );
     assert!(types[0].requirement.is_none());
     assert_eq!(types[0].registration_burn, "1 wxHOPR");
+
+    mock.assert_async().await;
+    insta::assert_yaml_snapshot!(recorder.requests());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn query_service_registry_config_returns_current_configuration() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+    let recorder = RequestRecorder::default();
+
+    let mock = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("QueryServiceRegistryConfig".into()))
+        .match_request(recorder.as_matcher())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+              "data": {
+                "serviceRegistryConfig": {
+                  "__typename": "ServiceRegistryConfig",
+                  "typeRegistrationFee": "1000 wxHOPR",
+                  "nodeSafeRegistry": "0x4444444444444444444444444444444444444444"
+                }
+              }
+            }"#,
+        )
+        .create_async()
+        .await;
+
+    let config = cli.query_service_registry_config().await?;
+
+    assert_eq!(config.type_registration_fee, "1000 wxHOPR");
+    assert_eq!(config.node_safe_registry, "0x4444444444444444444444444444444444444444");
 
     mock.assert_async().await;
     insta::assert_yaml_snapshot!(recorder.requests());

@@ -5,7 +5,7 @@ use hex::ToHex;
 
 use super::{BlokliClient, GraphQlQueries, response_to_data};
 use crate::{
-    api::{internal::*, types::*, *},
+    api::{internal::*, types::*, v1::graphql::services::ServicePage, *},
     errors::{BlokliClientError, ErrorKind},
 };
 
@@ -195,8 +195,13 @@ impl GraphQlQueries {
     }
 
     /// `Services` GraphQL query.
-    pub fn query_services(selector: ServiceSelector) -> cynic::Operation<QueryServices, ServiceVariables> {
-        QueryServices::build(ServiceVariables::from(selector))
+    pub fn query_services(
+        selector: ServiceSelector,
+        after: Option<Uint64>,
+        watermark: Option<Uint64>,
+        live_only: bool,
+    ) -> cynic::Operation<QueryServices, ServicePageVariables> {
+        QueryServices::build(ServicePageVariables::new(selector, after, watermark, live_only))
     }
 
     /// `ServiceTypes` GraphQL query.
@@ -204,6 +209,11 @@ impl GraphQlQueries {
         service_type: Option<ServiceTypeId>,
     ) -> cynic::Operation<QueryServiceTypes, ServiceTypeVariables> {
         QueryServiceTypes::build(ServiceTypeVariables::from(service_type))
+    }
+
+    /// `ServiceRegistryConfig` GraphQL query.
+    pub fn query_service_registry_config() -> cynic::Operation<QueryServiceRegistryConfig, ()> {
+        QueryServiceRegistryConfig::build(())
     }
 
     /// `Transaction` GraphQL query.
@@ -370,13 +380,46 @@ impl BlokliQueryClient for BlokliClient {
 
     #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
     async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
-        if matches!(selector, ServiceSelector::Any) {
-            return Err(ErrorKind::InvalidInput("filter must be specified on service query").into());
+        let mut services = Vec::new();
+        let mut after = None;
+        let mut watermark = None;
+
+        loop {
+            let resp = self
+                .build_query(GraphQlQueries::query_services(
+                    selector,
+                    after,
+                    watermark.clone(),
+                    false,
+                ))?
+                .await?;
+            let page = Result::<ServicePage>::from(response_to_data(resp)?.services)?;
+            services.extend(page.services);
+            watermark = Some(page.watermark);
+            after = page.next_cursor;
+            if after.is_none() {
+                return Ok(services);
+            }
         }
+    }
 
-        let resp = self.build_query(GraphQlQueries::query_services(selector))?.await?;
-
-        response_to_data(resp)?.services.into()
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn query_live_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        let mut services = Vec::new();
+        let mut after = None;
+        let mut watermark = None;
+        loop {
+            let resp = self
+                .build_query(GraphQlQueries::query_services(selector, after, watermark.clone(), true))?
+                .await?;
+            let page = Result::<ServicePage>::from(response_to_data(resp)?.services)?;
+            services.extend(page.services);
+            watermark = Some(page.watermark);
+            after = page.next_cursor;
+            if after.is_none() {
+                return Ok(services);
+            }
+        }
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
@@ -386,6 +429,15 @@ impl BlokliQueryClient for BlokliClient {
             .await?;
 
         response_to_data(resp)?.service_types.into()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn query_service_registry_config(&self) -> Result<ServiceRegistryConfig> {
+        let resp = self
+            .build_query(GraphQlQueries::query_service_registry_config())?
+            .await?;
+
+        response_to_data(resp)?.service_registry_config.into()
     }
 
     #[tracing::instrument(level = "debug", skip(self))]

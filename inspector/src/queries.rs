@@ -479,16 +479,16 @@ mod tests {
                 node: "0x1111111111111111111111111111111111111111".to_string(),
                 safe: "0x3333333333333333333333333333333333333333".to_string(),
                 metadata: "0xdeadbeef".to_string(),
-                registered_at: 1_700_000_000,
-                updated_at: 1_700_000_100,
+                registered_at: Uint64("1700000000".into()),
+                updated_at: Uint64("1700000100".into()),
             },
             ServiceEntry {
                 service_type: "gvpn:relay".to_string(),
                 node: "0x2222222222222222222222222222222222222222".to_string(),
                 safe: "0x3333333333333333333333333333333333333333".to_string(),
                 metadata: "0x".to_string(),
-                registered_at: 1_700_000_200,
-                updated_at: 1_700_000_200,
+                registered_at: Uint64("1700000200".into()),
+                updated_at: Uint64("1700000200".into()),
             },
         ];
 

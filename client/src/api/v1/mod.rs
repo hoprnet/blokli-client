@@ -87,8 +87,9 @@ pub(crate) mod internal {
             SubscribeSafeDeployment,
         },
         services::{
-            QueryServiceCount, QueryServiceTypes, QueryServices, ServiceTypeVariables, ServiceVariables,
-            SubscribeServiceTypes, SubscribeServices,
+            QueryServiceCount, QueryServiceRegistryConfig, QueryServiceTypes, QueryServices, ServicePageVariables,
+            ServiceTypeVariables, ServiceVariables, SubscribeServiceRegistryConfig, SubscribeServiceTypes,
+            SubscribeServices,
         },
         tickets::{SubscribeTicketRedeemed, TicketRedeemedVariables},
         txs::{
@@ -433,11 +434,19 @@ pub trait BlokliQueryClient {
     /// [`ServiceSelector::Any`]: the registry is permissionless and anyone can grow it, so a bare
     /// enumeration is not offered.
     async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<types::ServiceEntry>>;
+    /// Returns only entries whose node is currently bound in the NodeSafeRegistry selected by the
+    /// service registry itself.
+    async fn query_live_services(&self, selector: ServiceSelector) -> Result<Vec<types::ServiceEntry>>;
     /// Returns service type configuration, optionally restricted to a single type.
     ///
     /// Passing `None` returns every registered type. Unlike the entry set, the set of types is
     /// gated by the registry-wide type registration fee, so enumerating it is bounded.
     async fn query_service_types(&self, service_type: Option<ServiceTypeId>) -> Result<Vec<types::ServiceTypeInfo>>;
+    /// Returns the current registry-wide type registration fee and node-safe registry pointer.
+    ///
+    /// This is the one-shot alternative to
+    /// [`BlokliSubscriptionClient::subscribe_service_registry_config`].
+    async fn query_service_registry_config(&self) -> Result<types::ServiceRegistryConfig>;
     /// Returns the latest known status for a tracked transaction id.
     ///
     /// The `tx_id` is the Blokli tracking id returned by
@@ -512,6 +521,14 @@ pub trait BlokliSubscriptionClient {
         &self,
         service_type: Option<ServiceTypeId>,
     ) -> Result<impl futures::Stream<Item = Result<types::ServiceTypeUpdate>> + Send>;
+    /// Streams the complete registry-wide configuration.
+    ///
+    /// The first item is the current type registration fee and node-safe registry pointer. Later
+    /// items contain the complete configuration after either value changes, so callers do not need
+    /// a separate query before subscribing.
+    fn subscribe_service_registry_config(
+        &self,
+    ) -> Result<impl futures::Stream<Item = Result<types::ServiceRegistryConfig>> + Send + 'static>;
     /// Streams status updates for a tracked transaction id.
     ///
     /// The `tx_id` is the Blokli tracking id returned by

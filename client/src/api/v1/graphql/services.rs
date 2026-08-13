@@ -1,4 +1,4 @@
-use super::{CountResult, MissingFilterError, QueryFailedError, schema};
+use super::{CountResult, MissingFilterError, QueryFailedError, Uint64, schema};
 use crate::{
     api::v1::{ChainAddress, ServiceSelector, ServiceTypeId},
     errors::{BlokliClientError, ErrorKind},
@@ -45,6 +45,30 @@ pub struct ServiceVariables {
     pub node: Option<String>,
 }
 
+#[derive(cynic::QueryVariables, Debug)]
+pub struct ServicePageVariables {
+    pub service_type: Option<String>,
+    pub node: Option<String>,
+    pub first: i32,
+    pub after: Option<Uint64>,
+    pub watermark: Option<Uint64>,
+    pub live_only: bool,
+}
+
+impl ServicePageVariables {
+    pub fn new(selector: ServiceSelector, after: Option<Uint64>, watermark: Option<Uint64>, live_only: bool) -> Self {
+        let filters = ServiceVariables::from(selector);
+        Self {
+            service_type: filters.service_type,
+            node: filters.node,
+            first: 1000,
+            after,
+            watermark,
+            live_only,
+        }
+    }
+}
+
 impl From<ServiceSelector> for ServiceVariables {
     fn from(value: ServiceSelector) -> Self {
         match value {
@@ -79,9 +103,9 @@ impl From<Option<ServiceTypeId>> for ServiceTypeVariables {
 }
 
 #[derive(cynic::QueryFragment, Debug)]
-#[cynic(graphql_type = "QueryRoot", variables = "ServiceVariables")]
+#[cynic(graphql_type = "QueryRoot", variables = "ServicePageVariables")]
 pub struct QueryServices {
-    #[arguments(serviceType: $service_type, node: $node)]
+    #[arguments(serviceType: $service_type, node: $node, first: $first, after: $after, watermark: $watermark, liveOnly: $live_only)]
     pub services: ServicesResult,
 }
 
@@ -100,6 +124,12 @@ pub struct QueryServiceTypes {
 }
 
 #[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "QueryRoot")]
+pub struct QueryServiceRegistryConfig {
+    pub service_registry_config: ServiceRegistryConfigResult,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
 #[cynic(graphql_type = "SubscriptionRoot", variables = "ServiceVariables")]
 pub struct SubscribeServices {
     #[arguments(serviceType: $service_type, node: $node)]
@@ -111,6 +141,12 @@ pub struct SubscribeServices {
 pub struct SubscribeServiceTypes {
     #[arguments(serviceType: $service_type)]
     pub service_type_updated: ServiceTypeUpdate,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "SubscriptionRoot")]
+pub struct SubscribeServiceRegistryConfig {
+    pub service_registry_config_updated: ServiceRegistryConfig,
 }
 
 /// Single entry of the on-chain service registry: one node offering one service type.
@@ -127,9 +163,9 @@ pub struct ServiceEntry {
     /// Opaque metadata as `0x`-prefixed hex; the schema belongs to the service type.
     pub metadata: String,
     /// Unix timestamp in seconds at which the entry was registered.
-    pub registered_at: i32,
+    pub registered_at: Uint64,
     /// Unix timestamp in seconds at which the entry was last updated.
-    pub updated_at: i32,
+    pub updated_at: Uint64,
 }
 
 /// Configuration of a single service type.
@@ -233,6 +269,17 @@ pub struct ServiceTypeUpdate {
 pub struct ServicesList {
     /// Matching registry entries.
     pub services: Vec<ServiceEntry>,
+    /// Block watermark shared by every page of this enumeration.
+    pub watermark: Uint64,
+    /// Cursor for the next page.
+    pub next_cursor: Option<Uint64>,
+}
+
+#[derive(Debug)]
+pub struct ServicePage {
+    pub services: Vec<ServiceEntry>,
+    pub watermark: Uint64,
+    pub next_cursor: Option<Uint64>,
 }
 
 /// List of service types returned by a service type query.
@@ -252,10 +299,14 @@ pub enum ServicesResult {
     Unknown,
 }
 
-impl From<ServicesResult> for Result<Vec<ServiceEntry>, BlokliClientError> {
+impl From<ServicesResult> for Result<ServicePage, BlokliClientError> {
     fn from(value: ServicesResult) -> Self {
         match value {
-            ServicesResult::ServicesList(list) => Ok(list.services),
+            ServicesResult::ServicesList(list) => Ok(ServicePage {
+                services: list.services,
+                watermark: list.watermark,
+                next_cursor: list.next_cursor,
+            }),
             ServicesResult::MissingFilterError(e) => Err(e.into()),
             ServicesResult::QueryFailedError(e) => Err(e.into()),
             ServicesResult::Unknown => Err(ErrorKind::NoData.into()),
@@ -269,6 +320,24 @@ pub enum ServiceTypesResult {
     QueryFailedError(QueryFailedError),
     #[cynic(fallback)]
     Unknown,
+}
+
+#[derive(cynic::InlineFragments, Debug)]
+pub enum ServiceRegistryConfigResult {
+    ServiceRegistryConfig(ServiceRegistryConfig),
+    QueryFailedError(QueryFailedError),
+    #[cynic(fallback)]
+    Unknown,
+}
+
+impl From<ServiceRegistryConfigResult> for Result<ServiceRegistryConfig, BlokliClientError> {
+    fn from(value: ServiceRegistryConfigResult) -> Self {
+        match value {
+            ServiceRegistryConfigResult::ServiceRegistryConfig(config) => Ok(config),
+            ServiceRegistryConfigResult::QueryFailedError(e) => Err(e.into()),
+            ServiceRegistryConfigResult::Unknown => Err(ErrorKind::NoData.into()),
+        }
+    }
 }
 
 impl From<ServiceTypesResult> for Result<Vec<ServiceTypeInfo>, BlokliClientError> {

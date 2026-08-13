@@ -7,12 +7,13 @@ use crate::api::{
     TxId,
     internal::{
         AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
-        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceTypes,
-        SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
+        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceRegistryConfig,
+        SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed,
+        TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceTypeUpdate,
-        ServiceUpdate, TicketParameters, Transaction,
+        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceRegistryConfig,
+        ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
     },
 };
 
@@ -63,6 +64,11 @@ impl GraphQlQueries {
         service_type: Option<ServiceTypeId>,
     ) -> cynic::StreamingOperation<SubscribeServiceTypes, ServiceTypeVariables> {
         SubscribeServiceTypes::build(ServiceTypeVariables::from(service_type))
+    }
+
+    /// `SubscribeServiceRegistryConfig` subscription GraphQL query.
+    pub fn subscribe_service_registry_config() -> cynic::StreamingOperation<SubscribeServiceRegistryConfig, ()> {
+        SubscribeServiceRegistryConfig::build(())
     }
 
     /// `SubscribeTicketRedeemed` subscription GraphQL query.
@@ -134,6 +140,15 @@ impl BlokliSubscriptionClient for BlokliClient {
         Ok(self
             .build_subscription_stream(GraphQlQueries::subscribe_service_types(service_type))?
             .try_filter_map(|item| futures::future::ok(Some(item.service_type_updated))))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_service_registry_config(
+        &self,
+    ) -> Result<impl Stream<Item = Result<ServiceRegistryConfig>> + Send + 'static> {
+        Ok(self
+            .build_subscription_stream(GraphQlQueries::subscribe_service_registry_config())?
+            .try_filter_map(|item| futures::future::ok(Some(item.service_registry_config_updated))))
     }
 
     #[tracing::instrument(level = "debug", skip(self))]

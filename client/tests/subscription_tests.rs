@@ -307,8 +307,8 @@ async fn subscribe_services_forwards_a_registration() -> Result<()> {
             "node": "0x1111111111111111111111111111111111111111",
             "safe": "0x3333333333333333333333333333333333333333",
             "metadata": "0xdeadbeef",
-            "registeredAt": 1700000000,
-            "updatedAt": 1700000000,
+            "registeredAt": "1700000000",
+            "updatedAt": "1700000000",
         })),
     ))
     .await?;
@@ -383,6 +383,31 @@ async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()>
             .map(|config| config.node_safe_registry.as_str()),
         Some("0x5555555555555555555555555555555555555555")
     );
+
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscribe_service_registry_config_forwards_complete_state() -> Result<()> {
+    let payload = serde_json::json!({
+        "data": {
+            "serviceRegistryConfigUpdated": {
+                "typeRegistrationFee": "1 wxHOPR",
+                "nodeSafeRegistry": "0x5555555555555555555555555555555555555555",
+            },
+        },
+    });
+    let (base_url, server) = spawn_single_streaming_server(format!("event: next\ndata: {payload}\n\n")).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_service_registry_config()?;
+    let config = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering registry configuration"))??;
+
+    assert_eq!(config.type_registration_fee, "1 wxHOPR");
+    assert_eq!(config.node_safe_registry, "0x5555555555555555555555555555555555555555");
 
     server.await??;
     Ok(())
