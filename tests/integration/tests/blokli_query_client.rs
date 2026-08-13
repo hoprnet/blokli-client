@@ -1016,8 +1016,10 @@ async fn query_services_reflects_a_metadata_update(#[future(awt)] fixture: Integ
     .await?;
 
     assert_eq!(updated.registered_at, registered.registered_at);
+    let updated_at = updated.updated_at.0.parse::<u64>()?;
+    let registered_updated_at = registered.updated_at.0.parse::<u64>()?;
     assert!(
-        updated.updated_at >= registered.updated_at,
+        updated_at >= registered_updated_at,
         "an update never moves updatedAt backwards"
     );
 
