@@ -5,23 +5,23 @@ resolver = "2"
 members = ["client", "inspector", "tests/integration"]
 
 [workspace.dependencies]
-anyhow             = "1.0.103"
-async-broadcast    = "0.7.2"
-async-trait        = "0.1.89"
-blokli-client      = { path = "client", version = "0.31.0" }
-bytes              = "1.12.1"
-chrono             = "0.4.45"
-clap               = { version = "4.6.1", features = ["derive", "env", "string"] }
-comfy-table        = { version = "7.2.2", default-features = false }
-cynic              = "3.13.2"
-cynic-codegen      = "3.13.2"
+anyhow = "1.0.103"
+async-broadcast = "0.7.2"
+async-trait = "0.1.89"
+blokli-client = { path = "client", version = "0.31.0" }
+bytes = "1.12.1"
+chrono = "0.4.45"
+clap = { version = "4.6.1", features = ["derive", "env", "string"] }
+comfy-table = { version = "7.2.2", default-features = false }
+cynic = "3.13.2"
+cynic-codegen = "3.13.2"
 eventsource-client = { version = "0.17.5", default-features = false }
-futures            = "0.3.32"
-futures-time       = "3.1.0"
-hex                = "0.4.3"
-hopli              = { git = "https://github.com/hoprnet/hopli", rev = "048be10bdd1b1296cc87966394bdfab33998906b" }
-hopr-bindings      = { git = "https://github.com/hoprnet/contracts", rev = "6ce45eb5e7d433545d82ea32e27562eb0fc329c3" }
-hopr-types         = { git = "https://github.com/hoprnet/hopr-types", rev = "2a3bb391f1f98475d033b105c69090d050aaff0c" }
+futures = "0.3.32"
+futures-time = "3.1.0"
+hex = "0.4.3"
+hopli = { git = "https://github.com/hoprnet/hopli", rev = "32116320754e2897a3fb72ca8aff1ec8dae6a85e" }
+hopr-bindings = { git = "https://github.com/hoprnet/contracts", rev = "0eea1981c67343e65ff4e5ecb0b81b9ddc201b14" }
+hopr-types = { git = "https://github.com/hoprnet/hopr-types", rev = "68d626ba041da06fde90c9c3c51a4d53c5ab0c4c" }
 http = "1.4.2"
 indexmap = "2.14.0"
 insta = { version = "1.48.0", features = ["yaml"] }
