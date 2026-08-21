@@ -9,6 +9,7 @@ use crate::errors::ErrorKind;
 pub mod accounts;
 pub mod balances;
 pub mod channels;
+pub mod curvy;
 pub mod graph;
 pub mod info;
 pub mod safe;
@@ -75,6 +76,11 @@ pub struct TokenValueString(pub String);
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
 #[cynic(graphql_type = "UInt64")]
 pub struct Uint64(pub String);
+
+/// Unsigned 256-bit integer encoded as a decimal string by the GraphQL API.
+#[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]
+#[cynic(graphql_type = "UInt256")]
+pub struct Uint256(pub String);
 
 /// 32-byte hex value as returned by the GraphQL API.
 #[derive(cynic::Scalar, Debug, Clone, PartialEq, Eq)]

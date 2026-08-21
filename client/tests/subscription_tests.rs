@@ -292,6 +292,91 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result<()> {
+    let body = format_curvy_event(
+        "curvyPendingNote",
+        serde_json::json!({
+            "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
+            "ephemeralKey": ["11", "12"],
+            "viewTag": 7,
+            "tokenId": "1",
+            "amount": "1000",
+            "isPlaintext": false,
+            "position": curvy_position(10, 2, 7, 3),
+        }),
+    );
+    let (base_url, server) = spawn_single_streaming_server(body).await?;
+    let client = BlokliClient::new(
+        base_url,
+        BlokliClientConfig {
+            subscription_stream_restart_delay: None,
+            ..BlokliClientConfig::default()
+        },
+    );
+
+    let note = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.subscribe_curvy_pending_notes(Some(9))?.next(),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("candidate stream ended"))??;
+    assert_eq!(
+        note.note_id.0,
+        "0x000000000000000000000000000000000000000000000000000000000000002a"
+    );
+    assert_eq!(note.ephemeral_key[0].0, "11");
+    assert_eq!(note.ephemeral_key[1].0, "12");
+    assert_eq!(note.view_tag, 7);
+    assert_eq!(note.token_id.0, "1");
+    assert_eq!(note.amount.0, "1000");
+    assert!(!note.is_plaintext);
+    assert_eq!(note.position.event_item_index.0, "3");
+
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Result<()> {
+    let body = format_curvy_event(
+        "curvyCommittedNote",
+        serde_json::json!({
+            "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
+            "batchIndex": "0x0000000000000000000000000000000000000000000000000000000000000009",
+            "leafIndex": "41",
+            "position": curvy_position(11, 0, 1, 0),
+        }),
+    );
+    let (base_url, server) = spawn_single_streaming_server(body).await?;
+    let client = BlokliClient::new(
+        base_url,
+        BlokliClientConfig {
+            subscription_stream_restart_delay: None,
+            ..BlokliClientConfig::default()
+        },
+    );
+
+    let note = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.subscribe_curvy_committed_notes(Some(9))?.next(),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("completion stream ended"))??;
+    assert_eq!(
+        note.note_id.0,
+        "0x000000000000000000000000000000000000000000000000000000000000002a"
+    );
+    assert_eq!(
+        note.batch_index.0,
+        "0x0000000000000000000000000000000000000000000000000000000000000009"
+    );
+    assert_eq!(note.leaf_index.0, "41");
+
+    server.await??;
+    Ok(())
+}
+
 async fn spawn_reconnecting_server(
     event_batches: Vec<Vec<TicketParams>>,
 ) -> Result<(Url, tokio::task::JoinHandle<Result<()>>)> {
@@ -461,6 +546,26 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
         },
     });
     format!("event: next\ndata: {payload}\n\n")
+}
+
+fn format_curvy_event(field: &str, note: serde_json::Value) -> String {
+    let payload = serde_json::json!({
+        "data": {
+            (field): note,
+        },
+    });
+    format!("event: next\ndata: {payload}\n\n")
+}
+
+fn curvy_position(block: u64, transaction_index: u64, log_index: u64, event_item_index: u64) -> serde_json::Value {
+    serde_json::json!({
+        "transactionHash": format!("0x{block:064x}"),
+        "blockHash": format!("0x{:064x}", block + 1),
+        "block": block.to_string(),
+        "transactionIndex": transaction_index.to_string(),
+        "logIndex": log_index.to_string(),
+        "eventItemIndex": event_item_index.to_string(),
+    })
 }
 
 fn format_ticket_params_events(events: &[TicketParams]) -> String {
