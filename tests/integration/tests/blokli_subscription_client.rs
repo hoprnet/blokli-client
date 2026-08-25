@@ -3,10 +3,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use blokli_client::api::{
     AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, ChannelFilter, ChannelSelector, SafeSelector,
-    TicketSelector,
-    types::{ChannelStatus, RedemptionResult, TransactionStatus},
+    ServiceSelector, TicketSelector,
+    types::{ChannelStatus, RedemptionResult, ServiceTypeUpdateKind, ServiceUpdateKind, TransactionStatus},
 };
 use blokli_integration_tests::{
+    anvil::AnvilAccount,
     constants::{EPSILON, parsed_safe_balance, subscription_timeout},
     fixtures::{IntegrationFixture, integration_fixture as fixture, poll_until},
 };
@@ -17,7 +18,10 @@ use hex::{FromHex, ToHex};
 use hopr_bindings::exports::alloy::primitives::U256;
 use hopr_types::{
     crypto::{keypairs::Keypair, types::Hash},
-    internal::channels::generate_channel_id,
+    internal::{
+        channels::generate_channel_id,
+        service::{ServiceMetadata, ServiceType},
+    },
     primitive::prelude::HoprBalance,
 };
 use rstest::*;
@@ -768,6 +772,178 @@ async fn subscribe_ticket_redeemed(#[future(awt)] fixture: IntegrationFixture) -
     );
     assert_eq!(event.index.0, ticket_index.to_string(), "ticket index must match");
     assert_eq!(event.result, RedemptionResult::Redeemed, "ticket must be accepted");
+
+    Ok(())
+}
+
+/// Builds a service type id that no other test in the same stack claims.
+///
+/// A type claim is one-shot and first come, first served, so a shared id makes the second test to run revert with
+/// `TypeAlreadyRegistered`. Deriving the id from the node keeps it unique per test and per sampled account.
+fn unique_service_type(prefix: &str, node: &AnvilAccount) -> Result<ServiceType> {
+    let node_hex = node.address.to_string();
+    let suffix = node_hex
+        .trim_start_matches("0x")
+        .get(..8)
+        .ok_or_else(|| anyhow!("node address is shorter than expected"))?;
+
+    Ok(format!("{prefix}:{suffix}").parse()?)
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// subscribes to service registry changes, registers a node under a freshly claimed type, and verifies that the
+/// registration arrives on the stream carrying the full entry.
+async fn subscribe_services_reports_a_registration(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [node] = fixture.sample_accounts::<1>();
+    let safe = fixture.deploy_safe_and_announce(node, parsed_safe_balance()).await?;
+    let service_type = unique_service_type("ssvc", node)?;
+    let metadata = ServiceMetadata::try_from(b"subscription".to_vec())?;
+
+    fixture.register_service_type(node, &service_type).await?;
+
+    let client = fixture.client().clone();
+    let selector = ServiceSelector::ServiceType(service_type.as_encoded());
+    let handle = tokio::task::spawn(async move {
+        client
+            .subscribe_services(selector)
+            .expect("failed to create service registry subscription")
+            .next()
+            .timeout(subscription_timeout())
+            .await
+    });
+
+    fixture
+        .self_register_service(&safe.address, node, &service_type, &metadata)
+        .await?;
+
+    let update = handle
+        .await??
+        .ok_or_else(|| anyhow!("no update received from subscription"))??;
+
+    assert_eq!(update.kind, ServiceUpdateKind::Registered);
+    assert_eq!(update.service_type, service_type.to_string());
+    assert!(
+        update
+            .node
+            .trim_start_matches("0x")
+            .eq_ignore_ascii_case(node.address.to_string().trim_start_matches("0x"))
+    );
+
+    let entry = update
+        .entry
+        .ok_or_else(|| anyhow!("a registration must carry the resulting entry"))?;
+    assert!(
+        entry
+            .metadata
+            .trim_start_matches("0x")
+            .eq_ignore_ascii_case(&metadata.as_ref().encode_hex::<String>())
+    );
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// deregisters an indexed entry and verifies that the stream reports the removal without an entry, which is the
+/// reason the payload is discriminated instead of being a bare entry.
+async fn subscribe_services_reports_a_deregistration_without_an_entry(
+    #[future(awt)] fixture: IntegrationFixture,
+) -> Result<()> {
+    let [node] = fixture.sample_accounts::<1>();
+    let safe = fixture.deploy_safe_and_announce(node, parsed_safe_balance()).await?;
+    let service_type = unique_service_type("dsvc", node)?;
+    let metadata = ServiceMetadata::try_from(b"deregistration".to_vec())?;
+
+    fixture.register_service_type(node, &service_type).await?;
+    fixture
+        .self_register_service(&safe.address, node, &service_type, &metadata)
+        .await?;
+
+    let client = fixture.client().clone();
+    let selector = ServiceSelector::ServiceTypeAndNode {
+        service_type: service_type.as_encoded(),
+        node: node.to_alloy_address().into(),
+    };
+    poll_until(
+        "service registry entry indexing",
+        Duration::from_secs(30),
+        Duration::from_millis(500),
+        || {
+            let client = client.clone();
+            async move { Ok(client.query_services(selector).await?.into_iter().next()) }
+        },
+    )
+    .await?;
+
+    let client = fixture.client().clone();
+    let handle = tokio::task::spawn(async move {
+        client
+            .subscribe_services(selector)
+            .expect("failed to create service registry subscription")
+            .skip_while(|update| {
+                let is_registration =
+                    update.as_ref().expect("failed to get subscription update").kind != ServiceUpdateKind::Deregistered;
+                futures::future::ready(is_registration)
+            })
+            .next()
+            .timeout(subscription_timeout())
+            .await
+    });
+
+    fixture
+        .self_deregister_service(&safe.address, node, &service_type)
+        .await?;
+
+    let update = handle
+        .await??
+        .ok_or_else(|| anyhow!("no update received from subscription"))??;
+
+    assert_eq!(update.kind, ServiceUpdateKind::Deregistered);
+    assert!(update.entry.is_none());
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// subscribes to service type configuration changes and verifies that a fresh type claim arrives on the stream.
+async fn subscribe_service_types_reports_a_type_claim(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [owner] = fixture.sample_accounts::<1>();
+    let service_type = unique_service_type("tsvc", owner)?;
+
+    let client = fixture.client().clone();
+    let filter = Some(service_type.as_encoded());
+    let handle = tokio::task::spawn(async move {
+        client
+            .subscribe_service_types(filter)
+            .expect("failed to create service type subscription")
+            .next()
+            .timeout(subscription_timeout())
+            .await
+    });
+
+    fixture.register_service_type(owner, &service_type).await?;
+
+    let update = handle
+        .await??
+        .ok_or_else(|| anyhow!("no update received from subscription"))??;
+
+    assert_eq!(update.kind, ServiceTypeUpdateKind::Registered);
+    assert_eq!(update.service_type.as_deref(), Some(service_type.to_string().as_str()));
+
+    let config = update
+        .config
+        .ok_or_else(|| anyhow!("a type registration must carry the resulting configuration"))?;
+    assert!(
+        config.owner.as_deref().is_some_and(|configured| configured
+            .trim_start_matches("0x")
+            .eq_ignore_ascii_case(owner.address.to_string().trim_start_matches("0x"))),
+        "registration always sets an owner"
+    );
 
     Ok(())
 }

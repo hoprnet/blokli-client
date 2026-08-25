@@ -1,0 +1,9 @@
+---
+source: client/src/client/testing/mod.rs
+assertion_line: 1691
+expression: "vec![initial, updated]"
+---
+- type_registration_fee: 1 wxHOPR
+  node_safe_registry: "0x1111111111111111111111111111111111111111"
+- type_registration_fee: 2 wxHOPR
+  node_safe_registry: "0x2222222222222222222222222222222222222222"

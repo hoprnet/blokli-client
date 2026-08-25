@@ -12,7 +12,9 @@ use clap::{Subcommand, ValueEnum};
 use futures::{StreamExt, TryStreamExt, stream};
 use hopr_types::primitive::prelude::{Address, HoprBalance};
 
-use crate::{AccountArgs, AltAccount, ChannelArgs, Formats, NodeOverviewArgs, RedemptionsArgs};
+use crate::{
+    AccountArgs, AltAccount, ChannelArgs, Formats, NodeOverviewArgs, RedemptionsArgs, ServiceArgs, ServiceTypeArgs,
+};
 
 const ACCOUNT_QUERY_CONCURRENCY: usize = 8;
 
@@ -136,6 +138,12 @@ pub(crate) enum QueryTarget {
         #[arg(long, value_parser = clap::value_parser!(Address))]
         owner: Option<Address>,
     },
+    /// Gets service registry entries. At least one of --service-type or --node must be given.
+    Service(ServiceArgs),
+    /// Gets the number of service registry entries matching optional filters.
+    ServiceCounts(ServiceArgs),
+    /// Gets service type configuration. Omit --service-type to list every registered type.
+    ServiceTypes(ServiceTypeArgs),
     /// Gets the token (wxHOPR or xHOPR) balance of an address.
     TokenBalance {
         #[arg(value_parser = clap::value_parser!(Address))]
@@ -228,6 +236,9 @@ impl QueryTarget {
             QueryTarget::SafesBalance { owner } => {
                 format.serialize(client.query_safes_balance(owner.map(ChainAddress::from)).await?)
             }
+            QueryTarget::Service(sel) => format.serialize(client.query_services(sel.try_into()?).await?),
+            QueryTarget::ServiceCounts(sel) => format.serialize(client.count_services(sel.try_into()?).await?),
+            QueryTarget::ServiceTypes(sel) => format.serialize(client.query_service_types(sel.try_into()?).await?),
             QueryTarget::TxCount { address } => {
                 format.serialize(client.query_transaction_count(&address.into()).await?)
             }
@@ -343,7 +354,8 @@ mod tests {
     use std::collections::HashMap;
 
     use blokli_client::api::types::{
-        Account, ChainInfo, Channel, ChannelStatus, ChannelsList, ContractAddressMap, TokenValueString, Uint64,
+        Account, ChainInfo, Channel, ChannelStatus, ChannelsList, ContractAddressMap, ServiceEntry, ServiceTypeInfo,
+        TokenValueString, Uint64,
     };
 
     use super::{AltAccount, build_node_overview};
@@ -454,6 +466,57 @@ mod tests {
             vec![5]
         );
         insta::assert_snapshot!(Formats::Table.serialize(&overview)?);
+        Ok(())
+    }
+
+    /// Table rendering is generic, so service registry results need no per-entity code. This pins that the generic
+    /// renderer produces a usable table for them.
+    #[test]
+    fn renders_service_entries_as_a_table() -> anyhow::Result<()> {
+        let entries = vec![
+            ServiceEntry {
+                service_type: "gvpn:exit".to_string(),
+                node: "0x1111111111111111111111111111111111111111".to_string(),
+                safe: "0x3333333333333333333333333333333333333333".to_string(),
+                metadata: "0xdeadbeef".to_string(),
+                registered_at: Uint64("1700000000".into()),
+                updated_at: Uint64("1700000100".into()),
+            },
+            ServiceEntry {
+                service_type: "gvpn:relay".to_string(),
+                node: "0x2222222222222222222222222222222222222222".to_string(),
+                safe: "0x3333333333333333333333333333333333333333".to_string(),
+                metadata: "0x".to_string(),
+                registered_at: Uint64("1700000200".into()),
+                updated_at: Uint64("1700000200".into()),
+            },
+        ];
+
+        insta::assert_snapshot!(Formats::Table.serialize(&entries)?);
+        Ok(())
+    }
+
+    #[test]
+    fn renders_service_types_as_a_table() -> anyhow::Result<()> {
+        let types = vec![
+            ServiceTypeInfo {
+                service_type: "gvpn:exit".to_string(),
+                owner: Some("0x4444444444444444444444444444444444444444".to_string()),
+                requirement: None,
+                registration_burn: "1 wxHOPR".to_string(),
+                update_burn: "0 wxHOPR".to_string(),
+            },
+            // An abandoned type: clearing the owner is one-way, so `owner` renders as absent.
+            ServiceTypeInfo {
+                service_type: "gvpn:relay".to_string(),
+                owner: None,
+                requirement: Some("0x5555555555555555555555555555555555555555".to_string()),
+                registration_burn: "0 wxHOPR".to_string(),
+                update_burn: "0 wxHOPR".to_string(),
+            },
+        ];
+
+        insta::assert_snapshot!(Formats::Table.serialize(&types)?);
         Ok(())
     }
 

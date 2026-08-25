@@ -1,0 +1,22 @@
+---
+source: client/src/client/testing/mod.rs
+expression: updates
+---
+- kind: OWNER_CHANGED
+  service_type: "gvpn:exit"
+  config:
+    service_type: "gvpn:exit"
+    owner: ~
+    requirement: ~
+    registration_burn: 1 wxHOPR
+    update_burn: 5 wei wxHOPR
+  registry_config: ~
+- kind: UPDATE_BURN_CHANGED
+  service_type: "gvpn:exit"
+  config:
+    service_type: "gvpn:exit"
+    owner: ~
+    requirement: ~
+    registration_burn: 1 wxHOPR
+    update_burn: 5 wei wxHOPR
+  registry_config: ~
