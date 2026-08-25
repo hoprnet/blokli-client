@@ -1,16 +1,13 @@
-use std::{env, fs, path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{
     ArgAction, Parser,
     builder::{BoolishValueParser, TypedValueParser},
 };
-use hopr_types::chain::ContractAddresses;
-use serde::Deserialize;
 use url::Url;
 
-const DEFAULT_INTEGRATION_CONFIG: &str = "config-integration-anvil.toml";
-const DEFAULT_TEST_IMAGE: &str = "bloklid:integration-test";
+const DEFAULT_TEST_IMAGE: &str = "bloklid-anvil:integration-test";
 const EXTERNAL_PORT_BASE_ENV: &str = "BLOKLI_TEST_PORT_BASE";
 const EXTERNAL_RUN_ID_ENV: &str = "BLOKLI_TEST_RUN_ID";
 /// Environment variable whose value must identify the workspace root used by integration tests.
@@ -21,7 +18,6 @@ const STACK_PORT_STRIDE: u16 = 10;
 /// using a deterministic value derived from the process ID.
 const BASE_BLOKLID_PORT: u16 = 18081;
 const BASE_ANVIL_PORT: u16 = 18546;
-const BASE_REGISTRY_PORT: u16 = 15001;
 
 /// Generates a short stack identifier from the process ID.
 /// Each test binary runs as a separate process, so the PID gives natural uniqueness.
@@ -38,19 +34,8 @@ fn port_offset(stack_id: &str) -> u16 {
 #[derive(Debug, PartialEq)]
 struct ExternalStackAssignment {
     stack_id: String,
-    registry_port: u16,
     anvil_port: u16,
     bloklid_port: u16,
-}
-
-#[derive(Deserialize)]
-struct IntegrationServiceConfig {
-    /// Network name the pinned `contracts` addresses below should match in hopr-bindings'
-    /// `contracts-addresses.json`. Only read by the `tests` module below (see
-    /// `regenerate_contract_addresses_toml` and `config_contract_addresses_match_hopr_bindings`).
-    #[allow(dead_code)]
-    network: String,
-    contracts: ContractAddresses,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -63,9 +48,6 @@ pub struct TestConfig {
 
     #[arg(long, env = "BLOKLI_TEST_IMAGE", default_value = DEFAULT_TEST_IMAGE)]
     pub bloklid_image: String,
-
-    #[arg(long, env = "BLOKLI_TEST_CONFIG", default_value = DEFAULT_INTEGRATION_CONFIG)]
-    pub integration_config: String,
 
     #[arg(long, env = "BLOKLI_TEST_REMOTE_IMAGE")]
     pub remote_image: Option<String>,
@@ -86,9 +68,6 @@ pub struct TestConfig {
 
     #[arg(long, env = "BLOKLI_TEST_CONFIRMATIONS", default_value_t = 1)]
     pub tx_confirmations: usize,
-
-    #[arg(long, env = "BLOKLI_TEST_REGISTRY_PORT")]
-    pub registry_port: Option<u16>,
 
     #[arg(long, env = "BLOKLI_TEST_STACK_ID", default_value_t = default_stack_id())]
     pub stack_id: String,
@@ -127,9 +106,6 @@ impl TestConfig {
             if self.rpc_url.is_none() {
                 self.rpc_url = Some(Url::parse(&format!("http://localhost:{}", self.anvil_port(offset)))?);
             }
-            if self.registry_port.is_none() {
-                self.registry_port = Some(BASE_REGISTRY_PORT + offset);
-            }
         }
 
         Ok(())
@@ -150,7 +126,6 @@ impl TestConfig {
         let assignment = external_stack_assignment(binary_name, &run_id, port_base)?;
 
         self.stack_id = assignment.stack_id;
-        self.registry_port = Some(assignment.registry_port);
         self.rpc_url = Some(Url::parse(&format!("http://localhost:{}", assignment.anvil_port))?);
         self.bloklid_url = Some(Url::parse(&format!("http://localhost:{}", assignment.bloklid_port))?);
         Ok(())
@@ -162,19 +137,6 @@ impl TestConfig {
 
     pub fn rpc_url(&self) -> &Url {
         self.rpc_url.as_ref().expect("rpc_url not initialized")
-    }
-
-    pub fn registry_port(&self) -> u16 {
-        self.registry_port.expect("registry_port not initialized")
-    }
-
-    pub fn contract_addresses(&self) -> Result<ContractAddresses> {
-        let config_path = self.integration_dir.join(&self.integration_config);
-        let contents = fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read integration config at {}", config_path.display()))?;
-        let config: IntegrationServiceConfig = toml_edit::de::from_str(&contents)
-            .with_context(|| format!("Failed to parse integration config at {}", config_path.display()))?;
-        Ok(config.contracts)
     }
 
     pub fn bloklid_port(&self, offset: u16) -> u16 {
@@ -212,19 +174,18 @@ fn external_stack_assignment(binary_name: &str, run_id: &str, port_base: u16) ->
     };
 
     let stack_offset = stack_index * STACK_PORT_STRIDE;
-    let registry_port = port_base
+    let stack_port_base = port_base
         .checked_add(stack_offset)
-        .context("Integration stack registry port exceeds u16 range")?;
-    let anvil_port = registry_port
+        .context("Integration stack port base exceeds u16 range")?;
+    let anvil_port = stack_port_base
         .checked_add(1)
         .context("Integration stack Anvil port exceeds u16 range")?;
-    let bloklid_port = registry_port
+    let bloklid_port = stack_port_base
         .checked_add(2)
         .context("Integration stack bloklid port exceeds u16 range")?;
 
     Ok(ExternalStackAssignment {
         stack_id: format!("{run_id}-{stack_name}"),
-        registry_port,
         anvil_port,
         bloklid_port,
     })
@@ -275,85 +236,7 @@ mod tests {
     use clap::Parser;
     use tempfile::{TempDir, tempdir};
 
-    use super::{
-        DEFAULT_INTEGRATION_CONFIG, ExternalStackAssignment, IntegrationServiceConfig, TestConfig,
-        external_stack_assignment, resolve_paths, validate_workspace_root,
-    };
-
-    /// Resolves `config-integration-anvil.toml`'s path the same way [`TestConfig::load`] does
-    /// (respecting `BLOKLI_TEST_WORKSPACE_ROOT` at runtime), rather than `env!("CARGO_MANIFEST_DIR")`,
-    /// which bakes in the compile-time (e.g. Nix sandbox) path and can be absent at test-run time.
-    fn integration_config_path() -> PathBuf {
-        let (_, integration_dir) = resolve_paths().expect("integration workspace root should be resolvable");
-        integration_dir.join(DEFAULT_INTEGRATION_CONFIG)
-    }
-
-    fn read_integration_service_config() -> IntegrationServiceConfig {
-        let contents =
-            fs::read_to_string(integration_config_path()).expect("config-integration-anvil.toml should be readable");
-        toml_edit::de::from_str(&contents).expect("config-integration-anvil.toml should parse")
-    }
-
-    /// Guards against the addresses pinned in `config-integration-anvil.toml` silently drifting
-    /// from hopr-bindings' `contracts-addresses.json` (e.g. after a `hopr-bindings` version bump
-    /// changes the deployment order). Such drift makes `bloklid` watch the wrong addresses, so
-    /// safe/channel/account indexing silently times out instead of failing fast.
-    #[test]
-    fn config_contract_addresses_match_hopr_bindings() {
-        let config = read_integration_service_config();
-
-        let (_, expected) = hopr_types::chain::contract_addresses_for_network(&config.network).unwrap_or_else(|| {
-            panic!(
-                "hopr-bindings contracts-addresses.json has no entry for network '{}'",
-                config.network
-            )
-        });
-
-        assert_eq!(
-            config.contracts, expected,
-            "{DEFAULT_INTEGRATION_CONFIG}'s [contracts] addresses have drifted from hopr-bindings' \
-             contracts-addresses.json for network '{}'. Run `just regen-integration-contracts` to refresh them.",
-            config.network
-        );
-    }
-
-    /// Rewrites `config-integration-anvil.toml`'s `[contracts]` addresses from hopr-bindings'
-    /// bundled `contracts-addresses.json`. Run via `just regen-integration-contracts` after
-    /// bumping `hopr-bindings` (or whenever `config_contract_addresses_match_hopr_bindings` fails).
-    #[test]
-    #[ignore = "run explicitly via `just regen-integration-contracts`"]
-    fn regenerate_contract_addresses_toml() {
-        let config = read_integration_service_config();
-
-        let (_, addresses) = hopr_types::chain::contract_addresses_for_network(&config.network).unwrap_or_else(|| {
-            panic!(
-                "hopr-bindings contracts-addresses.json has no entry for network '{}'",
-                config.network
-            )
-        });
-
-        let toml_path = integration_config_path();
-        let contents = fs::read_to_string(&toml_path).expect("config-integration-anvil.toml should be readable");
-        let mut doc = contents
-            .parse::<toml_edit::DocumentMut>()
-            .expect("config-integration-anvil.toml should parse as a TOML document");
-        let contracts = doc["contracts"]
-            .as_table_mut()
-            .expect("config-integration-anvil.toml should have a [contracts] table");
-        contracts["announcements"] = toml_edit::value(addresses.announcements.to_string());
-        contracts["channels"] = toml_edit::value(addresses.channels.to_string());
-        contracts["module_implementation"] = toml_edit::value(addresses.module_implementation.to_string());
-        contracts["node_safe_migration"] = toml_edit::value(addresses.node_safe_migration.to_string());
-        contracts["node_safe_registry"] = toml_edit::value(addresses.node_safe_registry.to_string());
-        contracts["node_stake_factory"] = toml_edit::value(addresses.node_stake_factory.to_string());
-        contracts["service_registry"] = toml_edit::value(addresses.service_registry.to_string());
-        contracts["ticket_price_oracle"] = toml_edit::value(addresses.ticket_price_oracle.to_string());
-        contracts["token"] = toml_edit::value(addresses.token.to_string());
-        contracts["winning_probability_oracle"] = toml_edit::value(addresses.winning_probability_oracle.to_string());
-        contracts["xhopr_token"] = toml_edit::value(addresses.xhopr_token.to_string());
-
-        fs::write(&toml_path, doc.to_string()).expect("config-integration-anvil.toml should be writable");
-    }
+    use super::{ExternalStackAssignment, TestConfig, external_stack_assignment, validate_workspace_root};
 
     fn workspace_fixture(include_integration_dir: bool) -> TempDir {
         let workspace = tempdir().expect("temporary workspace should be created");
@@ -406,7 +289,6 @@ mod tests {
                 "blokli_query_client-hash",
                 ExternalStackAssignment {
                     stack_id: "local-query".to_string(),
-                    registry_port: 20_000,
                     anvil_port: 20_001,
                     bloklid_port: 20_002,
                 },
@@ -415,7 +297,6 @@ mod tests {
                 "blokli_subscription_client-hash",
                 ExternalStackAssignment {
                     stack_id: "local-subscription".to_string(),
-                    registry_port: 20_010,
                     anvil_port: 20_011,
                     bloklid_port: 20_012,
                 },
@@ -424,7 +305,6 @@ mod tests {
                 "blokli_transaction_client-hash",
                 ExternalStackAssignment {
                     stack_id: "local-transaction".to_string(),
-                    registry_port: 20_020,
                     anvil_port: 20_021,
                     bloklid_port: 20_022,
                 },
@@ -433,7 +313,6 @@ mod tests {
                 "blokli_load-hash",
                 ExternalStackAssignment {
                     stack_id: "local-load".to_string(),
-                    registry_port: 20_030,
                     anvil_port: 20_031,
                     bloklid_port: 20_032,
                 },

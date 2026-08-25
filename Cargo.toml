@@ -8,7 +8,7 @@ members = ["client", "inspector", "tests/integration"]
 anyhow = "1.0.103"
 async-broadcast = "0.7.2"
 async-trait = "0.1.89"
-blokli-client = { path = "client", version = "0.31.0" }
+blokli-client = { path = "client", version = "0.31.1" }
 bytes = "1.12.1"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive", "env", "string"] }
@@ -49,7 +49,6 @@ tokio = { version = "1.52.3", features = [
   "time",
   "tracing",
 ] }
-toml_edit = { version = "=0.25.12", features = ["serde"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = [
   "env-filter",
