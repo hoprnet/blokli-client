@@ -19,9 +19,9 @@ eventsource-client = { version = "0.17.5", default-features = false }
 futures = "0.3.32"
 futures-time = "3.1.0"
 hex = "0.4.3"
-hopli = { git = "https://github.com/hoprnet/hopli", rev = "32116320754e2897a3fb72ca8aff1ec8dae6a85e" }
-hopr-bindings = { git = "https://github.com/hoprnet/contracts", rev = "0eea1981c67343e65ff4e5ecb0b81b9ddc201b14" }
-hopr-types = { git = "https://github.com/hoprnet/hopr-types", rev = "68d626ba041da06fde90c9c3c51a4d53c5ab0c4c" }
+hopli = { git = "https://github.com/hoprnet/hopli", branch = "main" }
+hopr-bindings = "5.0.0"
+hopr-types = "3.1.0"
 http = "1.4.2"
 indexmap = "2.14.0"
 insta = { version = "1.48.0", features = ["yaml"] }
