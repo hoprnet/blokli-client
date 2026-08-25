@@ -952,8 +952,8 @@ async fn query_services_returns_a_registered_entry(#[future(awt)] fixture: Integ
             .is_some_and(|owner| hex_eq(owner, &node.address.to_string())),
         "the claiming account owns the type"
     );
-    assert_eq!(types[0].registration_burn, "0");
-    assert_eq!(types[0].update_burn, "0");
+    assert_eq!(types[0].registration_burn, "0 wxHOPR");
+    assert_eq!(types[0].update_burn, "0 wxHOPR");
 
     Ok(())
 }
