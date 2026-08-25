@@ -1,0 +1,17 @@
+---
+source: client/tests/query_tests.rs
+expression: recorder.requests()
+---
+- method: POST
+  path_and_query: /graphql
+  body:
+    Json:
+      query: "query QueryServices($serviceType: String, $node: String, $first: Int!, $after: UInt64, $watermark: UInt64, $liveOnly: Boolean!) {\n  services(serviceType: $serviceType, node: $node, first: $first, after: $after, watermark: $watermark, liveOnly: $liveOnly) {\n    __typename\n    ... on ServicesList {\n      services {\n        serviceType\n        node\n        safe\n        metadata\n        registeredAt\n        updatedAt\n      }\n      watermark\n      nextCursor\n    }\n    ... on MissingFilterError {\n      __typename\n      code\n      message\n    }\n    ... on QueryFailedError {\n      __typename\n      message\n      code\n    }\n  }\n}\n"
+      variables:
+        serviceType: "0x6776706e3a657869740000000000000000000000000000000000000000000000"
+        node: ~
+        first: 1000
+        after: ~
+        watermark: ~
+        liveOnly: false
+      operationName: QueryServices

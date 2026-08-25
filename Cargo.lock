@@ -329,9 +329,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-json-rpc"
-version = "2.1.1"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4691c60de5d628533752cd07e102d17c47874c06c04c91af33960fd94c484f4"
+checksum = "7e5722ea29a9a85ecdba2516c58f50d71e77cd25f8ce7e9f4ee8570ddeee6df1"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -694,9 +694,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-transport"
-version = "2.1.1"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "999adfe5c91035c6bf4c4210e0eb8d0caed79d76fbf5e1b70d78721f6097ac04"
+checksum = "06f4ca8484d6295d5165f67de8fdb00ae630ba585efb606f003171286b56441c"
 dependencies = [
  "alloy-json-rpc",
  "auto_impl",
@@ -717,9 +717,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-transport-http"
-version = "2.1.1"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e79a2c1793afc61eed9ca0963da370a988b27d2bbfa67c78013e262d47424c4"
+checksum = "8342aa5a7f8dee6d606307eebbc847d9799a823c7e4f37b9c1e32b08715f73c8"
 dependencies = [
  "alloy-json-rpc",
  "alloy-transport",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "blokli-client"
-version = "0.31.1"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "blokli-inspector"
-version = "0.13.2"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "blokli-client",
@@ -1875,7 +1875,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2384,7 +2384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.118",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2723,7 +2723,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3103,9 +3103,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.15"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
+checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3260,8 +3260,8 @@ dependencies = [
 
 [[package]]
 name = "hopli"
-version = "0.18.0"
-source = "git+https://github.com/hoprnet/hopli?branch=main#fb64f4790af41ff7b749a6ba07f60f5b5a0935de"
+version = "0.20.1"
+source = "git+https://github.com/hoprnet/hopli?branch=main#6ba76de4166f46a0e00c3fc944d18745966bf281"
 dependencies = [
  "alloy-transport-http",
  "anyhow",
@@ -3284,9 +3284,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-bindings"
-version = "4.13.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8be6fd9b90421c230f80c6ba872cd02c65cfd5e84cdb99956edbd8a6dac6334c"
+checksum = "13cb248171e67e6bf5891c2e60e5a02389ba3121da8a1aa77b3f435e75c6099f"
 dependencies = [
  "alloy",
  "anyhow",
@@ -3302,9 +3302,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "2.3.0"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a19fe24538d5d68590496763119afbb5f8ccb466f88abbf36cda7a8c7d49e1f1"
+checksum = "6994bdc05812ab588d3fa970c1df9a7bea3d8808907baf30c0596a54b84458f3"
 dependencies = [
  "aes",
  "anyhow",
@@ -4167,7 +4167,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4788,7 +4788,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5230,7 +5230,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5287,7 +5287,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6049,7 +6049,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6727,7 +6727,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

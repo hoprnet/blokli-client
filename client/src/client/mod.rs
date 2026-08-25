@@ -277,7 +277,7 @@ impl BlokliClient {
     fn build_subscription_stream<Q, V>(
         &self,
         op: cynic::StreamingOperation<Q, V>,
-    ) -> Result<impl futures::Stream<Item = Result<Q, BlokliClientError>>, BlokliClientError>
+    ) -> Result<impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static, BlokliClientError>
     where
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
