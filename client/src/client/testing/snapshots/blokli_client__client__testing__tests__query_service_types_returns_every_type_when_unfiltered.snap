@@ -1,0 +1,14 @@
+---
+source: client/src/client/testing/mod.rs
+expression: types
+---
+- service_type: "gvpn:exit"
+  owner: "0x4444"
+  requirement: ~
+  registration_burn: 1 wxHOPR
+  update_burn: 0 wxHOPR
+- service_type: "gvpn:relay"
+  owner: ~
+  requirement: ~
+  registration_burn: 1 wxHOPR
+  update_burn: 0 wxHOPR

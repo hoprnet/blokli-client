@@ -73,6 +73,71 @@ impl RpcClient {
         Ok(())
     }
 
+    /// Performs an `eth_call` against `to` with the given calldata and returns the raw return data.
+    pub async fn call(&self, to: &str, calldata: &[u8]) -> Result<Vec<u8>> {
+        let value = self
+            .call_raw(
+                "eth_call",
+                vec![
+                    json!({"to": to, "input": format!("0x{}", hex::encode(calldata))}),
+                    json!("latest"),
+                ],
+            )
+            .await?
+            .context("eth_call returned no result")?;
+
+        let encoded = value.as_str().context("eth_call returned non-string result")?;
+        hex::decode(encoded.trim_start_matches("0x")).context("failed to decode eth_call return data")
+    }
+
+    /// Makes Anvil accept unsigned transactions sent from `address`.
+    ///
+    /// This is the cheapest way for a test to act as a contract, such as a Safe, that has no
+    /// private key.
+    pub async fn impersonate_account(&self, address: &str) -> Result<()> {
+        self.call_raw("anvil_impersonateAccount", vec![json!(address)]).await?;
+        Ok(())
+    }
+
+    /// Reverts [`impersonate_account`](RpcClient::impersonate_account) for `address`.
+    pub async fn stop_impersonating_account(&self, address: &str) -> Result<()> {
+        self.call_raw("anvil_stopImpersonatingAccount", vec![json!(address)])
+            .await?;
+        Ok(())
+    }
+
+    /// Sets the native balance of `address`, so an impersonated account can pay for gas.
+    pub async fn set_balance(&self, address: &str, balance: U256) -> Result<()> {
+        self.call_raw("anvil_setBalance", vec![json!(address), json!(balance.to_string())])
+            .await?;
+        Ok(())
+    }
+
+    /// Sends an unsigned transaction from `from`, which Anvil must be impersonating.
+    pub async fn send_transaction_from(&self, from: &str, to: &str, calldata: &[u8]) -> Result<[u8; 32]> {
+        let value = self
+            .call_raw(
+                "eth_sendTransaction",
+                vec![json!({
+                    "from": from,
+                    "to": to,
+                    "input": format!("0x{}", hex::encode(calldata)),
+                })],
+            )
+            .await?
+            .context("eth_sendTransaction returned no result")?;
+
+        let tx_hash_str = value
+            .as_str()
+            .context("eth_sendTransaction returned non-string result")?;
+        let tx_hash_bytes =
+            hex::decode(tx_hash_str.trim_start_matches("0x")).context("failed to decode transaction hash from hex")?;
+
+        tx_hash_bytes
+            .try_into()
+            .map_err(|_| anyhow!("eth_sendTransaction returned a transaction hash that is not 32 bytes"))
+    }
+
     async fn call_raw(&self, method: &str, params: Vec<Value>) -> Result<Option<Value>> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0",

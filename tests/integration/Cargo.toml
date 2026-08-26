@@ -15,6 +15,7 @@ async-trait = { workspace = true }
 blokli-client = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
+curvy-bindings = { workspace = true }
 curvy-chain-api = { workspace = true }
 curvy-sdk = { workspace = true }
 curvy-types = { workspace = true }

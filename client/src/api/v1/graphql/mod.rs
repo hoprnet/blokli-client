@@ -13,6 +13,7 @@ pub mod curvy;
 pub mod graph;
 pub mod info;
 pub mod safe;
+pub mod services;
 pub mod tickets;
 pub mod txs;
 

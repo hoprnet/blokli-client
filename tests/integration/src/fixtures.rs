@@ -13,14 +13,21 @@ use blokli_client::{
         types::{ReadinessState, Safe},
     },
 };
+use curvy_bindings::{
+    constants::WITHDRAWAL_MAX_INPUTS,
+    curvy_aggregator_alpha_v2::CurvyAggregatorAlphaV2::{CurvyAggregatorAlphaV2Instance, submitWithdrawalRequestCall},
+    portal_factory::{CurvyTypes, PortalFactory::PortalFactoryInstance},
+};
 use futures::StreamExt;
 use futures_time::future::FutureExt as FutureTimeoutExt;
-use hopli_lib::methods::transfer_or_mint_tokens;
-use hopr_bindings::{
-    curvy::{
-        CurvyAggregatorAlphaV2Instance, CurvyTypes, CurvyWithdrawalRequest, Groth16Proof, PortalFactoryInstance,
-        WITHDRAWAL_MAX_INPUTS,
+use hopli_lib::{
+    methods::transfer_or_mint_tokens,
+    payloads::{
+        approve_hopr_token_payload, register_service_type_payload, self_deregister_service_payload,
+        self_register_service_payload, self_update_service_payload,
     },
+};
+use hopr_bindings::{
     erc677_mock::ERC677Mock::transferCall,
     exports::alloy::{
         primitives::{Address, U256, keccak256},
@@ -32,6 +39,7 @@ use hopr_bindings::{
         signers::local::PrivateKeySigner,
         sol_types::SolCall,
     },
+    hopr_service_registry::HoprServiceRegistry::typeRegistrationFeeCall,
     hopr_token::HoprToken::HoprTokenInstance,
 };
 use hopr_types::{
@@ -44,7 +52,12 @@ use hopr_types::{
         keypairs::{ChainKeypair, Keypair},
         types::{HalfKey, Hash, Response},
     },
-    internal::{Multiaddr, announcement::AnnouncementData, tickets::TicketBuilder},
+    internal::{
+        Multiaddr,
+        announcement::AnnouncementData,
+        service::{ServiceMetadata, ServiceType},
+        tickets::TicketBuilder,
+    },
     primitive::{
         prelude::{Address as HoprAddress, HoprBalance, XHoprBalance},
         traits::IntoEndian,
@@ -194,11 +207,11 @@ where
     /// The public signals follow Curvy's withdrawal circuit layout: amount, input nullifiers, the referenced
     /// committed-note root, recipient, and token. Production callers must generate these values and a valid proof from
     /// the owned notes instead of replacing verifier bytecode.
-    pub async fn prepare_withdrawal_request(
+    pub async fn prepare_withdrawal_transaction(
         &self,
         rpc: &RpcClient,
         recipient: Address,
-    ) -> Result<(CurvyWithdrawalRequest, [U256; 2])> {
+    ) -> Result<(TransactionRequest, [U256; 2])> {
         let verifier = self
             .aggregator
             .getWithdrawalVerifier(WITHDRAWAL_MAX_INPUTS)
@@ -207,15 +220,28 @@ where
         install_accept_all_verifier(rpc, verifier).await?;
 
         let nullifiers = [U256::from(401), U256::from(402)];
-        let request = CurvyWithdrawalRequest {
-            proof: Groth16Proof::default(),
-            token: U256::from(CURVY_TEST_NATIVE_TOKEN_ID),
-            nullifiers,
-            recipient,
-            amount: U256::from(CURVY_TEST_AMOUNT),
-            notes_root: self.aggregator.currentNotesTreeRoot().call().await?,
+        let token = U256::from(CURVY_TEST_NATIVE_TOKEN_ID);
+        let amount = U256::from(CURVY_TEST_AMOUNT);
+        let notes_root = self.aggregator.currentNotesTreeRoot().call().await?;
+        let public_signals = vec![
+            amount,
+            nullifiers[0],
+            nullifiers[1],
+            notes_root,
+            U256::from_be_slice(recipient.as_slice()),
+            token,
+        ];
+        let call = submitWithdrawalRequestCall {
+            maxInputs: WITHDRAWAL_MAX_INPUTS,
+            proof_a: [U256::ZERO; 2],
+            proof_b: [[U256::ZERO; 2]; 2],
+            proof_c: [U256::ZERO; 2],
+            publicSignals: public_signals,
         };
-        Ok((request, nullifiers))
+        let transaction = TransactionRequest::default()
+            .to(*self.aggregator.address())
+            .input(call.abi_encode().into());
+        Ok((transaction, nullifiers))
     }
 
     pub fn aggregator_address(&self) -> Address {
@@ -226,6 +252,9 @@ where
         Ok(self.aggregator.nullifiers(nullifier).call().await?)
     }
 }
+
+/// Native balance handed to an impersonated safe so it can pay for gas: one xDai.
+const IMPERSONATED_SAFE_GAS_BUDGET: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Eip1559GasParameters {
@@ -687,6 +716,143 @@ impl IntegrationFixture {
     }
 }
 
+// Service registry related helpers
+impl IntegrationFixture {
+    /// Signs `calldata` as an EIP-1559 call from `from` to `to` and submits it through blokli.
+    async fn submit_eoa_call(&self, from: &AnvilAccount, to: Address, calldata: Vec<u8>) -> Result<[u8; 32]> {
+        let nonce = self.rpc().transaction_count(&from.address).await?;
+        let gas = self.resolve_eip1559_gas_parameters(None).await;
+
+        let signed_hex = TestTransactionBuilder::new(&from.keypair)?
+            .build_eip1559_call_hex(
+                self.rpc().chain_id().await?,
+                nonce,
+                to,
+                U256::ZERO,
+                calldata,
+                gas.max_fee_per_gas,
+                gas.max_priority_fee_per_gas,
+                gas.gas_limit,
+            )
+            .await?;
+
+        let signed_bytes = hex::decode(signed_hex.trim_start_matches("0x")).context("failed to decode signed call")?;
+
+        self.submit_and_confirm_tx(&signed_bytes, self.config().tx_confirmations)
+            .await
+    }
+
+    /// Reads the registry-wide fee that [`register_service_type`](IntegrationFixture::register_service_type) pays.
+    pub async fn type_registration_fee(&self) -> Result<U256> {
+        let registry = self.contract_addresses().service_registry;
+        let returned = self
+            .rpc()
+            .call(&registry.to_string(), &typeRegistrationFeeCall {}.abi_encode())
+            .await?;
+
+        Ok(U256::from_be_slice(&returned))
+    }
+
+    /// Claims `service_type` from `owner`'s EOA, with no per-type registration or update burn.
+    ///
+    /// Type claims are first come, first served and cannot be repeated, so every test must use a type id that no
+    /// other test in the same stack claims.
+    pub async fn register_service_type(&self, owner: &AnvilAccount, service_type: &ServiceType) -> Result<()> {
+        let registry = self.contract_addresses().service_registry;
+        let fee = self.type_registration_fee().await?;
+
+        // The registry pulls the fee with `transferFrom` and burns it, so the claim needs an allowance first.
+        let approval = approve_hopr_token_payload(self.contract_addresses().token, registry, fee);
+        self.submit_eoa_call(owner, self.contract_addresses().token, request_calldata(&approval)?)
+            .await?;
+
+        let claim = register_service_type_payload(registry, service_type, Address::ZERO, U256::ZERO, U256::ZERO);
+        self.submit_eoa_call(owner, registry, request_calldata(&claim)?).await?;
+
+        Ok(())
+    }
+
+    /// Registers `node` under `service_type` as the safe bound to it in the node-safe registry.
+    ///
+    /// `selfRegister` requires `msg.sender` to be that safe, so the call is sent from an impersonated safe rather
+    /// than through a threshold-one Safe transaction, which would add a signing path this suite needs nowhere else.
+    /// It assumes the type carries no registration burn, so no allowance is required from the safe.
+    pub async fn self_register_service(
+        &self,
+        safe_address: &str,
+        node: &AnvilAccount,
+        service_type: &ServiceType,
+        metadata: &ServiceMetadata,
+    ) -> Result<[u8; 32]> {
+        let registry = self.contract_addresses().service_registry;
+        let payload = self_register_service_payload(registry, service_type, node.to_alloy_address(), metadata);
+
+        self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
+            .await
+    }
+
+    /// Replaces the metadata of the entry of `node` under `service_type`, as the safe bound to the node.
+    pub async fn self_update_service(
+        &self,
+        safe_address: &str,
+        node: &AnvilAccount,
+        service_type: &ServiceType,
+        metadata: &ServiceMetadata,
+    ) -> Result<[u8; 32]> {
+        let registry = self.contract_addresses().service_registry;
+        let payload = self_update_service_payload(registry, service_type, node.to_alloy_address(), metadata);
+
+        self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
+            .await
+    }
+
+    /// Removes the entry of `node` under `service_type`, as the safe bound to the node.
+    pub async fn self_deregister_service(
+        &self,
+        safe_address: &str,
+        node: &AnvilAccount,
+        service_type: &ServiceType,
+    ) -> Result<[u8; 32]> {
+        let registry = self.contract_addresses().service_registry;
+        let payload = self_deregister_service_payload(registry, service_type, node.to_alloy_address());
+
+        self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
+            .await
+    }
+
+    async fn send_impersonated_safe_call(
+        &self,
+        safe_address: &str,
+        to: Address,
+        calldata: Vec<u8>,
+    ) -> Result<[u8; 32]> {
+        // An impersonated account still pays for its own gas.
+        self.rpc()
+            .set_balance(safe_address, IMPERSONATED_SAFE_GAS_BUDGET)
+            .await?;
+        self.rpc().impersonate_account(safe_address).await?;
+
+        let result = self
+            .rpc()
+            .send_transaction_from(safe_address, &to.to_string(), &calldata)
+            .await;
+
+        // Stop impersonating even when the call reverted, so a failure cannot leak into later tests.
+        self.rpc().stop_impersonating_account(safe_address).await?;
+
+        result
+    }
+}
+
+/// Extracts the calldata that a hopli payload builder put into a transaction request.
+fn request_calldata(request: &TransactionRequest) -> Result<Vec<u8>> {
+    Ok(request
+        .input
+        .input()
+        .context("hopli payload carries no calldata")?
+        .to_vec())
+}
+
 impl IntegrationFixture {
     pub async fn deploy_safe_and_announce(&self, owner: &AnvilAccount, amount: HoprBalance) -> Result<Safe> {
         let safe = self.deploy_or_get_safe(owner, amount).await?;
@@ -995,7 +1161,6 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
     info!(contract_addresses = ?contract_addresses, "using contract addresses deployed by the integration image");
 
     let hopr_token = HoprTokenInstance::new(contract_addresses.token, Arc::new(provider));
-
     let encoded_minter_role = keccak256(b"MINTER_ROLE");
     hopr_token
         .grantRole(encoded_minter_role, deployer_address)
@@ -1008,7 +1173,6 @@ pub async fn build_integration_fixture() -> Result<IntegrationFixture> {
 
     let external_addresses: Vec<Address> = accounts.iter().skip(1).map(AnvilAccount::to_alloy_address).collect();
     let amounts = vec![U256::from(1_000_000_000_000_000_000_000u128); external_addresses.len()];
-
     let total_transferred_amount = transfer_or_mint_tokens(hopr_token, external_addresses, amounts).await?;
 
     info!(

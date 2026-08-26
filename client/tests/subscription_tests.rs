@@ -4,8 +4,8 @@ use anyhow::Result;
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
-        BlokliSubscriptionClient,
-        types::{ChannelStatus, ReadinessState},
+        BlokliSubscriptionClient, ServiceSelector,
+        types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind},
     },
 };
 use futures::StreamExt;
@@ -14,6 +14,12 @@ use tokio::{
     net::TcpListener,
 };
 use url::Url;
+
+/// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
+const GVPN_EXIT: [u8; 32] = [
+    0x67, 0x76, 0x70, 0x6e, 0x3a, 0x65, 0x78, 0x69, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0,
+];
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 struct TicketParams {
@@ -338,6 +344,58 @@ async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result
 }
 
 #[tokio::test]
+async fn subscribe_services_forwards_a_registration() -> Result<()> {
+    let (base_url, server) = spawn_single_streaming_server(format_service_event(
+        "REGISTERED",
+        Some(serde_json::json!({
+            "serviceType": "gvpn:exit",
+            "node": "0x1111111111111111111111111111111111111111",
+            "safe": "0x3333333333333333333333333333333333333333",
+            "metadata": "0xdeadbeef",
+            "registeredAt": "1700000000",
+            "updatedAt": "1700000000",
+        })),
+    ))
+    .await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_services(ServiceSelector::ServiceType(GVPN_EXIT))?;
+    let update = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering a service event"))??;
+
+    assert_eq!(update.kind, ServiceUpdateKind::Registered);
+    assert_eq!(update.service_type, "gvpn:exit");
+    assert_eq!(update.node, "0x1111111111111111111111111111111111111111");
+    assert_eq!(
+        update.entry.as_ref().map(|entry| entry.metadata.as_str()),
+        Some("0xdeadbeef")
+    );
+
+    server.await??;
+    Ok(())
+}
+
+/// A deregistration carries no entry, which is the reason the payload is discriminated at all: a bare
+/// `ServiceEntry` cannot express the removal of an entry.
+#[tokio::test]
+async fn subscribe_services_forwards_a_deregistration_without_an_entry() -> Result<()> {
+    let (base_url, server) = spawn_single_streaming_server(format_service_event("DEREGISTERED", None)).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_services(ServiceSelector::Node([0x11; 20]))?;
+    let update = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering a service event"))??;
+
+    assert_eq!(update.kind, ServiceUpdateKind::Deregistered);
+    assert!(update.entry.is_none());
+
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Result<()> {
     let body = format_curvy_event(
         "curvyCommittedNote",
@@ -375,6 +433,83 @@ async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Resul
 
     server.await??;
     Ok(())
+}
+
+#[tokio::test]
+async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()> {
+    let payload = serde_json::json!({
+        "data": {
+            "serviceTypeUpdated": {
+                "kind": "REGISTRY_POINTER_CHANGED",
+                "serviceType": null,
+                "config": null,
+                "registryConfig": {
+                    "typeRegistrationFee": "1 wxHOPR",
+                    "nodeSafeRegistry": "0x5555555555555555555555555555555555555555",
+                },
+            },
+        },
+    });
+    let (base_url, server) = spawn_single_streaming_server(format!("event: next\ndata: {payload}\n\n")).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_service_types(None)?;
+    let update = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering a service type event"))??;
+
+    assert_eq!(update.kind, ServiceTypeUpdateKind::RegistryPointerChanged);
+    assert!(update.service_type.is_none());
+    assert!(update.config.is_none());
+    assert_eq!(
+        update
+            .registry_config
+            .as_ref()
+            .map(|config| config.node_safe_registry.as_str()),
+        Some("0x5555555555555555555555555555555555555555")
+    );
+
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscribe_service_registry_config_forwards_complete_state() -> Result<()> {
+    let payload = serde_json::json!({
+        "data": {
+            "serviceRegistryConfigUpdated": {
+                "typeRegistrationFee": "1 wxHOPR",
+                "nodeSafeRegistry": "0x5555555555555555555555555555555555555555",
+            },
+        },
+    });
+    let (base_url, server) = spawn_single_streaming_server(format!("event: next\ndata: {payload}\n\n")).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_service_registry_config()?;
+    let config = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering registry configuration"))??;
+
+    assert_eq!(config.type_registration_fee, "1 wxHOPR");
+    assert_eq!(config.node_safe_registry, "0x5555555555555555555555555555555555555555");
+
+    server.await??;
+    Ok(())
+}
+
+fn format_service_event(kind: &str, entry: Option<serde_json::Value>) -> String {
+    let payload = serde_json::json!({
+        "data": {
+            "serviceUpdated": {
+                "kind": kind,
+                "serviceType": "gvpn:exit",
+                "node": "0x1111111111111111111111111111111111111111",
+                "entry": entry,
+            },
+        },
+    });
+    format!("event: next\ndata: {payload}\n\n")
 }
 
 async fn spawn_reconnecting_server(

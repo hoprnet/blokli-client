@@ -1,0 +1,12 @@
+---
+source: client/tests/query_tests.rs
+expression: recorder.requests()
+---
+- method: POST
+  path_and_query: /graphql
+  body:
+    Json:
+      query: "query QueryServiceTypes($serviceType: String) {\n  serviceTypes(serviceType: $serviceType) {\n    __typename\n    ... on ServiceTypesList {\n      serviceTypes {\n        serviceType\n        owner\n        requirement\n        registrationBurn\n        updateBurn\n      }\n    }\n    ... on QueryFailedError {\n      __typename\n      message\n      code\n    }\n  }\n}\n"
+      variables:
+        serviceType: "0x6776706e3a657869740000000000000000000000000000000000000000000000"
+      operationName: QueryServiceTypes

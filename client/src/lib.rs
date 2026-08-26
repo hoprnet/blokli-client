@@ -167,7 +167,7 @@ pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use api::{
     AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, ChainAddress, ChannelFilter,
     ChannelId, ChannelSelector, KeyId, ModulePredictionInput, PacketKey, RedeemedStatsSelector, SafeSelector,
-    TicketSelector, TxId, TxReceipt, types,
+    ServiceSelector, ServiceTypeId, TicketSelector, TxId, TxReceipt, types,
 };
 pub use client::{BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport};
 #[cfg(feature = "testing")]

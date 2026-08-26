@@ -16,10 +16,7 @@ use blokli_integration_tests::{
 use futures::StreamExt;
 use futures_time::future::FutureExt as FutureTimeoutExt;
 use hex::FromHex;
-use hopr_bindings::{
-    curvy::CurvyPayloadGenerator,
-    exports::alloy::{network::TransactionBuilder as AlloyTransactionBuilder, primitives::U256},
-};
+use hopr_bindings::exports::alloy::{network::TransactionBuilder as AlloyTransactionBuilder, primitives::U256};
 use rstest::rstest;
 use serial_test::serial;
 use tokio::sync::oneshot;
@@ -136,11 +133,9 @@ async fn deposit_subscriptions_detect_complete_and_withdraw(#[future(awt)] fixtu
     let recipient = &fixture.accounts()[1];
     let recipient_address = recipient.to_alloy_address();
     let initial_recipient_balance = fixture.rpc().get_balance(&recipient.address).await?;
-    let (withdrawal_request, nullifiers) = test_chain
-        .prepare_withdrawal_request(fixture.rpc(), recipient_address)
+    let (withdrawal_transaction, nullifiers) = test_chain
+        .prepare_withdrawal_transaction(fixture.rpc(), recipient_address)
         .await?;
-    let withdrawal_transaction =
-        CurvyPayloadGenerator::new(test_chain.aggregator_address()).withdraw(withdrawal_request);
     let withdrawal_target =
         AlloyTransactionBuilder::to(&withdrawal_transaction).context("withdrawal transaction is missing its target")?;
     let withdrawal_calldata = AlloyTransactionBuilder::input(&withdrawal_transaction)

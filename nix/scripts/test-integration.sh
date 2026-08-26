@@ -31,12 +31,11 @@ fi
 stack_values() {
   local index="$1"
   local name="${stack_names[$index]}"
-  local registry_port=$((BLOKLI_TEST_PORT_BASE + index * 10))
+  local stack_port_base=$((BLOKLI_TEST_PORT_BASE + index * 10))
 
   stack_id="$BLOKLI_TEST_RUN_ID-$name"
-  stack_registry_port="$registry_port"
-  stack_anvil_port=$((registry_port + 1))
-  stack_bloklid_port=$((registry_port + 2))
+  stack_anvil_port=$((stack_port_base + 1))
+  stack_bloklid_port=$((stack_port_base + 2))
 }
 
 compose_up() {
@@ -45,11 +44,9 @@ compose_up() {
   (
     cd "$integration_dir"
     STACK_ID="$stack_id" \
-      REGISTRY_PORT="$stack_registry_port" \
       ANVIL_PORT="$stack_anvil_port" \
       BLOKLID_PORT="$stack_bloklid_port" \
       BLOKLID_IMAGE="$BLOKLI_TEST_IMAGE" \
-      INTEGRATION_CONFIG="${BLOKLI_TEST_CONFIG:-config-integration-anvil.toml}" \
       docker compose -p "blokli-$stack_id" -f docker-compose.yml up -d
   )
 }
@@ -60,11 +57,9 @@ compose_down() {
   (
     cd "$integration_dir"
     STACK_ID="$stack_id" \
-      REGISTRY_PORT="$stack_registry_port" \
       ANVIL_PORT="$stack_anvil_port" \
       BLOKLID_PORT="$stack_bloklid_port" \
       BLOKLID_IMAGE="$BLOKLI_TEST_IMAGE" \
-      INTEGRATION_CONFIG="${BLOKLI_TEST_CONFIG:-config-integration-anvil.toml}" \
       docker compose -p "blokli-$stack_id" -f docker-compose.yml down -v --remove-orphans
   )
 }
@@ -133,7 +128,7 @@ prepare_image() {
 
   if [[ -z $source_image ]]; then
     if [[ -z $BLOKLI_TEST_REMOTE_IMAGE ]]; then
-      echo "No local bloklid image found and BLOKLI_TEST_REMOTE_IMAGE is not set" >&2
+      echo "No local bloklid-anvil image found and BLOKLI_TEST_REMOTE_IMAGE is not set" >&2
       return 1
     fi
     docker pull --platform linux/amd64 "$BLOKLI_TEST_REMOTE_IMAGE"

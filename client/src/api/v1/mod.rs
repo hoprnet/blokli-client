@@ -19,6 +19,7 @@
 //! - [`ChannelSelector`] combines an optional [`ChannelFilter`], channel status, and safe address.
 //! - [`SafeSelector`] selects safes by safe address, owner, chain key alias, or registered node.
 //! - [`RedeemedStatsSelector`] selects ticket redemption aggregates.
+//! - [`ServiceSelector`] selects service registry entries by service type, node, or both.
 //! - [`TicketSelector`] filters ticket redemption subscription events.
 //!
 //! # Response models
@@ -47,7 +48,7 @@
 
 use std::{fmt::Formatter, time::Duration};
 
-mod graphql;
+pub(crate) mod graphql;
 pub mod types {
     pub use super::graphql::{
         ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64, Uint256,
@@ -64,6 +65,10 @@ pub mod types {
         graph::OpenedChannelsGraphEntry,
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
         safe::{ModuleAddress, Safe},
+        services::{
+            ServiceEntry, ServiceRegistryConfig, ServiceTypeInfo, ServiceTypeUpdate, ServiceTypeUpdateKind,
+            ServiceUpdate, ServiceUpdateKind,
+        },
         tickets::{RedeemTicketDetails, RedemptionResult},
         txs::{SafeExecution, Transaction, TransactionStatus},
     };
@@ -99,6 +104,11 @@ pub(crate) mod internal {
             ModuleAddressVariables, QueryModuleAddress, QuerySafeBy, SafeByVariables, SafeSelectorInput,
             SubscribeSafeDeployment,
         },
+        services::{
+            QueryServiceCount, QueryServiceRegistryConfig, QueryServiceTypes, QueryServices, ServicePageVariables,
+            ServiceTypeVariables, ServiceVariables, SubscribeServiceRegistryConfig, SubscribeServiceTypes,
+            SubscribeServices,
+        },
         tickets::{SubscribeTicketRedeemed, TicketRedeemedVariables},
         txs::{
             ConfirmTransactionVariables, MutateConfirmTransaction, MutateSendTransaction, MutateTrackTransaction,
@@ -113,6 +123,16 @@ pub type ChainAddress = [u8; 20];
 pub type PacketKey = [u8; 32];
 /// Concrete 32-byte payment channel identifier.
 pub type ChannelId = [u8; 32];
+/// Service type identifier used by the on-chain service registry.
+///
+/// The registry stores the identifier as a raw `bytes32`. By convention it holds right-padded
+/// printable ASCII, so `gvpn:exit` is
+/// `0x6776706e3a657869740000000000000000000000000000000000000000000000`, but the contract does not
+/// enforce that, and any non-zero 32-byte value can appear on chain. Blokli renders the identifier
+/// as its ASCII name when it follows the convention and as `0x`-prefixed hex otherwise, so the
+/// string fields of [`ServiceEntry`](types::ServiceEntry) and
+/// [`ServiceTypeInfo`](types::ServiceTypeInfo) may hold either form.
+pub type ServiceTypeId = [u8; 32];
 /// Transaction receipt or hash returned by transaction submission endpoints.
 pub type TxReceipt = [u8; 32];
 /// Numeric Blokli key id.
@@ -222,6 +242,45 @@ impl std::fmt::Debug for SafeSelector {
             Self::Owner(address) => write!(f, "Owner({})", hex::encode(address)),
             Self::ChainKey(address) => write!(f, "ChainKey({})", hex::encode(address)),
             Self::RegisteredNode(address) => write!(f, "RegisteredNode({})", hex::encode(address)),
+        }
+    }
+}
+
+/// Selects [`ServiceEntry`](types::ServiceEntry) records by service type, node address, or both.
+///
+/// `ServiceSelector::Any` is accepted by [`BlokliQueryClient::count_services`] and
+/// [`BlokliSubscriptionClient::subscribe_services`]. [`BlokliQueryClient::query_services`] requires
+/// a narrower selector: the registry is permissionless and anyone can grow it, so a bare
+/// enumeration is not offered.
+#[derive(Clone, Copy)]
+pub enum ServiceSelector {
+    /// Select every entry of one service type.
+    ServiceType(ServiceTypeId),
+    /// Select every entry offered by one node.
+    Node(ChainAddress),
+    /// Select the single entry for one service type and one node.
+    ServiceTypeAndNode {
+        /// Service type identifier.
+        service_type: ServiceTypeId,
+        /// Node chain address.
+        node: ChainAddress,
+    },
+    /// Matches any registry entry.
+    Any,
+}
+
+impl std::fmt::Debug for ServiceSelector {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServiceType(service_type) => write!(f, "ServiceType({})", hex::encode(service_type)),
+            Self::Node(node) => write!(f, "Node({})", hex::encode(node)),
+            Self::ServiceTypeAndNode { service_type, node } => write!(
+                f,
+                "ServiceTypeAndNode(service_type={}, node={})",
+                hex::encode(service_type),
+                hex::encode(node)
+            ),
+            Self::Any => write!(f, "Any"),
         }
     }
 }
@@ -457,6 +516,29 @@ pub trait BlokliQueryClient {
     ///
     /// When `owner_address` is provided, restricts to safes whose registered accounts have that chain key.
     async fn query_safes_balance(&self, owner_address: Option<ChainAddress>) -> Result<types::SafesBalance>;
+    /// Counts service registry entries matching the given [`ServiceSelector`].
+    ///
+    /// [`ServiceSelector::Any`] is accepted here and counts every indexed entry.
+    async fn count_services(&self, selector: ServiceSelector) -> Result<u32>;
+    /// Returns service registry entries matching the given [`ServiceSelector`].
+    ///
+    /// Unlike [`count_services`](BlokliQueryClient::count_services), this method rejects
+    /// [`ServiceSelector::Any`]: the registry is permissionless and anyone can grow it, so a bare
+    /// enumeration is not offered.
+    async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<types::ServiceEntry>>;
+    /// Returns only entries whose node is currently bound in the NodeSafeRegistry selected by the
+    /// service registry itself.
+    async fn query_live_services(&self, selector: ServiceSelector) -> Result<Vec<types::ServiceEntry>>;
+    /// Returns service type configuration, optionally restricted to a single type.
+    ///
+    /// Passing `None` returns every registered type. Unlike the entry set, the set of types is
+    /// gated by the registry-wide type registration fee, so enumerating it is bounded.
+    async fn query_service_types(&self, service_type: Option<ServiceTypeId>) -> Result<Vec<types::ServiceTypeInfo>>;
+    /// Returns the current registry-wide type registration fee and node-safe registry pointer.
+    ///
+    /// This is the one-shot alternative to
+    /// [`BlokliSubscriptionClient::subscribe_service_registry_config`].
+    async fn query_service_registry_config(&self) -> Result<types::ServiceRegistryConfig>;
     /// Returns the latest known status for a tracked transaction id.
     ///
     /// The `tx_id` is the Blokli tracking id returned by
@@ -509,6 +591,36 @@ pub trait BlokliSubscriptionClient {
     fn subscribe_health(&self) -> Result<impl futures::Stream<Item = Result<types::ReadinessState>> + Send>;
     /// Streams on-chain safe deployments indexed by Blokli.
     fn subscribe_safe_deployments(&self) -> Result<impl futures::Stream<Item = Result<types::Safe>> + Send>;
+    /// Streams changes to service registry entries matching the given [`ServiceSelector`].
+    ///
+    /// Each item reports one registration, update, or deregistration. Deregistration carries no
+    /// entry, because the entry no longer exists; the service type and node on the
+    /// [`ServiceUpdate`](types::ServiceUpdate) identify what was removed.
+    ///
+    /// [`ServiceSelector::Any`] subscribes to every registry change.
+    fn subscribe_services(
+        &self,
+        selector: ServiceSelector,
+    ) -> Result<impl futures::Stream<Item = Result<types::ServiceUpdate>> + Send>;
+    /// Streams changes to service type and registry-wide configuration.
+    ///
+    /// Passing `None` subscribes to every type. The two registry-wide kinds,
+    /// [`RegistrationFeeChanged`](types::ServiceTypeUpdateKind::RegistrationFeeChanged) and
+    /// [`RegistryPointerChanged`](types::ServiceTypeUpdateKind::RegistryPointerChanged), carry no
+    /// service type and report their new state on
+    /// [`registry_config`](types::ServiceTypeUpdate::registry_config).
+    fn subscribe_service_types(
+        &self,
+        service_type: Option<ServiceTypeId>,
+    ) -> Result<impl futures::Stream<Item = Result<types::ServiceTypeUpdate>> + Send>;
+    /// Streams the complete registry-wide configuration.
+    ///
+    /// The first item is the current type registration fee and node-safe registry pointer. Later
+    /// items contain the complete configuration after either value changes, so callers do not need
+    /// a separate query before subscribing.
+    fn subscribe_service_registry_config(
+        &self,
+    ) -> Result<impl futures::Stream<Item = Result<types::ServiceRegistryConfig>> + Send + 'static>;
     /// Streams status updates for a tracked transaction id.
     ///
     /// The `tx_id` is the Blokli tracking id returned by
