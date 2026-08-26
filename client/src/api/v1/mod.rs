@@ -230,10 +230,10 @@ impl std::fmt::Debug for SafeSelector {
 
 /// Selects [`ServiceEntry`](types::ServiceEntry) records by service type, node address, or both.
 ///
-/// `ServiceSelector::Any` is accepted by [`BlokliQueryClient::count_services`] and
-/// [`BlokliSubscriptionClient::subscribe_services`]. [`BlokliQueryClient::query_services`] requires
-/// a narrower selector: the registry is permissionless and anyone can grow it, so a bare
-/// enumeration is not offered.
+/// `ServiceSelector::Any` is accepted wherever a selector is taken, including
+/// [`BlokliQueryClient::query_services`], where it enumerates the whole registry. Blokli answers
+/// that from cursor pages pinned to the watermark of the first page, so the enumeration is a
+/// consistent snapshot rather than a set that concurrent chain updates can shift underneath it.
 #[derive(Clone, Copy)]
 pub enum ServiceSelector {
     /// Select every entry of one service type.
@@ -430,9 +430,9 @@ pub trait BlokliQueryClient {
     async fn count_services(&self, selector: ServiceSelector) -> Result<u32>;
     /// Returns service registry entries matching the given [`ServiceSelector`].
     ///
-    /// Unlike [`count_services`](BlokliQueryClient::count_services), this method rejects
-    /// [`ServiceSelector::Any`]: the registry is permissionless and anyone can grow it, so a bare
-    /// enumeration is not offered.
+    /// [`ServiceSelector::Any`] enumerates the whole registry. This walks the server's cursor
+    /// pages, reusing the watermark of the first page, so a concurrent chain update cannot shift
+    /// the result set part-way through.
     async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<types::ServiceEntry>>;
     /// Returns only entries whose node is currently bound in the NodeSafeRegistry selected by the
     /// service registry itself.
