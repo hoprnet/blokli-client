@@ -307,13 +307,14 @@ impl IntegrationFixture {
     /// Creates test-only Curvy contract access for producing indexed note events.
     pub async fn curvy_test_chain(&self) -> Result<CurvyTestChain<impl Provider + Clone>> {
         let account = &self.accounts()[0];
-        let chain_info = self.client().query_chain_info().await?;
-        let addresses: serde_json::Value = serde_json::from_str(&chain_info.contract_addresses.0)
-            .context("failed to parse contract addresses reported by bloklid")?;
-        let aggregator_address = addresses
-            .get("curvy_aggregator")
-            .and_then(serde_json::Value::as_str)
-            .context("chainInfo does not contain curvy_aggregator")?
+        let aggregator_address = self
+            .inner
+            .docker
+            .lock()
+            .expect("integration docker environment mutex poisoned")
+            .as_ref()
+            .context("integration Docker environment is unavailable")?
+            .fetch_curvy_aggregator_address()?
             .parse()
             .context("invalid Curvy aggregator address")?;
         let signer = PrivateKeySigner::from_slice(account.keypair.secret().as_ref())
