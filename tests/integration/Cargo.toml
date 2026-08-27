@@ -24,7 +24,6 @@ hopr-types = { workspace = true, features = [
   "crypto",
   "internal",
   "primitive",
-  "use-bindings",
 ] }
 libc = { workspace = true }
 rand = { workspace = true }
