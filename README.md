@@ -27,7 +27,7 @@ Common public items are re-exported at the crate root:
 - `BlokliQueryClient`: one-shot GraphQL queries
 - `BlokliSubscriptionClient`: SSE-backed subscriptions
 - `BlokliTransactionClient`: signed transaction submission and tracking
-- selector types such as `AccountSelector`, `ChannelSelector`, `SafeSelector`, and `TicketSelector`
+- selector types such as `AccountSelector`, `ChannelSelector`, `SafeSelector`, `ServiceSelector`, and `TicketSelector`
 - response models under `blokli_client::types`
 
 Full API documentation, including advanced configuration such as timeouts, subscriptions, transactions, and DNS overrides, is available on

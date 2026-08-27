@@ -8,6 +8,7 @@ use blokli_client::{
     BlokliClient,
     api::{
         AccountSelector, BlokliTransactionClient, ChainAddress, ChannelFilter, ChannelSelector, RedeemedStatsSelector,
+        ServiceSelector, ServiceTypeId,
         types::{Account, ChannelStatus},
     },
 };
@@ -120,6 +121,87 @@ impl TryFrom<RedemptionsArgs> for RedeemedStatsSelector {
                 "At least one of --safe-address or --node-address must be specified."
             )),
         }
+    }
+}
+
+/// Parses a service type from the command line, either as its ASCII name or as a hexadecimal id.
+///
+/// The registry stores the id as a raw `bytes32` and by convention holds right-padded printable ASCII, so
+/// `gvpn:exit` and `0x6776706e3a657869740000000000000000000000000000000000000000000000` name the same type.
+///
+/// The `0x` prefix decides which form applies, so a name is never mistaken for a truncated id. A value that starts
+/// with `0x` must therefore spell all 32 bytes, and every other value is read as a name.
+pub(crate) fn parse_service_type(value: &str) -> anyhow::Result<ServiceTypeId> {
+    let id = match value.strip_prefix("0x") {
+        Some(digits) => hex::decode(digits).map_err(anyhow::Error::from).and_then(|bytes| {
+            <ServiceTypeId>::try_from(bytes)
+                .map_err(|_| anyhow::anyhow!("a 0x-prefixed service type id must spell all 32 bytes"))
+        })?,
+        None => {
+            if value.is_empty() || value.len() > size_of::<ServiceTypeId>() {
+                return Err(anyhow::anyhow!("service type name must be 1 to 32 bytes long"));
+            }
+            // Space is excluded along with the control characters: it is indistinguishable from the padding to the
+            // eye, which makes it a poor character for an identifier.
+            if !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+                return Err(anyhow::anyhow!("service type name must be printable non-space ASCII"));
+            }
+
+            let mut id = ServiceTypeId::default();
+            id[..value.len()].copy_from_slice(value.as_bytes());
+            id
+        }
+    };
+
+    if id == ServiceTypeId::default() {
+        // The registry contract rejects this id with `ZeroServiceType`.
+        return Err(anyhow::anyhow!("the zero service type id is never registered"));
+    }
+
+    Ok(id)
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ServiceArgs {
+    /// Service type, either as its ASCII name such as `gvpn:exit`, or as a 0x-prefixed 32-byte hex id.
+    #[arg(short, long)]
+    service_type: Option<String>,
+    /// Chain address of the node offering the service.
+    #[arg(short, long, value_parser = clap::value_parser!(Address))]
+    node: Option<Address>,
+}
+
+impl TryFrom<ServiceArgs> for ServiceSelector {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ServiceArgs) -> Result<Self, Self::Error> {
+        let ServiceArgs { service_type, node } = value;
+        Ok(match (service_type, node) {
+            (Some(service_type), None) => ServiceSelector::ServiceType(parse_service_type(&service_type)?),
+            (None, Some(node)) => ServiceSelector::Node(node.into()),
+            (Some(service_type), Some(node)) => ServiceSelector::ServiceTypeAndNode {
+                service_type: parse_service_type(&service_type)?,
+                node: node.into(),
+            },
+            (None, None) => ServiceSelector::Any,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct ServiceTypeArgs {
+    /// Service type, either as its ASCII name such as `gvpn:exit`, or as a 0x-prefixed 32-byte hex id.
+    ///
+    /// Omit to address every registered type.
+    #[arg(short, long)]
+    service_type: Option<String>,
+}
+
+impl TryFrom<ServiceTypeArgs> for Option<ServiceTypeId> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: ServiceTypeArgs) -> Result<Self, Self::Error> {
+        value.service_type.as_deref().map(parse_service_type).transpose()
     }
 }
 
@@ -397,10 +479,90 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use blokli_client::api::AccountSelector;
+    use blokli_client::api::{AccountSelector, ServiceSelector, ServiceTypeId};
     use hopr_types::{crypto::types::OffchainPublicKey, primitive::prelude::ToHex};
 
-    use super::NodeOverviewArgs;
+    use super::{NodeOverviewArgs, ServiceArgs, ServiceTypeArgs, parse_service_type};
+
+    /// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
+    const GVPN_EXIT: ServiceTypeId = [
+        0x67, 0x76, 0x70, 0x6e, 0x3a, 0x65, 0x78, 0x69, 0x74, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
+    ];
+
+    #[test]
+    fn service_type_parses_from_an_ascii_name_and_from_hex() -> anyhow::Result<()> {
+        assert_eq!(parse_service_type("gvpn:exit")?, GVPN_EXIT);
+        assert_eq!(
+            parse_service_type("0x6776706e3a657869740000000000000000000000000000000000000000000000")?,
+            GVPN_EXIT
+        );
+        Ok(())
+    }
+
+    /// A prefixed value is always an id, never a name, so a short one is an error rather than a type literally
+    /// called `0x1234`.
+    #[test]
+    fn service_type_rejects_a_prefixed_value_that_is_not_a_full_id() {
+        assert!(parse_service_type("0x1234").is_err());
+        assert!(parse_service_type("0xnothex").is_err());
+    }
+
+    #[test]
+    fn service_type_rejects_names_outside_the_convention() {
+        for invalid in ["", "gvpn exit", &"a".repeat(33)] {
+            assert!(
+                parse_service_type(invalid).is_err(),
+                "'{invalid}' should not parse as a service type"
+            );
+        }
+    }
+
+    #[test]
+    fn service_type_rejects_the_zero_id() {
+        assert!(parse_service_type(&format!("0x{}", "00".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn service_args_combine_both_filters() -> anyhow::Result<()> {
+        let selector = ServiceSelector::try_from(ServiceArgs {
+            service_type: Some("gvpn:exit".to_string()),
+            node: Some("0x1111111111111111111111111111111111111111".parse()?),
+        })?;
+
+        assert!(matches!(
+            selector,
+            ServiceSelector::ServiceTypeAndNode { service_type, node }
+                if service_type == GVPN_EXIT && node == [0x11; 20]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn service_args_without_filters_select_everything() -> anyhow::Result<()> {
+        let selector = ServiceSelector::try_from(ServiceArgs {
+            service_type: None,
+            node: None,
+        })?;
+
+        assert!(matches!(selector, ServiceSelector::Any));
+        Ok(())
+    }
+
+    #[test]
+    fn service_type_args_are_optional() -> anyhow::Result<()> {
+        assert_eq!(
+            Option::<ServiceTypeId>::try_from(ServiceTypeArgs { service_type: None })?,
+            None
+        );
+        assert_eq!(
+            Option::<ServiceTypeId>::try_from(ServiceTypeArgs {
+                service_type: Some("gvpn:exit".to_string())
+            })?,
+            Some(GVPN_EXIT)
+        );
+        Ok(())
+    }
 
     #[test]
     fn node_overview_selector_accepts_chain_key() -> anyhow::Result<()> {

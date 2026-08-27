@@ -1,0 +1,13 @@
+---
+source: client/tests/query_tests.rs
+expression: recorder.requests()
+---
+- method: POST
+  path_and_query: /graphql
+  body:
+    Json:
+      query: "query QueryServiceCount($serviceType: String, $node: String) {\n  serviceCount(serviceType: $serviceType, node: $node) {\n    __typename\n    ... on Count {\n      __typename\n      count\n    }\n    ... on MissingFilterError {\n      __typename\n      code\n      message\n    }\n    ... on QueryFailedError {\n      __typename\n      message\n      code\n    }\n  }\n}\n"
+      variables:
+        serviceType: ~
+        node: ~
+      operationName: QueryServiceCount

@@ -5,7 +5,7 @@ use hex::ToHex;
 
 use super::{BlokliClient, GraphQlQueries, response_to_data};
 use crate::{
-    api::{internal::*, types::*, *},
+    api::{internal::*, types::*, v1::graphql::services::ServicePage, *},
     errors::{BlokliClientError, ErrorKind},
 };
 
@@ -189,6 +189,33 @@ impl GraphQlQueries {
         })
     }
 
+    /// `ServiceCount` GraphQL query.
+    pub fn count_services(selector: ServiceSelector) -> cynic::Operation<QueryServiceCount, ServiceVariables> {
+        QueryServiceCount::build(ServiceVariables::from(selector))
+    }
+
+    /// `Services` GraphQL query.
+    pub fn query_services(
+        selector: ServiceSelector,
+        after: Option<Uint64>,
+        watermark: Option<Uint64>,
+        live_only: bool,
+    ) -> cynic::Operation<QueryServices, ServicePageVariables> {
+        QueryServices::build(ServicePageVariables::new(selector, after, watermark, live_only))
+    }
+
+    /// `ServiceTypes` GraphQL query.
+    pub fn query_service_types(
+        service_type: Option<ServiceTypeId>,
+    ) -> cynic::Operation<QueryServiceTypes, ServiceTypeVariables> {
+        QueryServiceTypes::build(ServiceTypeVariables::from(service_type))
+    }
+
+    /// `ServiceRegistryConfig` GraphQL query.
+    pub fn query_service_registry_config() -> cynic::Operation<QueryServiceRegistryConfig, ()> {
+        QueryServiceRegistryConfig::build(())
+    }
+
     /// `Transaction` GraphQL query.
     pub fn query_transaction(id: TxId) -> cynic::Operation<QueryTransaction, TransactionsVariables> {
         QueryTransaction::build(TransactionsVariables { id: id.into() })
@@ -342,6 +369,75 @@ impl BlokliQueryClient for BlokliClient {
         }
 
         Ok(channels)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn count_services(&self, selector: ServiceSelector) -> Result<u32> {
+        let resp = self.build_query(GraphQlQueries::count_services(selector))?.await?;
+
+        response_to_data(resp)?.service_count.into()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn query_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        let mut services = Vec::new();
+        let mut after = None;
+        let mut watermark = None;
+
+        loop {
+            let resp = self
+                .build_query(GraphQlQueries::query_services(
+                    selector,
+                    after,
+                    watermark.clone(),
+                    false,
+                ))?
+                .await?;
+            let page = Result::<ServicePage>::from(response_to_data(resp)?.services)?;
+            services.extend(page.services);
+            watermark = Some(page.watermark);
+            after = page.next_cursor;
+            if after.is_none() {
+                return Ok(services);
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    async fn query_live_services(&self, selector: ServiceSelector) -> Result<Vec<ServiceEntry>> {
+        let mut services = Vec::new();
+        let mut after = None;
+        let mut watermark = None;
+        loop {
+            let resp = self
+                .build_query(GraphQlQueries::query_services(selector, after, watermark.clone(), true))?
+                .await?;
+            let page = Result::<ServicePage>::from(response_to_data(resp)?.services)?;
+            services.extend(page.services);
+            watermark = Some(page.watermark);
+            after = page.next_cursor;
+            if after.is_none() {
+                return Ok(services);
+            }
+        }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn query_service_types(&self, service_type: Option<ServiceTypeId>) -> Result<Vec<ServiceTypeInfo>> {
+        let resp = self
+            .build_query(GraphQlQueries::query_service_types(service_type))?
+            .await?;
+
+        response_to_data(resp)?.service_types.into()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    async fn query_service_registry_config(&self) -> Result<ServiceRegistryConfig> {
+        let resp = self
+            .build_query(GraphQlQueries::query_service_registry_config())?
+            .await?;
+
+        response_to_data(resp)?.service_registry_config.into()
     }
 
     #[tracing::instrument(level = "debug", skip(self))]

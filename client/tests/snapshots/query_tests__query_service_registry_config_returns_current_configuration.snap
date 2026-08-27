@@ -1,0 +1,11 @@
+---
+source: client/tests/query_tests.rs
+expression: recorder.requests()
+---
+- method: POST
+  path_and_query: /graphql
+  body:
+    Json:
+      query: "query QueryServiceRegistryConfig {\n  serviceRegistryConfig {\n    __typename\n    ... on ServiceRegistryConfig {\n      typeRegistrationFee\n      nodeSafeRegistry\n    }\n    ... on QueryFailedError {\n      __typename\n      message\n      code\n    }\n  }\n}\n"
+      variables: ~
+      operationName: QueryServiceRegistryConfig

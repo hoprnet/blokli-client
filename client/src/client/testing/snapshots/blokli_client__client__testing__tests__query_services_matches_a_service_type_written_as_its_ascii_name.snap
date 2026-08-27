@@ -1,0 +1,10 @@
+---
+source: client/src/client/testing/mod.rs
+expression: entries
+---
+- service_type: "gvpn:exit"
+  node: "1111111111111111111111111111111111111111"
+  safe: "3333333333333333333333333333333333333333"
+  metadata: "0xdeadbeef"
+  registered_at: 1700000000
+  updated_at: 1700000000

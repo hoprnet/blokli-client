@@ -14,7 +14,8 @@
 //! - [`BlokliQueryClient`] for one-shot GraphQL queries.
 //! - [`BlokliSubscriptionClient`] for SSE-backed GraphQL subscriptions.
 //! - [`BlokliTransactionClient`] for signed transaction submission and tracking.
-//! - Selectors such as [`AccountSelector`], [`ChannelSelector`], [`SafeSelector`], and [`TicketSelector`].
+//! - Selectors such as [`AccountSelector`], [`ChannelSelector`], [`SafeSelector`], [`ServiceSelector`], and
+//!   [`TicketSelector`].
 //! - GraphQL response models under [`types`].
 //!
 //! Address-like values are byte-array aliases such as [`ChainAddress`], [`ChannelId`], [`PacketKey`], and
@@ -29,5 +30,5 @@ pub const VERSION: &str = "v1";
 pub use v1::{
     AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, ChainAddress, ChannelFilter,
     ChannelId, ChannelSelector, KeyId, ModulePredictionInput, PacketKey, RedeemedStatsSelector, SafeSelector,
-    TicketSelector, TxId, TxReceipt, types,
+    ServiceSelector, ServiceTypeId, TicketSelector, TxId, TxReceipt, types,
 };

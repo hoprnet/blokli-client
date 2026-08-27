@@ -1,0 +1,6 @@
+---
+source: client/src/client/testing/mod.rs
+expression: config
+---
+type_registration_fee: 1000 wxHOPR
+node_safe_registry: "0x4444444444444444444444444444444444444444"
