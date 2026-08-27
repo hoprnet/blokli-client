@@ -1569,7 +1569,7 @@ dependencies = [
  "futures",
  "futures-time",
  "hex",
- "hopr-types 4.0.0",
+ "hopr-types",
  "http",
  "indexmap 2.14.0",
  "insta",
@@ -1597,7 +1597,7 @@ dependencies = [
  "comfy-table",
  "futures",
  "hex",
- "hopr-types 4.0.0",
+ "hopr-types",
  "insta",
  "serde",
  "serde_json",
@@ -1621,8 +1621,7 @@ dependencies = [
  "hex",
  "hopli",
  "hopr-bindings",
- "hopr-types 3.1.0",
- "hopr-types 4.0.0",
+ "hopr-types",
  "insta",
  "libc",
  "rand 0.10.2",
@@ -1876,7 +1875,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2385,7 +2384,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -2724,7 +2723,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3262,7 +3261,7 @@ dependencies = [
 [[package]]
 name = "hopli"
 version = "0.20.1"
-source = "git+https://github.com/hoprnet/hopli?branch=main#6ba76de4166f46a0e00c3fc944d18745966bf281"
+source = "git+https://github.com/hoprnet/hopli?branch=main#df1631a4970d1b5db8949f7df7b81b4ee80585d1"
 dependencies = [
  "alloy-transport-http",
  "anyhow",
@@ -3270,7 +3269,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "hopr-bindings",
- "hopr-types 3.1.0",
+ "hopr-types",
  "lazy_static",
  "rpassword",
  "serde",
@@ -3303,9 +3302,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "3.1.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6994bdc05812ab588d3fa970c1df9a7bea3d8808907baf30c0596a54b84458f3"
+checksum = "1998a31a5fec199e2e51cb6c79804934a49d72a10c54714208ce17fa42e73af0"
 dependencies = [
  "aes",
  "anyhow",
@@ -3359,63 +3358,6 @@ dependencies = [
  "tracing",
  "typenum",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "hopr-types"
-version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1998a31a5fec199e2e51cb6c79804934a49d72a10c54714208ce17fa42e73af0"
-dependencies = [
- "aes",
- "anyhow",
- "aquamarine",
- "ark-bn254 0.6.0",
- "ark-ec 0.6.0",
- "ark-ff 0.6.0",
- "ark-serialize 0.6.0",
- "arrayvec",
- "async-trait",
- "babyjubjub-ec",
- "bigdecimal",
- "blake3",
- "chacha20",
- "chrono",
- "cipher",
- "const-hex",
- "ctr",
- "curve25519-dalek 5.0.0",
- "digest 0.11.3",
- "ed25519-dalek 3.0.0",
- "elliptic-curve 0.14.1",
- "float-cmp",
- "hash2curve",
- "hex-literal",
- "hopr-bindings",
- "hybrid-array",
- "k256 0.14.0",
- "lazy_static",
- "libp2p-identity",
- "multiaddr",
- "num_enum",
- "poly1305",
- "primitive-types 0.14.0",
- "rand 0.10.2",
- "rayon",
- "regex",
- "rlp 0.6.1",
- "secp256k1 0.31.1",
- "serde",
- "serde_with",
- "sha2 0.11.0",
- "sha3 0.12.0",
- "smart-default",
- "strum",
- "subtle",
- "thiserror 2.0.20",
- "tracing",
- "typenum",
  "zeroize",
 ]
 
@@ -4225,7 +4167,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4846,7 +4788,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5288,7 +5230,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5345,7 +5287,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6107,7 +6049,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6785,7 +6727,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

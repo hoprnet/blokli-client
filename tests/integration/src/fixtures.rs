@@ -57,7 +57,6 @@ use hopr_types::{
         traits::IntoEndian,
     },
 };
-use hopr_types_hopli::internal::service::{ServiceMetadata as HopliServiceMetadata, ServiceType as HopliServiceType};
 use libc::atexit;
 use rand::seq::IndexedRandom;
 use rstest::fixture;
@@ -521,18 +520,6 @@ impl IntegrationFixture {
     }
 }
 
-/// `hopli`'s payload functions are pinned to `hopr-types` 3.1.0, distinct from the 4.0.0
-/// `ServiceType`/`ServiceMetadata` used everywhere else in this crate, so calls into them cross
-/// that boundary through the 32-byte id / bounded-byte-vec encoding both versions share.
-fn to_hopli_service_type(service_type: &ServiceType) -> HopliServiceType {
-    HopliServiceType::try_from(service_type.as_encoded()).expect("32-byte service type id is always valid")
-}
-
-fn to_hopli_service_metadata(metadata: &ServiceMetadata) -> HopliServiceMetadata {
-    HopliServiceMetadata::try_from(metadata.as_ref().to_vec())
-        .expect("metadata already satisfies the shared length cap")
-}
-
 // Service registry related helpers
 impl IntegrationFixture {
     /// Signs `calldata` as an EIP-1559 call from `from` to `to` and submits it through blokli.
@@ -583,13 +570,7 @@ impl IntegrationFixture {
         self.submit_eoa_call(owner, self.contract_addresses().token, request_calldata(&approval)?)
             .await?;
 
-        let claim = register_service_type_payload(
-            registry,
-            &to_hopli_service_type(service_type),
-            Address::ZERO,
-            U256::ZERO,
-            U256::ZERO,
-        );
+        let claim = register_service_type_payload(registry, service_type, Address::ZERO, U256::ZERO, U256::ZERO);
         self.submit_eoa_call(owner, registry, request_calldata(&claim)?).await?;
 
         Ok(())
@@ -608,12 +589,7 @@ impl IntegrationFixture {
         metadata: &ServiceMetadata,
     ) -> Result<[u8; 32]> {
         let registry = self.contract_addresses().service_registry;
-        let payload = self_register_service_payload(
-            registry,
-            &to_hopli_service_type(service_type),
-            node.to_alloy_address(),
-            &to_hopli_service_metadata(metadata),
-        );
+        let payload = self_register_service_payload(registry, service_type, node.to_alloy_address(), metadata);
 
         self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
             .await
@@ -628,12 +604,7 @@ impl IntegrationFixture {
         metadata: &ServiceMetadata,
     ) -> Result<[u8; 32]> {
         let registry = self.contract_addresses().service_registry;
-        let payload = self_update_service_payload(
-            registry,
-            &to_hopli_service_type(service_type),
-            node.to_alloy_address(),
-            &to_hopli_service_metadata(metadata),
-        );
+        let payload = self_update_service_payload(registry, service_type, node.to_alloy_address(), metadata);
 
         self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
             .await
@@ -647,8 +618,7 @@ impl IntegrationFixture {
         service_type: &ServiceType,
     ) -> Result<[u8; 32]> {
         let registry = self.contract_addresses().service_registry;
-        let payload =
-            self_deregister_service_payload(registry, &to_hopli_service_type(service_type), node.to_alloy_address());
+        let payload = self_deregister_service_payload(registry, service_type, node.to_alloy_address());
 
         self.send_impersonated_safe_call(safe_address, registry, request_calldata(&payload)?)
             .await
