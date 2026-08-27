@@ -24,6 +24,13 @@ hopr-types = { workspace = true, features = [
   "crypto",
   "internal",
   "primitive",
+  "use-bindings",
+] }
+# `hopli` pins `hopr-types` to 3.1.0, so its payload functions expect that version's
+# `ServiceType`/`ServiceMetadata`, distinct from the 4.0.0 types used everywhere else here. Pulled
+# in under its own name to convert between the two at the boundary until hopli catches up.
+hopr-types-hopli = { package = "hopr-types", version = "3.1.0", features = [
+  "internal",
 ] }
 libc = { workspace = true }
 rand = { workspace = true }

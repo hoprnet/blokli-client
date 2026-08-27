@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "blokli-client"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -1621,6 +1621,7 @@ dependencies = [
  "hex",
  "hopli",
  "hopr-bindings",
+ "hopr-types 3.1.0",
  "hopr-types 4.0.0",
  "insta",
  "libc",
@@ -3269,7 +3270,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "hopr-bindings",
- "hopr-types 2.3.0",
+ "hopr-types 3.1.0",
  "lazy_static",
  "rpassword",
  "serde",
@@ -3391,6 +3392,7 @@ dependencies = [
  "float-cmp",
  "hash2curve",
  "hex-literal",
+ "hopr-bindings",
  "hybrid-array",
  "k256 0.14.0",
  "lazy_static",
