@@ -238,7 +238,7 @@
               type = "app";
               program = toString (
                 pkgs.writeShellScript "test-integration-curvy" ''
-                  export BLOKLI_TEST_REMOTE_IMAGE="europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.14.1-commit.dd069f3@sha256:63bc795278c6ac546627772d5a1f1da36812b99bb603bc7bf6d14c1e2e0ec990"
+                  export BLOKLI_TEST_REMOTE_IMAGE="europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.14.1-commit.3c8c744@sha256:8425a10279ea096199cb4bdcfba674a5c9def33474b49e7c0df676a4377e9698"
                   nix run -L .#test-integration -- --test blokli_deposit_events --run-ignored ignored-only
                 ''
               );
