@@ -21,7 +21,7 @@ futures-time       = "3.1.0"
 hex                = "0.4.3"
 hopli              = { git = "https://github.com/hoprnet/hopli", branch = "main" }
 hopr-bindings      = "4.13.0"
-hopr-types         = "2.3.0"
+hopr-types         = "4.0.0"
 
 http = "1.4.2"
 indexmap = "2.14.0"
