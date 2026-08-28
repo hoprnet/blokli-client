@@ -70,6 +70,7 @@ impl BlokliClient {
     }
 }
 
+#[cfg(feature = "curvy")]
 impl GraphQlQueries {
     fn curvy_page_size(first: u32) -> Result<i32> {
         let first = i32::try_from(first).map_err(|_| ErrorKind::InvalidInput("Curvy page size exceeds i32"))?;
@@ -246,7 +247,9 @@ impl GraphQlQueries {
     ) -> cynic::Operation<QueryCurvyPortalRegistered, CurvyPortalVariables> {
         QueryCurvyPortalRegistered::build(CurvyPortalVariables { portal_address })
     }
+}
 
+impl GraphQlQueries {
     /// `AccountCount` GraphQL query.
     pub fn count_accounts(selector: AccountSelector) -> cynic::Operation<QueryAccountCount, AccountVariables> {
         QueryAccountCount::build(AccountVariables::from(selector))
@@ -420,6 +423,7 @@ impl GraphQlQueries {
 
 #[async_trait::async_trait]
 impl BlokliQueryClient for BlokliClient {
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_pending_notes(
         &self,
@@ -432,6 +436,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_pending_notes.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_committed_notes(
         &self,
@@ -444,6 +449,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_committed_notes.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_committed_nullifiers(
         &self,
@@ -456,6 +462,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_committed_nullifiers.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_sync_checkpoint(&self, block_hash: Option<String>) -> Result<CurvySyncCheckpoint> {
         let response = self
@@ -464,6 +471,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_sync_checkpoint.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_sync_notes(
         &self,
@@ -476,6 +484,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_sync_notes.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_sync_nullifiers(
         &self,
@@ -488,6 +497,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_sync_nullifiers.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_shard_roots(
         &self,
@@ -500,6 +510,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_shard_roots.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_aggregator_state(&self) -> Result<CurvyAggregatorState> {
         let response = self
@@ -508,6 +519,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_aggregator_state.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_note_status(&self, note_id: String) -> Result<CurvyNoteStatus> {
         let response = self
@@ -516,6 +528,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_note_status.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_valid_notes_root(&self, root: String) -> Result<bool> {
         let response = self
@@ -525,6 +538,7 @@ impl BlokliQueryClient for BlokliClient {
         Ok(value?.value)
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_nullifier_spent(&self, nullifier: String) -> Result<bool> {
         let response = self
@@ -534,18 +548,21 @@ impl BlokliQueryClient for BlokliClient {
         Ok(value?.value)
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_vault_fees(&self) -> Result<CurvyVaultFees> {
         let response = self.build_query(GraphQlQueries::query_curvy_vault_fees())?.await?;
         response_to_data(response)?.curvy_vault_fees.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_aggregator_fees(&self) -> Result<CurvyAggregatorFees> {
         let response = self.build_query(GraphQlQueries::query_curvy_aggregator_fees())?.await?;
         response_to_data(response)?.curvy_aggregator_fees.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_vault_token_count(&self) -> Result<CurvyVaultTokenCount> {
         let response = self
@@ -554,6 +571,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_vault_token_count.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_vault_token(&self, token_id: String) -> Result<CurvyVaultToken> {
         let response = self
@@ -562,6 +580,7 @@ impl BlokliQueryClient for BlokliClient {
         response_to_data(response)?.curvy_vault_token.into()
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_entry_portal_address(&self, owner_hash: String, recovery: String) -> Result<String> {
         let response = self
@@ -571,6 +590,7 @@ impl BlokliQueryClient for BlokliClient {
         Ok(value?.address)
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_exit_portal_address(
         &self,
@@ -589,6 +609,7 @@ impl BlokliQueryClient for BlokliClient {
         Ok(value?.address)
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn query_curvy_portal_registered(&self, portal_address: String) -> Result<bool> {
         let response = self
@@ -842,7 +863,7 @@ impl BlokliQueryClient for BlokliClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "curvy"))]
 mod tests {
     use serde_json::json;
 
@@ -876,5 +897,109 @@ mod tests {
     fn curvy_queries_reject_invalid_page_sizes() {
         assert!(GraphQlQueries::query_curvy_pending_notes(None, None, 0).is_err());
         assert!(GraphQlQueries::query_curvy_pending_notes(None, None, 1001).is_err());
+        assert!(GraphQlQueries::query_curvy_sync_notes("checkpoint".to_owned(), None, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn curvy_query_builders_serialize_arguments() {
+        let committed = serde_json::to_value(
+            GraphQlQueries::query_curvy_committed_notes(Some(7), None, 25).expect("valid committed-notes query"),
+        )
+        .expect("operation should serialize");
+        assert_eq!(
+            committed["variables"],
+            json!({ "fromBlock": "7", "after": null, "first": 25 })
+        );
+
+        let nullifiers = serde_json::to_value(
+            GraphQlQueries::query_curvy_committed_nullifiers(None, None, 30).expect("valid committed-nullifiers query"),
+        )
+        .expect("operation should serialize");
+        assert_eq!(
+            nullifiers["variables"],
+            json!({ "fromBlock": null, "after": null, "first": 30 })
+        );
+
+        let checkpoint = serde_json::to_value(GraphQlQueries::query_curvy_sync_checkpoint(Some("0x01".to_owned())))
+            .expect("operation should serialize");
+        assert_eq!(checkpoint["variables"], json!({ "blockHash": "0x01" }));
+
+        let sync_notes = serde_json::to_value(
+            GraphQlQueries::query_curvy_sync_notes("0x02".to_owned(), Some(3), 40).expect("valid sync-notes query"),
+        )
+        .expect("operation should serialize");
+        assert_eq!(
+            sync_notes["variables"],
+            json!({ "checkpoint": "0x02", "fromIndex": "3", "first": 40 })
+        );
+
+        let sync_nullifiers = serde_json::to_value(
+            GraphQlQueries::query_curvy_sync_nullifiers("0x03".to_owned(), Some(4), 50)
+                .expect("valid sync-nullifiers query"),
+        )
+        .expect("operation should serialize");
+        assert_eq!(
+            sync_nullifiers["variables"],
+            json!({ "checkpoint": "0x03", "fromIndex": "4", "first": 50 })
+        );
+
+        let shard_roots = serde_json::to_value(
+            GraphQlQueries::query_curvy_shard_roots("0x04".to_owned(), Some(5), 60).expect("valid shard-roots query"),
+        )
+        .expect("operation should serialize");
+        assert_eq!(
+            shard_roots["variables"],
+            json!({ "checkpoint": "0x04", "fromIndex": "5", "first": 60 })
+        );
+
+        let note_status = serde_json::to_value(GraphQlQueries::query_curvy_note_status("0x05".to_owned()))
+            .expect("operation should serialize");
+        assert_eq!(note_status["variables"], json!({ "noteId": "0x05" }));
+
+        let valid_root = serde_json::to_value(GraphQlQueries::query_curvy_valid_notes_root("0x06".to_owned()))
+            .expect("operation should serialize");
+        assert_eq!(valid_root["variables"], json!({ "root": "0x06" }));
+
+        let spent = serde_json::to_value(GraphQlQueries::query_curvy_nullifier_spent("0x07".to_owned()))
+            .expect("operation should serialize");
+        assert_eq!(spent["variables"], json!({ "nullifier": "0x07" }));
+
+        let token = serde_json::to_value(GraphQlQueries::query_curvy_vault_token("8".to_owned()))
+            .expect("operation should serialize");
+        assert_eq!(token["variables"], json!({ "tokenId": "8" }));
+
+        let entry = serde_json::to_value(GraphQlQueries::query_curvy_entry_portal_address(
+            "9".to_owned(),
+            "0x10".to_owned(),
+        ))
+        .expect("operation should serialize");
+        assert_eq!(entry["variables"], json!({ "ownerHash": "9", "recovery": "0x10" }));
+
+        let exit = serde_json::to_value(GraphQlQueries::query_curvy_exit_portal_address(
+            "0x11".to_owned(),
+            "12".to_owned(),
+            "0x13".to_owned(),
+        ))
+        .expect("operation should serialize");
+        assert_eq!(
+            exit["variables"],
+            json!({ "exitAddress": "0x11", "exitChainId": "12", "recovery": "0x13" })
+        );
+
+        let portal = serde_json::to_value(GraphQlQueries::query_curvy_portal_registered("0x14".to_owned()))
+            .expect("operation should serialize");
+        assert_eq!(portal["variables"], json!({ "portalAddress": "0x14" }));
+
+        for operation in [
+            serde_json::to_value(GraphQlQueries::query_curvy_aggregator_state()),
+            serde_json::to_value(GraphQlQueries::query_curvy_vault_fees()),
+            serde_json::to_value(GraphQlQueries::query_curvy_aggregator_fees()),
+            serde_json::to_value(GraphQlQueries::query_curvy_vault_token_count()),
+        ] {
+            assert_eq!(
+                operation.expect("operation should serialize")["variables"],
+                serde_json::Value::Null
+            );
+        }
     }
 }

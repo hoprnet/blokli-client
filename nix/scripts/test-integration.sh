@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-export BLOKLI_TEST_REMOTE_IMAGE="${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil-curvy:0.14.1-commit.6aaa6e0@sha256:1d525d745fd86eb25ec9190152c59dd3eefe9f136e25d506cc8c6590bc6a3c74}"
+export BLOKLI_TEST_REMOTE_IMAGE="${BLOKLI_TEST_REMOTE_IMAGE:-europe-west3-docker.pkg.dev/hoprassociation/docker-images/bloklid-anvil:latest}"
 export BLOKLI_TEST_WORKSPACE_ROOT="${BLOKLI_TEST_WORKSPACE_ROOT:-$PWD}"
 export BLOKLI_TEST_IMAGE="${BLOKLI_TEST_IMAGE:-bloklid-anvil:integration-test}"
 export BLOKLI_TEST_EXTERNAL_STACK=true

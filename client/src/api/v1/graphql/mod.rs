@@ -9,6 +9,7 @@ use crate::errors::ErrorKind;
 pub mod accounts;
 pub mod balances;
 pub mod channels;
+#[cfg(feature = "curvy")]
 pub mod curvy;
 pub mod graph;
 pub mod info;

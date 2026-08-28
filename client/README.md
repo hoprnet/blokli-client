@@ -33,6 +33,7 @@ Full API documentation, including advanced configuration such as timeouts, subsc
 
 ## Features
 
+- `curvy`: expose Curvy GraphQL queries, subscriptions, and response models
 - `serde`: derive `Serialize`/`Deserialize` on the public response models
 - `testing`: expose `BlokliTestClient`, an in-memory client implementing the same query, subscription, and transaction traits, backed by a
   `BlokliTestState`. Tests can provide a `BlokliTestStateMutator` to model the effects of submitted signed transactions without running a

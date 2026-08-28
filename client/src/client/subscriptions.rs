@@ -6,17 +6,23 @@ use crate::api::{
     AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId, TicketSelector,
     TxId,
     internal::{
-        AccountVariables, ChannelsVariables, CurvyEventSubscriptionVariables, ServiceTypeVariables, ServiceVariables,
-        SubscribeAccounts, SubscribeChannels, SubscribeCurvyCommittedNote, SubscribeCurvyCommittedNullifier,
-        SubscribeCurvyPendingNote, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment,
-        SubscribeServiceRegistryConfig, SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams,
-        SubscribeTicketRedeemed, TicketRedeemedVariables,
+        AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
+        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceRegistryConfig,
+        SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed,
+        TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, CurvyCommittedNote, CurvyCommittedNullifier, CurvyPendingNote, OpenedChannelsGraphEntry,
-        ReadinessState, RedeemTicketDetails, Safe, ServiceRegistryConfig, ServiceTypeUpdate, ServiceUpdate,
-        TicketParameters, Transaction, Uint64,
+        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceRegistryConfig,
+        ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
     },
+};
+#[cfg(feature = "curvy")]
+use crate::api::{
+    internal::{
+        CurvyEventSubscriptionVariables, SubscribeCurvyCommittedNote, SubscribeCurvyCommittedNullifier,
+        SubscribeCurvyPendingNote,
+    },
+    types::{CurvyCommittedNote, CurvyCommittedNullifier, CurvyPendingNote, Uint64},
 };
 
 impl GraphQlQueries {
@@ -80,6 +86,7 @@ impl GraphQlQueries {
         SubscribeTicketRedeemed::build(TicketRedeemedVariables::from(selector))
     }
 
+    #[cfg(feature = "curvy")]
     /// Pending Curvy note subscription used for local ownership detection.
     pub fn subscribe_curvy_pending_notes(
         from_block: Option<u64>,
@@ -89,6 +96,7 @@ impl GraphQlQueries {
         })
     }
 
+    #[cfg(feature = "curvy")]
     /// Committed Curvy note subscription used for owned-note correlation.
     pub fn subscribe_curvy_committed_notes(
         from_block: Option<u64>,
@@ -98,6 +106,7 @@ impl GraphQlQueries {
         })
     }
 
+    #[cfg(feature = "curvy")]
     /// Committed Curvy nullifier subscription.
     pub fn subscribe_curvy_committed_nullifiers(
         from_block: Option<u64>,
@@ -197,6 +206,7 @@ impl BlokliSubscriptionClient for BlokliClient {
             .try_filter_map(|item| futures::future::ok(Some(item.ticket_redeemed))))
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     fn subscribe_curvy_pending_notes(
         &self,
@@ -207,6 +217,7 @@ impl BlokliSubscriptionClient for BlokliClient {
             .map_ok(|item| item.curvy_pending_note))
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     fn subscribe_curvy_committed_notes(
         &self,
@@ -217,6 +228,7 @@ impl BlokliSubscriptionClient for BlokliClient {
             .map_ok(|item| item.curvy_committed_note))
     }
 
+    #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
     fn subscribe_curvy_committed_nullifiers(
         &self,
@@ -228,7 +240,7 @@ impl BlokliSubscriptionClient for BlokliClient {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "curvy"))]
 mod tests {
     use serde_json::json;
 

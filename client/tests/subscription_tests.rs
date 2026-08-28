@@ -298,6 +298,7 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "curvy")]
 #[tokio::test]
 async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result<()> {
     let body = format_curvy_event(
@@ -395,6 +396,7 @@ async fn subscribe_services_forwards_a_deregistration_without_an_entry() -> Resu
     Ok(())
 }
 
+#[cfg(feature = "curvy")]
 #[tokio::test]
 async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Result<()> {
     let body = format_curvy_event(
@@ -683,6 +685,7 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
     format!("event: next\ndata: {payload}\n\n")
 }
 
+#[cfg(feature = "curvy")]
 fn format_curvy_event(field: &str, note: serde_json::Value) -> String {
     let payload = serde_json::json!({
         "data": {
@@ -692,6 +695,7 @@ fn format_curvy_event(field: &str, note: serde_json::Value) -> String {
     format!("event: next\ndata: {payload}\n\n")
 }
 
+#[cfg(feature = "curvy")]
 fn curvy_position(block: u64, transaction_index: u64, log_index: u64, event_item_index: u64) -> serde_json::Value {
     serde_json::json!({
         "transactionHash": format!("0x{block:064x}"),

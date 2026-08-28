@@ -574,3 +574,196 @@ impl From<CurvyCommittedNullifiersResult> for Result<CurvyCommittedNullifiers, B
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Debug;
+
+    use super::{
+        CurvyAddress, CurvyBooleanValue, CurvyCommittedNotes, CurvyCommittedNotesResult, CurvyCommittedNullifiers,
+        CurvyCommittedNullifiersResult, CurvyEntryPortalAddressResult, CurvyEventCursor, CurvyEventPosition,
+        CurvyNoteStatus, CurvyNoteStatusResult, CurvyPendingNotes, CurvyPendingNotesResult,
+        CurvyPortalRegisteredResult, Hex32, InvalidAddressError, QueryFailedError, Uint64,
+    };
+    use crate::errors::{BlokliClientError, ErrorKind};
+
+    fn query_failed_error() -> QueryFailedError {
+        QueryFailedError {
+            __typename: "QueryFailedError".to_owned(),
+            message: "query failed".to_owned(),
+            code: "QUERY_FAILED".to_owned(),
+        }
+    }
+
+    fn invalid_address_error() -> InvalidAddressError {
+        InvalidAddressError {
+            __typename: "InvalidAddressError".to_owned(),
+            message: "invalid address".to_owned(),
+            code: "INVALID_ADDRESS".to_owned(),
+        }
+    }
+
+    fn assert_no_data<T: Debug>(result: Result<T, BlokliClientError>) {
+        assert!(matches!(
+            result.expect_err("conversion should fail").kind(),
+            ErrorKind::NoData
+        ));
+    }
+
+    #[test]
+    fn event_position_converts_to_anchored_cursor() {
+        let position = CurvyEventPosition {
+            transaction_hash: Hex32("0xtx".to_owned()),
+            block_hash: Hex32("0xblock".to_owned()),
+            block: Uint64("10".to_owned()),
+            transaction_index: Uint64("2".to_owned()),
+            log_index: Uint64("3".to_owned()),
+            event_item_index: Uint64("4".to_owned()),
+        };
+
+        let cursor = CurvyEventCursor::from(&position);
+
+        assert_eq!(
+            cursor,
+            CurvyEventCursor {
+                block: Uint64("10".to_owned()),
+                transaction_index: Uint64("2".to_owned()),
+                log_index: Uint64("3".to_owned()),
+                event_item_index: Uint64("4".to_owned()),
+                block_hash: Some(Hex32("0xblock".to_owned())),
+            }
+        );
+        assert_eq!(CurvyEventCursor::new(10, 2, 3, 4).block_hash, None);
+    }
+
+    #[test]
+    fn simple_union_converts_success_and_errors() {
+        let status: Result<CurvyNoteStatus, BlokliClientError> =
+            CurvyNoteStatusResult::CurvyNoteStatus(CurvyNoteStatus { status: 2 }).into();
+        assert_eq!(status.expect("status should convert").status, 2);
+
+        let error: Result<CurvyNoteStatus, BlokliClientError> =
+            CurvyNoteStatusResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            error.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError {
+                kind: "query failed",
+                ..
+            }
+        ));
+
+        assert_no_data(Result::<CurvyNoteStatus, BlokliClientError>::from(
+            CurvyNoteStatusResult::Unknown,
+        ));
+    }
+
+    #[test]
+    fn address_union_converts_every_variant() {
+        let address: Result<CurvyAddress, BlokliClientError> =
+            CurvyEntryPortalAddressResult::CurvyAddress(CurvyAddress {
+                address: "0x1234".to_owned(),
+            })
+            .into();
+        assert_eq!(address.expect("address should convert").address, "0x1234");
+
+        let invalid: Result<CurvyAddress, BlokliClientError> =
+            CurvyEntryPortalAddressResult::InvalidAddressError(invalid_address_error()).into();
+        assert!(matches!(
+            invalid.expect_err("invalid address should convert").kind(),
+            ErrorKind::BlokliError {
+                kind: "invalid address",
+                ..
+            }
+        ));
+
+        let failed: Result<CurvyAddress, BlokliClientError> =
+            CurvyEntryPortalAddressResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            failed.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError {
+                kind: "query failed",
+                ..
+            }
+        ));
+
+        assert_no_data(Result::<CurvyAddress, BlokliClientError>::from(
+            CurvyEntryPortalAddressResult::Unknown,
+        ));
+    }
+
+    #[test]
+    fn portal_registered_union_converts_every_variant() {
+        let registered: Result<CurvyBooleanValue, BlokliClientError> =
+            CurvyPortalRegisteredResult::CurvyBooleanValue(CurvyBooleanValue { value: true }).into();
+        assert!(registered.expect("boolean should convert").value);
+
+        let invalid: Result<CurvyBooleanValue, BlokliClientError> =
+            CurvyPortalRegisteredResult::InvalidAddressError(invalid_address_error()).into();
+        assert!(matches!(
+            invalid.expect_err("invalid address should convert").kind(),
+            ErrorKind::BlokliError {
+                kind: "invalid address",
+                ..
+            }
+        ));
+
+        let failed: Result<CurvyBooleanValue, BlokliClientError> =
+            CurvyPortalRegisteredResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            failed.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError {
+                kind: "query failed",
+                ..
+            }
+        ));
+
+        assert_no_data(Result::<CurvyBooleanValue, BlokliClientError>::from(
+            CurvyPortalRegisteredResult::Unknown,
+        ));
+    }
+
+    #[test]
+    fn event_page_unions_convert_success_and_errors() {
+        let pending: Result<CurvyPendingNotes, BlokliClientError> =
+            CurvyPendingNotesResult::CurvyPendingNotes(CurvyPendingNotes { notes: Vec::new() }).into();
+        assert!(pending.expect("pending notes should convert").notes.is_empty());
+        let committed: Result<CurvyCommittedNotes, BlokliClientError> =
+            CurvyCommittedNotesResult::CurvyCommittedNotes(CurvyCommittedNotes { notes: Vec::new() }).into();
+        assert!(committed.expect("committed notes should convert").notes.is_empty());
+        let nullifiers: Result<CurvyCommittedNullifiers, BlokliClientError> =
+            CurvyCommittedNullifiersResult::CurvyCommittedNullifiers(CurvyCommittedNullifiers {
+                nullifiers: Vec::new(),
+            })
+            .into();
+        assert!(nullifiers.expect("nullifiers should convert").nullifiers.is_empty());
+
+        let pending_error: Result<CurvyPendingNotes, BlokliClientError> =
+            CurvyPendingNotesResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            pending_error.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError { .. }
+        ));
+        let committed_error: Result<CurvyCommittedNotes, BlokliClientError> =
+            CurvyCommittedNotesResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            committed_error.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError { .. }
+        ));
+        let nullifier_error: Result<CurvyCommittedNullifiers, BlokliClientError> =
+            CurvyCommittedNullifiersResult::QueryFailedError(query_failed_error()).into();
+        assert!(matches!(
+            nullifier_error.expect_err("query failure should convert").kind(),
+            ErrorKind::BlokliError { .. }
+        ));
+
+        assert_no_data(Result::<CurvyPendingNotes, BlokliClientError>::from(
+            CurvyPendingNotesResult::Unknown,
+        ));
+        assert_no_data(Result::<CurvyCommittedNotes, BlokliClientError>::from(
+            CurvyCommittedNotesResult::Unknown,
+        ));
+        assert_no_data(Result::<CurvyCommittedNullifiers, BlokliClientError>::from(
+            CurvyCommittedNullifiersResult::Unknown,
+        ));
+    }
+}
