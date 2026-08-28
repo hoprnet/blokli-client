@@ -3934,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "hopli"
 version = "0.20.1"
-source = "git+https://github.com/hoprnet/hopli?branch=main#6ba76de4166f46a0e00c3fc944d18745966bf281"
+source = "git+https://github.com/hoprnet/hopli?branch=main#df1631a4970d1b5db8949f7df7b81b4ee80585d1"
 dependencies = [
  "alloy-transport-http 2.4.1",
  "anyhow",
@@ -3975,9 +3975,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "3.1.0"
+version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6994bdc05812ab588d3fa970c1df9a7bea3d8808907baf30c0596a54b84458f3"
+checksum = "1998a31a5fec199e2e51cb6c79804934a49d72a10c54714208ce17fa42e73af0"
 dependencies = [
  "aes",
  "anyhow",
