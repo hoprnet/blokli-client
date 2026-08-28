@@ -7,7 +7,7 @@ license       = "GPL-3.0-only"
 name          = "blokli-client"
 readme        = "README.md"
 repository    = "https://github.com/hoprnet/blokli-client"
-version       = "0.32.1"
+version       = "0.33.0"
 
 [dependencies]
 anyhow          = { workspace = true }
@@ -44,6 +44,7 @@ url = { workspace = true }
 hopr-types = { workspace = true, features = ["crypto", "primitive"] }
 
 [features]
+curvy = []
 serde = ["dep:serde", "indexmap/serde"]
 testing = [
   "dep:async-broadcast",

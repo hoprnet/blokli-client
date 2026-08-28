@@ -656,6 +656,131 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
 
 #[async_trait::async_trait]
 impl<M: BlokliTestStateMutator + Send + Sync> BlokliQueryClient for BlokliTestClient<M> {
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_pending_notes(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyPendingNotes> {
+        Ok(CurvyPendingNotes { notes: Vec::new() })
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_committed_notes(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyCommittedNotes> {
+        Ok(CurvyCommittedNotes { notes: Vec::new() })
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_committed_nullifiers(
+        &self,
+        _from_block: Option<u64>,
+        _after: Option<CurvyEventCursor>,
+        _first: u32,
+    ) -> Result<CurvyCommittedNullifiers> {
+        Ok(CurvyCommittedNullifiers { nullifiers: Vec::new() })
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_sync_checkpoint(&self, _block_hash: Option<String>) -> Result<CurvySyncCheckpoint> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_sync_notes(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvySyncNotePage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_sync_nullifiers(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvySyncNullifierPage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_shard_roots(
+        &self,
+        _checkpoint: String,
+        _from_index: Option<u64>,
+        _first: u32,
+    ) -> Result<CurvyShardRootPage> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_aggregator_state(&self) -> Result<CurvyAggregatorState> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_note_status(&self, _note_id: String) -> Result<CurvyNoteStatus> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_valid_notes_root(&self, _root: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_nullifier_spent(&self, _nullifier: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_vault_fees(&self) -> Result<CurvyVaultFees> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_aggregator_fees(&self) -> Result<CurvyAggregatorFees> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_vault_token_count(&self) -> Result<CurvyVaultTokenCount> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_vault_token(&self, _token_id: String) -> Result<CurvyVaultToken> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_entry_portal_address(&self, _owner_hash: String, _recovery: String) -> Result<String> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_exit_portal_address(
+        &self,
+        _exit_address: String,
+        _exit_chain_id: String,
+        _recovery: String,
+    ) -> Result<String> {
+        Err(ErrorKind::NoData.into())
+    }
+
+    #[cfg(feature = "curvy")]
+    async fn query_curvy_portal_registered(&self, _portal_address: String) -> Result<bool> {
+        Err(ErrorKind::NoData.into())
+    }
+
     async fn count_accounts(&self, selector: AccountSelector) -> Result<u32> {
         Ok(match selector {
             AccountSelector::Any => self.state.read().accounts.len() as u32,
@@ -1114,6 +1239,30 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
         &self,
         _selector: TicketSelector,
     ) -> Result<impl futures::Stream<Item = Result<RedeemTicketDetails>> + Send> {
+        Ok(futures::stream::empty())
+    }
+
+    #[cfg(feature = "curvy")]
+    fn subscribe_curvy_pending_notes(
+        &self,
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyPendingNote>> + Send> {
+        Ok(futures::stream::empty())
+    }
+
+    #[cfg(feature = "curvy")]
+    fn subscribe_curvy_committed_notes(
+        &self,
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNote>> + Send> {
+        Ok(futures::stream::empty())
+    }
+
+    #[cfg(feature = "curvy")]
+    fn subscribe_curvy_committed_nullifiers(
+        &self,
+        _from_block: Option<u64>,
+    ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNullifier>> + Send> {
         Ok(futures::stream::empty())
     }
 }
@@ -1797,6 +1946,86 @@ mod tests {
             ]
         );
         insta::assert_yaml_snapshot!(updates);
+        Ok(())
+    }
+
+    #[cfg(feature = "curvy")]
+    #[tokio::test]
+    async fn curvy_test_client_methods_have_deterministic_defaults() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(BlokliTestState::default(), NopStateMutator);
+
+        assert!(client.query_curvy_pending_notes(None, None, 1).await?.notes.is_empty());
+        assert!(
+            client
+                .query_curvy_committed_notes(None, None, 1)
+                .await?
+                .notes
+                .is_empty()
+        );
+        assert!(
+            client
+                .query_curvy_committed_nullifiers(None, None, 1)
+                .await?
+                .nullifiers
+                .is_empty()
+        );
+
+        assert!(client.query_curvy_sync_checkpoint(None).await.is_err());
+        assert!(
+            client
+                .query_curvy_sync_notes("checkpoint".to_owned(), None, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .query_curvy_sync_nullifiers("checkpoint".to_owned(), None, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .query_curvy_shard_roots("checkpoint".to_owned(), None, 1)
+                .await
+                .is_err()
+        );
+        assert!(client.query_curvy_aggregator_state().await.is_err());
+        assert!(client.query_curvy_note_status("note".to_owned()).await.is_err());
+        assert!(client.query_curvy_valid_notes_root("root".to_owned()).await.is_err());
+        assert!(
+            client
+                .query_curvy_nullifier_spent("nullifier".to_owned())
+                .await
+                .is_err()
+        );
+        assert!(client.query_curvy_vault_fees().await.is_err());
+        assert!(client.query_curvy_aggregator_fees().await.is_err());
+        assert!(client.query_curvy_vault_token_count().await.is_err());
+        assert!(client.query_curvy_vault_token("1".to_owned()).await.is_err());
+        assert!(
+            client
+                .query_curvy_entry_portal_address("owner".to_owned(), "recovery".to_owned())
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .query_curvy_exit_portal_address("exit".to_owned(), "1".to_owned(), "recovery".to_owned(),)
+                .await
+                .is_err()
+        );
+        assert!(client.query_curvy_portal_registered("portal".to_owned()).await.is_err());
+
+        assert!(client.subscribe_curvy_pending_notes(None)?.next().await.is_none());
+        assert!(client.subscribe_curvy_committed_notes(None)?.next().await.is_none());
+        assert!(
+            client
+                .subscribe_curvy_committed_nullifiers(None)?
+                .next()
+                .await
+                .is_none()
+        );
+
         Ok(())
     }
 }

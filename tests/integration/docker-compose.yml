@@ -1,6 +1,6 @@
 ---
 # The integration image embeds Anvil, deploys the HOPR contracts, and starts
-# Blokli. BLOKLI_TEST_REMOTE_IMAGE selects the registry image to run.
+# Blokli. BLOKLI_TEST_REMOTE_IMAGE selects either the standard or Curvy image.
 services:
   bloklid:
     image: ${BLOKLID_IMAGE:-bloklid-anvil:integration-test}

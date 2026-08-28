@@ -13,6 +13,9 @@ max-threads = 1
 [test-groups.integration-load]
 max-threads = 1
 
+[test-groups.integration-deposit]
+max-threads = 1
+
 [[profile.default.overrides]]
 filter     = "binary(blokli_query_client)"
 test-group = "integration-query"
@@ -28,3 +31,7 @@ test-group = "integration-transaction"
 [[profile.default.overrides]]
 filter     = "binary(blokli_load)"
 test-group = "integration-load"
+
+[[profile.default.overrides]]
+filter     = "binary(blokli_deposit_events)"
+test-group = "integration-deposit"

@@ -11,20 +11,20 @@ port_base_is_fixed=false
 if [[ -n ${BLOKLI_TEST_PORT_BASE:-} ]]; then
   port_base_is_fixed=true
 else
-  export BLOKLI_TEST_PORT_BASE=$((20000 + (($$ + RANDOM) % 900) * 40))
+  export BLOKLI_TEST_PORT_BASE=$((20000 + (($$ + RANDOM) % 900) * 50))
 fi
 export INSTA_WORKSPACE_ROOT="${INSTA_WORKSPACE_ROOT:-$BLOKLI_TEST_WORKSPACE_ROOT}"
 
 integration_dir="$BLOKLI_TEST_WORKSPACE_ROOT/tests/integration"
-stack_names=(query subscription transaction load)
+stack_names=(query subscription transaction load deposit)
 
 if [[ ! $BLOKLI_TEST_RUN_ID =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
   echo "BLOKLI_TEST_RUN_ID must contain only lowercase ASCII letters, digits, and hyphens" >&2
   exit 1
 fi
 if [[ ! $BLOKLI_TEST_PORT_BASE =~ ^[0-9]+$ ]] ||
-  ((BLOKLI_TEST_PORT_BASE < 1024 || BLOKLI_TEST_PORT_BASE + 32 > 65535)); then
-  echo "BLOKLI_TEST_PORT_BASE must leave room for four integration stacks" >&2
+  ((BLOKLI_TEST_PORT_BASE < 1024 || BLOKLI_TEST_PORT_BASE + 42 > 65535)); then
+  echo "BLOKLI_TEST_PORT_BASE must leave room for five integration stacks" >&2
   exit 1
 fi
 
@@ -161,8 +161,8 @@ for attempt in {1..3}; do
   fi
 
   previous_port_base="$BLOKLI_TEST_PORT_BASE"
-  port_slot=$((((BLOKLI_TEST_PORT_BASE - 20000) / 40 + 1) % 900))
-  export BLOKLI_TEST_PORT_BASE=$((20000 + port_slot * 40))
+  port_slot=$((((BLOKLI_TEST_PORT_BASE - 20000) / 50 + 1) % 900))
+  export BLOKLI_TEST_PORT_BASE=$((20000 + port_slot * 50))
   echo "Integration port attempt $attempt failed at $previous_port_base; retrying at $BLOKLI_TEST_PORT_BASE" >&2
 done
 if [[ $stacks_started == false ]]; then
