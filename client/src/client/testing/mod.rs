@@ -248,6 +248,20 @@ impl BlokliTestState {
         self.token_balances.get_mut(&account)
     }
 
+    /// Convenience method to return a reference to the Safe's native balance corresponding to the given
+    /// [`ChainAddress`] of the [`Account`].
+    pub fn get_account_safe_native_balance(&self, chain_key: &ChainAddress) -> Option<&NativeBalance> {
+        let account = self.get_account(chain_key)?;
+        self.native_balances.get(account.safe_address.as_ref()?)
+    }
+
+    /// Convenience method to return a mutable reference to the Safe's native balance corresponding to the given
+    /// [`ChainAddress`] of the [`Account`].
+    pub fn get_account_safe_native_balance_mut(&mut self, chain_key: &ChainAddress) -> Option<&mut NativeBalance> {
+        let account = self.get_account(chain_key).and_then(|a| a.safe_address.clone())?;
+        self.native_balances.get_mut(&account)
+    }
+
     /// Convenience method to return a reference to Safe allowance corresponding to the given [`ChainAddress`] of the
     /// [`Account`].
     pub fn get_account_safe_allowance(&self, chain_key: &ChainAddress) -> Option<&SafeHoprAllowance> {
