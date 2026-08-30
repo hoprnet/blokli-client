@@ -7,7 +7,7 @@ license       = "GPL-3.0-only"
 name          = "blokli-client"
 readme        = "README.md"
 repository    = "https://github.com/hoprnet/blokli-client"
-version       = "0.33.0"
+version       = "0.33.1"
 
 [dependencies]
 anyhow          = { workspace = true }
