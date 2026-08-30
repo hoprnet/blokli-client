@@ -44,7 +44,7 @@ serial_test = "3.5.0"
 smart-default = "0.7.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
-thiserror = "=2.0.19"
+thiserror = "2.0.19"
 tokio = { version = "1.52.3", features = [
   "fs",
   "macros",
@@ -61,7 +61,7 @@ tracing-subscriber = { version = "0.3.23", features = [
   "std",
 ] }
 url = { version = "2.5.8", features = ["serde"] }
-uuid = { version = "1.23.4", features = ["serde", "v4"] }
+uuid = { version = "1.26.0", features = ["serde", "v4"] }
 
 [profile.dev]
 panic = "abort"
