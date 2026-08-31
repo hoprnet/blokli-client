@@ -5,8 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::{
@@ -184,6 +185,22 @@ impl DockerEnvironment {
         let cmd = build_command("docker", &["logs", &container]);
         let logs = capture_command(cmd, &format!("docker logs {container}"))?;
         parse_anvil_accounts(&logs)
+    }
+
+    pub fn fetch_curvy_aggregator_address(&self) -> Result<String> {
+        let container = self.container_name("bloklid");
+        let cmd = build_command(
+            "docker",
+            &["exec", &container, "cat", "/data/curvy_deployed_addresses.json"],
+        );
+        let contents = capture_command(cmd, &format!("read Curvy deployment addresses from {container}"))?;
+        let addresses: Value = serde_json::from_str(&contents).context("failed to parse Curvy deployment addresses")?;
+
+        addresses
+            .get("CurvyAggregator#ERC1967Proxy")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("Curvy deployment addresses do not contain the aggregator proxy")
     }
 }
 

@@ -8,11 +8,15 @@ members = ["client", "inspector", "tests/integration"]
 anyhow = "1.0.103"
 async-broadcast = "0.7.2"
 async-trait = "0.1.89"
-blokli-client = { path = "client", version = "0.32.0" }
+blokli-client = { path = "client", version = "0.33.0" }
 bytes = "1.12.1"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive", "env", "string"] }
 comfy-table = { version = "7.2.2", default-features = false }
+curvy-bindings = "=0.1.0-rc.5"
+curvy-chain-api = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
+curvy-sdk = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
+curvy-types = { git = "https://github.com/0xCurvy/rs-sdk", rev = "fb6794eec236bb97a1e8bf683f1a1576d3c863bc" }
 cynic = "3.13.2"
 cynic-codegen = "3.13.2"
 eventsource-client = { version = "0.17.5", default-features = false }
@@ -33,14 +37,14 @@ rand = "0.10.2"
 reqwest = { version = "0.13.4", features = ["json"] }
 rstest = "0.26.1"
 semver = "1.0.28"
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 serial_test = "3.5.0"
 smart-default = "0.7.1"
 tempfile = "3.27.0"
 test-log = { version = "0.2.21", features = ["trace"] }
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 tokio = { version = "1.52.3", features = [
   "fs",
   "macros",
@@ -57,7 +61,7 @@ tracing-subscriber = { version = "0.3.23", features = [
   "std",
 ] }
 url = { version = "2.5.8", features = ["serde"] }
-uuid = { version = "1.23.4", features = ["serde", "v4"] }
+uuid = { version = "1.26.0", features = ["serde", "v4"] }
 
 [profile.dev]
 panic = "abort"

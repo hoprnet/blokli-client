@@ -169,6 +169,8 @@ fn external_stack_assignment(binary_name: &str, run_id: &str, port_base: u16) ->
         ("transaction", 2)
     } else if binary_name.starts_with("blokli_load") {
         ("load", 3)
+    } else if binary_name.starts_with("blokli_deposit_events") {
+        ("deposit", 4)
     } else {
         bail!("Unsupported integration test binary for external Docker stack: {binary_name}");
     };
@@ -315,6 +317,14 @@ mod tests {
                     stack_id: "local-load".to_string(),
                     anvil_port: 20_031,
                     bloklid_port: 20_032,
+                },
+            ),
+            (
+                "blokli_deposit_events-hash",
+                ExternalStackAssignment {
+                    stack_id: "local-deposit".to_string(),
+                    anvil_port: 20_041,
+                    bloklid_port: 20_042,
                 },
             ),
         ];

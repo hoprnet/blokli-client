@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use hopr_bindings::exports::alloy::primitives::U256;
+use hopr_bindings::exports::alloy::primitives::{Address as AlloyAddress, U256};
 use hopr_types::primitive::prelude::Address;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,16 @@ impl RpcClient {
             .await?
             .context("eth_getBalance returned no result")?;
         parse_u256(value.as_str().context("eth_getBalance returned non-string result")?)
+    }
+
+    /// Replaces an account's bytecode through Anvil's test-only RPC API.
+    pub async fn set_anvil_code(&self, address: &AlloyAddress, code: &[u8]) -> Result<()> {
+        self.call_raw(
+            "anvil_setCode",
+            vec![json!(address.to_string()), json!(format!("0x{}", hex::encode(code)))],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Performs an `eth_call` against `to` with the given calldata and returns the raw return data.
