@@ -2,11 +2,11 @@
   "nodes": {
     "crane": {
       "locked": {
-        "lastModified": 1785782307,
-        "narHash": "sha256-MPaRdVkf6zZP5fCPxYCi8Dr4pZzgmXzg8T9nVEbp3Mw=",
+        "lastModified": 1787326676,
+        "narHash": "sha256-lWhBbBvC05/xwivKBBiM2YNizpmgqCgyOIzomvRuwxs=",
         "owner": "ipetkov",
         "repo": "crane",
-        "rev": "2c71e194474d13de031d729b729c968ddbe3507f",
+        "rev": "692f7e9ef2ece8125b466f66f2af532b3edaed0d",
         "type": "github"
       },
       "original": {
@@ -143,11 +143,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786260063,
-        "narHash": "sha256-A41udIkIqcStBjfV7/jMmyZpfr32fuC4sRI5mLcJOdY=",
+        "lastModified": 1787469208,
+        "narHash": "sha256-uXovOOpnndM5a+UxMQ3vc2RhIdWMemlcbNAi7K8HYnU=",
         "owner": "shazow",
         "repo": "foundry.nix",
-        "rev": "7c9e04aaf2a0a9d3f4f9149645420fb2cdc0c3b7",
+        "rev": "4b2ec93009f68f0042a0545fafe7df2b669713f4",
         "type": "github"
       },
       "original": {
@@ -236,11 +236,11 @@
     },
     "nixpkgs-unstable_2": {
       "locked": {
-        "lastModified": 1786106723,
-        "narHash": "sha256-zDSUbpoeo/9ZmD2+wXnzxoo1+uhL8vxc0b8yuYMKYq0=",
+        "lastModified": 1787360063,
+        "narHash": "sha256-dt4WdcvsA8/RCe+VZZwqU0X+XMM3wBbGCWA0/sFWzGo=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "f13ff45afd1bb73e640eaa08a7066dbed07e3238",
+        "rev": "2c423e03bbafcff28bfadc6781a4a8257f205cb5",
         "type": "github"
       },
       "original": {
@@ -258,11 +258,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1784288435,
-        "narHash": "sha256-ReRHaLgr/uVqdD8afFSn+myXIfpHeOhP0yYe0TJqAA8=",
+        "lastModified": 1787424939,
+        "narHash": "sha256-O2tBn84NNuHrnqNVxx/XqsXwfYvS1YwBh+7CBnbCYsk=",
         "owner": "cachix",
         "repo": "git-hooks.nix",
-        "rev": "43b3c1ab9d40fb1dbb008f451988a91e375825e9",
+        "rev": "809414f0cdadf82cf11b06c2b29ba9b3168b3297",
         "type": "github"
       },
       "original": {
@@ -292,11 +292,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1786247265,
-        "narHash": "sha256-cVTcTqAhzSNMOVddtBhFpuv+Vx6/SgrhgZWJiI61H24=",
+        "lastModified": 1787454509,
+        "narHash": "sha256-r4LDUF+zmJnkftvCVkCrUhSJazsf6EVJF+V2l4/MYbI=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "6df7076ea0f5697e3242719a4c71211f00411cf5",
+        "rev": "f60c1b57ff805a46b5175c76fc981fb4f81efbcc",
         "type": "github"
       },
       "original": {
@@ -314,11 +314,11 @@
         "solc-macos-amd64-list-json": "solc-macos-amd64-list-json"
       },
       "locked": {
-        "lastModified": 1777817996,
-        "narHash": "sha256-iI71iUhD7THLibl3w1JcQEhHmTwZMxChi70RTe33BAo=",
+        "lastModified": 1786461652,
+        "narHash": "sha256-+ClEiyzReHNF93b8TZMt5QePhjTraXnO9eukkl3Flec=",
         "owner": "hellwolf",
         "repo": "solc.nix",
-        "rev": "e3cf898cb804d5c0e5474b378a300fe8942e67d6",
+        "rev": "9b3df77eb12b9716f4783b802b4332bfbfa5b4f7",
         "type": "github"
       },
       "original": {
@@ -330,13 +330,13 @@
     "solc-macos-amd64-list-json": {
       "flake": false,
       "locked": {
-        "narHash": "sha256-zzwwHA2qPotv7yp8mK7+y9BZhm7ytuFeCJVvKBBdBn4=",
+        "narHash": "sha256-Vfa5XmxKcrBfMdJX3nWo+s0YixtdZND6l4llwNp+Xl0=",
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/902dfaf/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/97e2659/macosx-amd64/list.json"
       },
       "original": {
         "type": "file",
-        "url": "https://github.com/argotorg/solc-bin/raw/902dfaf/macosx-amd64/list.json"
+        "url": "https://github.com/argotorg/solc-bin/raw/97e2659/macosx-amd64/list.json"
       }
     },
     "systems": {
