@@ -27,7 +27,6 @@ use hopr_types::{
 use rstest::*;
 use serde_json::json;
 use serial_test::serial;
-use uuid::Uuid;
 
 #[rstest]
 #[test_log::test(tokio::test)]
@@ -436,12 +435,11 @@ async fn subscribe_safe_deployments(#[future(awt)] fixture: IntegrationFixture) 
 #[test_log::test(tokio::test)]
 #[serial]
 async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
-    // Open an SSE subscription without emitting events.
+    // Open a long-lived SSE subscription without emitting events. A transaction
+    // subscription is unsuitable here because unknown transaction IDs now fail
+    // immediately with NOT_FOUND.
     let query = json!({
-        "query": format!(
-            "subscription {{ transactionUpdated(id: \"{}\") {{ id status }} }}",
-            Uuid::new_v4()
-        )
+        "query": "subscription { safeDeployed { address } }"
     });
     let request_body = serde_json::to_string(&query).expect("Failed to serialize request");
     let url = fixture

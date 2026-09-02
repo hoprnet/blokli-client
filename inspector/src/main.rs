@@ -8,7 +8,7 @@ use blokli_client::{
     BlokliClient,
     api::{
         AccountSelector, BlokliTransactionClient, ChainAddress, ChannelFilter, ChannelSelector, RedeemedStatsSelector,
-        ServiceSelector, ServiceTypeId,
+        ServiceSelector, ServiceTypeId, TransactionTrackingOutcome,
         types::{Account, ChannelStatus},
     },
 };
@@ -454,11 +454,18 @@ async fn main() -> anyhow::Result<()> {
                 });
                 pin_mut!(track_tx_fut);
 
-                if let Either::Right((transaction, _)) = futures::future::try_select(exit_fut, track_tx_fut)
+                if let Either::Right((outcome, _)) = futures::future::try_select(exit_fut, track_tx_fut)
                     .map_err(either_err)
                     .await?
                 {
-                    println!("{}", cli.format.serialize(transaction)?)
+                    match outcome {
+                        TransactionTrackingOutcome::Confirmed(transaction) => {
+                            println!("{}", cli.format.serialize(transaction)?)
+                        }
+                        TransactionTrackingOutcome::StatusUnknown { tx_id } => {
+                            eprintln!("transaction status is unknown; resume tracking id {tx_id}")
+                        }
+                    }
                 }
             } else {
                 let tx_fut = blokli_client.submit_transaction(&payload);
