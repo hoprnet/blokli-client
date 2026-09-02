@@ -48,7 +48,6 @@ semver             = { workspace = true }
 serial_test        = { workspace = true }
 tempfile           = { workspace = true }
 test-log           = { workspace = true }
-uuid               = { workspace = true }
 
 [package.metadata.cargo-machete]
 ignored = ["hopli"]
