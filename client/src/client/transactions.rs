@@ -8,7 +8,7 @@ use hex::ToHex;
 use super::{BlokliClient, GraphQlQueries, response_to_data};
 use crate::{
     api::{
-        BlokliTransactionClient, Result, TxId, TxReceipt,
+        BlokliTransactionClient, Result, TransactionTrackingOutcome, TxId, TxReceipt,
         internal::{
             ConfirmTransactionVariables, MutateConfirmTransaction, MutateSendTransaction, MutateTrackTransaction,
             SendTransactionVariables, SubscribeTransaction, TransactionsVariables,
@@ -92,8 +92,9 @@ impl BlokliTransactionClient for BlokliClient {
             .and_then(|d| d.try_into().map_err(|_| ErrorKind::ParseError))?)
     }
 
-    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<Transaction> {
-        self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id))?
+    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<TransactionTrackingOutcome> {
+        let transaction = self
+            .build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id.clone()))?
             .try_filter_map(|item| {
                 futures::future::ready(match &item.transaction_updated.status {
                     TransactionStatus::Confirmed => Ok(Some(item.transaction_updated)),
@@ -110,8 +111,12 @@ impl BlokliTransactionClient for BlokliClient {
             })
             .try_next()
             .timeout(FuturesTimeDuration::from(client_timeout))
-            .await
-            .map_err(|_| ErrorKind::Timeout)??
-            .ok_or(ErrorKind::NoData.into())
+            .await;
+
+        match transaction {
+            Ok(Ok(Some(transaction))) => Ok(TransactionTrackingOutcome::Confirmed(transaction)),
+            Ok(Ok(None)) | Err(_) => Ok(TransactionTrackingOutcome::StatusUnknown { tx_id }),
+            Ok(Err(error)) => Err(error),
+        }
     }
 }

@@ -1630,7 +1630,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
         Ok(tx_receipt)
     }
 
-    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<Transaction> {
+    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<TransactionTrackingOutcome> {
         futures_time::task::sleep(self.tx_simulation_delay.min(client_timeout.div(2)).into()).await;
         let tx = self
             .state
@@ -1640,7 +1640,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
             .ok_or_else(|| BlokliClientError::from(ErrorKind::NoData))?;
 
         match tx.status {
-            TransactionStatus::Confirmed => Ok(tx),
+            TransactionStatus::Confirmed => Ok(TransactionTrackingOutcome::Confirmed(tx)),
             TransactionStatus::Timeout => Err(ErrorKind::TrackingError(TrackingErrorKind::Timeout).into()),
             TransactionStatus::SubmissionFailed => {
                 Err(ErrorKind::TrackingError(TrackingErrorKind::SubmissionFailed).into())
@@ -1649,7 +1649,9 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
                 Err(ErrorKind::TrackingError(TrackingErrorKind::ValidationFailed).into())
             }
             TransactionStatus::Reverted => Err(ErrorKind::TrackingError(TrackingErrorKind::Reverted).into()),
-            _ => Err(ErrorKind::MockClientError(anyhow::anyhow!("unexpected transaction status")).into()),
+            TransactionStatus::Pending | TransactionStatus::Submitted => {
+                Ok(TransactionTrackingOutcome::StatusUnknown { tx_id })
+            }
         }
     }
 }

@@ -101,15 +101,20 @@
 //! ```no_run
 //! use std::time::Duration;
 //!
-//! use blokli_client::{BlokliClient, BlokliClientConfig, BlokliTransactionClient};
+//! use blokli_client::{BlokliClient, BlokliClientConfig, BlokliTransactionClient, TransactionTrackingOutcome};
 //!
 //! async fn example(signed_transaction: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 //!     let client = BlokliClient::new("https://blokli.example.org".parse()?, BlokliClientConfig::default());
 //!
 //!     let tx_id = client.submit_and_track_transaction(signed_transaction).await?;
-//!     let transaction = client.track_transaction(tx_id, Duration::from_secs(120)).await?;
-//!
-//!     println!("transaction status: {:?}", transaction.status);
+//!     match client.track_transaction(tx_id, Duration::from_secs(120)).await? {
+//!         TransactionTrackingOutcome::Confirmed(transaction) => {
+//!             println!("transaction status: {:?}", transaction.status);
+//!         }
+//!         TransactionTrackingOutcome::StatusUnknown { tx_id } => {
+//!             println!("transaction outcome is not known yet; resume tracking {tx_id}");
+//!         }
+//!     }
 //!     Ok(())
 //! }
 //! ```
@@ -167,7 +172,7 @@ pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use api::{
     AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, ChainAddress, ChannelFilter,
     ChannelId, ChannelSelector, KeyId, ModulePredictionInput, PacketKey, RedeemedStatsSelector, SafeSelector,
-    ServiceSelector, ServiceTypeId, TicketSelector, TxId, TxReceipt, types,
+    ServiceSelector, ServiceTypeId, TicketSelector, TransactionTrackingOutcome, TxId, TxReceipt, types,
 };
 pub use client::{BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport};
 #[cfg(feature = "testing")]

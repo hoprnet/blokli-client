@@ -146,6 +146,22 @@ pub type KeyId = u32;
 /// [`BlokliTransactionClient::track_transaction`].
 pub type TxId = String;
 
+/// Outcome of watching a submitted transaction until the client tracking deadline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum TransactionTrackingOutcome {
+    /// Blokli reported that the outer transaction reached the configured confirmation requirement.
+    Confirmed(types::Transaction),
+    /// Tracking stopped before Blokli reported a terminal status.
+    ///
+    /// The transaction may still confirm on-chain. Resume tracking or query the existing `tx_id`
+    /// instead of submitting a replacement transaction.
+    StatusUnknown {
+        /// Blokli tracking id that can be used to resume tracking or query the current status.
+        tx_id: TxId,
+    },
+}
+
 /// Selects [`Account`](types::Account) records by key id, chain address, packet key, or all accounts.
 ///
 /// `AccountSelector::Any` is accepted by [`BlokliQueryClient::count_accounts`] and
@@ -734,5 +750,9 @@ pub trait BlokliTransactionClient {
     /// Tracks the transaction given the `tx_id` previously returned
     /// by [`submit_and_track_transaction`](BlokliTransactionClient::submit_and_track_transaction) until it is confirmed
     /// or [fails](crate::errors::TrackingErrorKind).
-    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<types::Transaction>;
+    ///
+    /// If the client deadline elapses before a terminal update arrives, this returns
+    /// [`TransactionTrackingOutcome::StatusUnknown`]. The transaction may still confirm on-chain; use the contained
+    /// tracking id to resume tracking or query its current status instead of submitting a replacement transaction.
+    async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<TransactionTrackingOutcome>;
 }

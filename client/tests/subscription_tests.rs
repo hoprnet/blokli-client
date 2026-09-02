@@ -4,7 +4,7 @@ use anyhow::Result;
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
-        BlokliSubscriptionClient, ServiceSelector,
+        BlokliSubscriptionClient, BlokliTransactionClient, ServiceSelector, TransactionTrackingOutcome,
         types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind},
     },
 };
@@ -56,6 +56,34 @@ impl TicketParams {
         });
         format!("event: next\ndata: {payload}\n\n")
     }
+}
+
+#[tokio::test]
+async fn track_transaction_timeout_preserves_tracking_id() -> Result<()> {
+    let tx_id = "018f3f6a-9521-7c5d-8ed6-4a789f936f31";
+    let (base_url, server) = spawn_pending_transaction_server(tx_id).await?;
+    let client = BlokliClient::new(
+        base_url,
+        BlokliClientConfig {
+            subscription_read_timeout: None,
+            subscription_stream_restart_delay: None,
+            ..BlokliClientConfig::default()
+        },
+    );
+
+    let outcome = client
+        .track_transaction(tx_id.to_owned(), Duration::from_millis(100))
+        .await?;
+
+    assert_eq!(
+        outcome,
+        TransactionTrackingOutcome::StatusUnknown {
+            tx_id: tx_id.to_owned()
+        }
+    );
+
+    server.await??;
+    Ok(())
 }
 
 #[tokio::test]
@@ -644,6 +672,40 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
     let server = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
+        conn.shutdown().await?;
+        Ok(())
+    });
+
+    Ok((base_url, server))
+}
+
+async fn spawn_pending_transaction_server(tx_id: &str) -> Result<(Url, tokio::task::JoinHandle<Result<()>>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let base_url = Url::parse(&format!("http://{}", listener.local_addr()?))?;
+    let payload = serde_json::json!({
+        "data": {
+            "transactionUpdated": {
+                "id": tx_id,
+                "status": "SUBMITTED",
+                "submittedAt": "2026-09-01T07:07:03Z",
+                "transactionHash": "0x0101010101010101010101010101010101010101010101010101010101010101",
+                "safeExecution": null,
+            },
+        },
+    });
+
+    let server = tokio::spawn(async move {
+        let response_headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: text/event-stream\r\n",
+            "cache-control: no-cache\r\n",
+            "connection: close\r\n",
+            "\r\n",
+        );
+        let body = format!("event: next\ndata: {payload}\n\n");
+        let (mut conn, _) = listener.accept().await?;
+        conn.write_all(format!("{response_headers}{body}").as_bytes()).await?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         conn.shutdown().await?;
         Ok(())
     });
