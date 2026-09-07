@@ -477,9 +477,11 @@ async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture
     let comment = stream
         .filter_map(|item| {
             futures::future::ready(match item {
-                Ok(SSE::Comment(comment)) => Some(Ok(comment)),
+                Ok(SSE::Comment(comment)) => Some(Ok::<_, anyhow::Error>(comment)),
                 Ok(_) => None,
-                Err(err) => Some(Err(anyhow!("SSE error: {err}"))),
+                // eventsource-client reconnects after transient transport failures such as EOF.
+                // Keep waiting for the idle-stream keepalive instead of failing before that retry.
+                Err(_) => None,
             })
         })
         .next()
