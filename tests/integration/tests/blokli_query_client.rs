@@ -416,15 +416,17 @@ async fn query_safe_redeemed_stats_after_ticket_redeem(#[future(awt)] fixture: I
     )
     .await?;
 
-    fixture
-        .initiate_outgoing_channel_closure(src, dst, &src_safe.module_address)
-        .await?;
-
     assert_eq!(expected_count, stats.redemption_count.0.parse::<u64>()?);
     assert_eq!(
         initial_stats.redeemed_amount.0.parse::<HoprBalance>()? + ticket_amount,
         stats.redeemed_amount.0.parse::<HoprBalance>()?
     );
+
+    // The sampled accounts remain available to later tests. Finalize instead of leaving this
+    // random channel pending, so a later sample cannot inherit its state.
+    fixture
+        .close_outgoing_channel(src, dst, &src_safe.module_address)
+        .await?;
 
     Ok(())
 }
@@ -449,8 +451,10 @@ async fn query_safe_redeemed_stats_after_failed_ticket_redeem(
         .query_redeemed_stats(RedeemedStatsSelector::SafeAddress(dst_safe_address.into()))
         .await?;
 
+    // Epoch zero is never a valid channel epoch. This keeps the transaction rejected even if
+    // another test happened to open a channel for this randomly sampled pair.
     fixture
-        .redeem_ticket(src, dst, ticket_amount, &dst_safe.module_address, 0, 1)
+        .redeem_ticket(src, dst, ticket_amount, &dst_safe.module_address, 0, 0)
         .await?;
 
     let expected_count = initial_stats.rejection_count.0.parse::<u64>()? + 1;
@@ -668,6 +672,12 @@ async fn count_and_query_channels(#[future(awt)] fixture: IntegrationFixture) ->
 
     assert_eq!(count_after_closure, 0);
 
+    // `PendingToClose` is intentionally asserted above; finalize afterwards so the random
+    // account pair does not leak a channel state into another test.
+    fixture
+        .finalize_outgoing_channel_closure(src, dst, &src_safe.module_address)
+        .await?;
+
     Ok(())
 }
 
@@ -773,7 +783,7 @@ async fn channel_stats_count_and_balance(#[future(awt)] fixture: IntegrationFixt
     );
 
     fixture
-        .initiate_outgoing_channel_closure(src, dst, &src_safe.module_address)
+        .close_outgoing_channel(src, dst, &src_safe.module_address)
         .await?;
 
     Ok(())

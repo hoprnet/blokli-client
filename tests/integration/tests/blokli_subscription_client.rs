@@ -316,6 +316,12 @@ async fn subscribe_graph_channel_update_on_closure(#[future(awt)] fixture: Integ
         expected_channel_id.to_lowercase()
     );
 
+    // Preserve the pending-close assertion above, then remove this randomly selected channel
+    // before another test can sample the same pair.
+    fixture
+        .finalize_outgoing_channel_closure(src, dst, &src_safe.module_address)
+        .await?;
+
     Ok(())
 }
 
@@ -772,6 +778,10 @@ async fn subscribe_ticket_redeemed(#[future(awt)] fixture: IntegrationFixture) -
     );
     assert_eq!(event.index.0, ticket_index.to_string(), "ticket index must match");
     assert_eq!(event.result, RedemptionResult::Redeemed, "ticket must be accepted");
+
+    fixture
+        .close_outgoing_channel(src, dst, &src_safe.module_address)
+        .await?;
 
     Ok(())
 }
