@@ -442,11 +442,15 @@ async fn subscribe_safe_deployments(#[future(awt)] fixture: IntegrationFixture) 
 #[test_log::test(tokio::test)]
 #[serial]
 async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
-    // Open an SSE subscription without emitting events.
+    // Open an SSE subscription that stays valid but idle: filtering on a channel ID that cannot
+    // exist means phase 1 emits nothing and no updates ever follow, so the only traffic on the
+    // stream is the server's keepalive. Subscribing to a non-existent entity instead (e.g. a random
+    // transaction ID) makes the server emit a NOT_FOUND error and close the stream, which would
+    // leave the client reconnecting forever without ever seeing a keepalive.
     let query = json!({
         "query": format!(
-            "subscription {{ transactionUpdated(id: \"{}\") {{ id status }} }}",
-            Uuid::new_v4()
+            "subscription {{ channelUpdated(concreteChannelId: \"{}\") {{ concreteChannelId status }} }}",
+            format!("0x{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
         )
     });
     let request_body = serde_json::to_string(&query).expect("Failed to serialize request");
