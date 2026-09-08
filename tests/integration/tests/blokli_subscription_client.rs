@@ -316,6 +316,12 @@ async fn subscribe_graph_channel_update_on_closure(#[future(awt)] fixture: Integ
         expected_channel_id.to_lowercase()
     );
 
+    // Preserve the pending-close assertion above, then remove this randomly selected channel
+    // before another test can sample the same pair.
+    fixture
+        .finalize_outgoing_channel_closure(src, dst, &src_safe.module_address)
+        .await?;
+
     Ok(())
 }
 
@@ -436,11 +442,15 @@ async fn subscribe_safe_deployments(#[future(awt)] fixture: IntegrationFixture) 
 #[test_log::test(tokio::test)]
 #[serial]
 async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
-    // Open an SSE subscription without emitting events.
+    // Open an SSE subscription that stays valid but idle: filtering on a channel ID that cannot
+    // exist means phase 1 emits nothing and no updates ever follow, so the only traffic on the
+    // stream is the server's keepalive. Subscribing to a non-existent entity instead (e.g. a random
+    // transaction ID) makes the server emit a NOT_FOUND error and close the stream, which would
+    // leave the client reconnecting forever without ever seeing a keepalive.
     let query = json!({
         "query": format!(
-            "subscription {{ transactionUpdated(id: \"{}\") {{ id status }} }}",
-            Uuid::new_v4()
+            "subscription {{ channelUpdated(concreteChannelId: \"{}\") {{ concreteChannelId status }} }}",
+            format!("0x{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
         )
     });
     let request_body = serde_json::to_string(&query).expect("Failed to serialize request");
@@ -471,9 +481,11 @@ async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture
     let comment = stream
         .filter_map(|item| {
             futures::future::ready(match item {
-                Ok(SSE::Comment(comment)) => Some(Ok(comment)),
+                Ok(SSE::Comment(comment)) => Some(Ok::<_, anyhow::Error>(comment)),
                 Ok(_) => None,
-                Err(err) => Some(Err(anyhow!("SSE error: {err}"))),
+                // eventsource-client reconnects after transient transport failures such as EOF.
+                // Keep waiting for the idle-stream keepalive instead of failing before that retry.
+                Err(_) => None,
             })
         })
         .next()
@@ -772,6 +784,10 @@ async fn subscribe_ticket_redeemed(#[future(awt)] fixture: IntegrationFixture) -
     );
     assert_eq!(event.index.0, ticket_index.to_string(), "ticket index must match");
     assert_eq!(event.result, RedemptionResult::Redeemed, "ticket must be accepted");
+
+    fixture
+        .close_outgoing_channel(src, dst, &src_safe.module_address)
+        .await?;
 
     Ok(())
 }
