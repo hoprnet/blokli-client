@@ -33,7 +33,9 @@ enum ClientType {
 async fn submit_transaction(#[future(awt)] fixture: IntegrationFixture, #[case] client_type: ClientType) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-    let signed_bytes = fixture.build_allowed_token_approval_tx(sender, recipient, nonce).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
     let raw_tx = format!("0x{}", encode(&signed_bytes));
 
     match client_type {
@@ -133,7 +135,9 @@ async fn submit_transaction_with_too_much_value(
 async fn submit_and_track_transaction(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-    let signed_bytes = fixture.build_allowed_token_approval_tx(sender, recipient, nonce).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 
@@ -155,7 +159,9 @@ async fn submit_and_confirm_transaction(#[future(awt)] fixture: IntegrationFixtu
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
     let confirmations = fixture.config().tx_confirmations;
-    let signed_bytes = fixture.build_allowed_token_approval_tx(sender, recipient, nonce).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let block_number = fixture.client().query_chain_info().await?.block_number;
     fixture.submit_and_confirm_tx(&signed_bytes, confirmations).await?;
@@ -269,7 +275,9 @@ async fn test_safe_module_transaction_execution_failure(#[future(awt)] fixture: 
 async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-    let signed_bytes = fixture.build_allowed_token_approval_tx(sender, recipient, nonce).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 

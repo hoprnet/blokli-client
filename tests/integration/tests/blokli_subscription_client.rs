@@ -640,7 +640,9 @@ async fn subscribe_transaction_status_updates(#[future(awt)] fixture: Integratio
     // 1. Build and submit transaction
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-    let signed_bytes = fixture.build_allowed_token_approval_tx(sender, recipient, nonce).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     // 2. Submit and get tracking ID
     let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
