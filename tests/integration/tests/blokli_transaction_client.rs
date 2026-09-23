@@ -6,7 +6,7 @@ use blokli_integration_tests::{
     constants::parsed_safe_balance,
     fixtures::{IntegrationFixture, integration_fixture as fixture, poll_until},
 };
-use hex::FromHex;
+use hex::{FromHex, encode};
 use hopr_bindings::exports::alloy::primitives::U256;
 use hopr_types::{
     chain::{
@@ -29,19 +29,14 @@ enum ClientType {
 #[case(ClientType::Blokli)]
 #[test_log::test(tokio::test)]
 #[serial]
-/// Test that submitting a transaction with a valid payload, via blokli and via direct RPC, goes through.
-/// The payload is a simple token transfer to not test any HOPR-specific logic, but rather only the
-/// transaction submission flow.
+/// Test that submitting an allowed transaction, via blokli and via direct RPC, goes through.
 async fn submit_transaction(#[future(awt)] fixture: IntegrationFixture, #[case] client_type: ClientType) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
-    let tx_value = U256::from(TX_VALUE);
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-
-    let raw_tx = fixture.build_raw_tx(tx_value, sender, recipient, nonce).await?;
-    let signed_bytes =
-        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
-
-    let initial_balance = fixture.rpc().get_balance(&recipient.address).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
+    let raw_tx = format!("0x{}", encode(&signed_bytes));
 
     match client_type {
         ClientType::Rpc => {
@@ -52,19 +47,18 @@ async fn submit_transaction(#[future(awt)] fixture: IntegrationFixture, #[case] 
         }
     }
 
-    // Wait for the balance to update after the fire-and-forget submission
-    let expected_balance = initial_balance + tx_value;
+    // Wait for the sender nonce to update after the fire-and-forget submission.
     poll_until(
-        "recipient balance updated",
+        "sender nonce updated",
         Duration::from_secs(30),
         Duration::from_millis(500),
         || {
             let rpc = fixture.rpc();
-            let addr = &recipient.address;
+            let address = &sender.address;
             async move {
-                let balance = rpc.get_balance(addr).await?;
-                Ok(if balance >= expected_balance {
-                    Some(balance)
+                let current_nonce = rpc.transaction_count(address).await?;
+                Ok(if current_nonce > nonce {
+                    Some(current_nonce)
                 } else {
                     None
                 })
@@ -72,13 +66,6 @@ async fn submit_transaction(#[future(awt)] fixture: IntegrationFixture, #[case] 
         },
     )
     .await?;
-
-    let final_balance = fixture.rpc().get_balance(&recipient.address).await?;
-    let delta = final_balance
-        .checked_sub(initial_balance)
-        .context("recipient balance decreased unexpectedly")?;
-
-    assert_eq!(delta, tx_value);
 
     Ok(())
 }
@@ -147,13 +134,10 @@ async fn submit_transaction_with_too_much_value(
 /// id provided by blokli can be used to track the transaction status until confirmation.
 async fn submit_and_track_transaction(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
-    let tx_value = U256::from(TX_VALUE);
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-
-    let raw_tx = fixture.build_raw_tx(tx_value, sender, recipient, nonce).await?;
-    let initial_balance = fixture.rpc().get_balance(&recipient.address).await?;
-    let signed_bytes =
-        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 
@@ -162,13 +146,6 @@ async fn submit_and_track_transaction(#[future(awt)] fixture: IntegrationFixture
         .track_transaction(txid.clone(), Duration::from_secs(30))
         .await?;
     assert_eq!(res.status, TransactionStatus::Confirmed);
-
-    let final_balance = fixture.rpc().get_balance(&recipient.address).await?;
-    let delta = final_balance
-        .checked_sub(initial_balance)
-        .context("recipient balance decreased unexpectedly")?;
-
-    assert_eq!(delta, tx_value);
 
     Ok(())
 }
@@ -180,14 +157,11 @@ async fn submit_and_track_transaction(#[future(awt)] fixture: IntegrationFixture
 /// payload via blokli goes through.
 async fn submit_and_confirm_transaction(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
-    let tx_value = U256::from(TX_VALUE);
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
     let confirmations = fixture.config().tx_confirmations;
-
-    let raw_tx = fixture.build_raw_tx(tx_value, sender, recipient, nonce).await?;
-    let signed_bytes =
-        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
-    let initial_balance = fixture.rpc().get_balance(&recipient.address).await?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let block_number = fixture.client().query_chain_info().await?.block_number;
     fixture.submit_and_confirm_tx(&signed_bytes, confirmations).await?;
@@ -196,11 +170,6 @@ async fn submit_and_confirm_transaction(#[future(awt)] fixture: IntegrationFixtu
     // latest block.
     assert!(fixture.client().query_chain_info().await?.block_number + 1 >= block_number + (confirmations as i32));
 
-    let final_balance = fixture.rpc().get_balance(&recipient.address).await?;
-    let delta = final_balance
-        .checked_sub(initial_balance)
-        .context("recipient balance decreased unexpectedly")?;
-    assert_eq!(delta, tx_value);
     Ok(())
 }
 
@@ -301,16 +270,14 @@ async fn test_safe_module_transaction_execution_failure(#[future(awt)] fixture: 
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-/// Test that a plain ETH transfer (not targeting a Safe or module) has no safe_execution
+/// Test that a direct token transaction (not targeting a Safe or module) has no safe_execution
 /// enrichment.
 async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
-    let tx_value = U256::from(TX_VALUE);
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-
-    let raw_tx = fixture.build_raw_tx(tx_value, sender, recipient, nonce).await?;
-    let signed_bytes =
-        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 
