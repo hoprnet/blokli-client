@@ -432,6 +432,7 @@ pub struct BlokliTestClient<M> {
     service_registry_config_channel: ServiceRegistryConfigEvents,
     tx_simulation_delay: Duration,
     use_internal_txs: bool,
+    policy_outcome: Option<SimulatedPolicyOutcome>,
 }
 
 fn channel_matches(channel: &Channel, selector: &ChannelSelector, accounts: &IndexMap<u32, Account>) -> bool {
@@ -546,6 +547,7 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             service_registry_config_channel: (service_registry_config_tx, service_registry_config_rx.deactivate()),
             tx_simulation_delay: Duration::from_secs(1),
             use_internal_txs: false,
+            policy_outcome: None,
         }
     }
 
@@ -565,6 +567,21 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
     #[must_use]
     pub fn with_use_internal_txs(mut self, use_internal_txs: bool) -> Self {
         self.use_internal_txs = use_internal_txs;
+        self
+    }
+
+    /// Forces every submission to be refused by Blokli's HOPR-aware policy.
+    ///
+    /// Use this to exercise a caller's handling of a refusal without needing a real Blokli.
+    /// As on a real server nothing is "broadcast": the simulated state is left untouched and
+    /// the configured error is returned from all three submission methods.
+    ///
+    /// Deduplication is deliberately not simulated here — Blokli reports it by handing back
+    /// the transaction that already carries the action, which the client surfaces as an
+    /// ordinary successful submission, so there is no distinct path for a caller to handle.
+    #[must_use]
+    pub fn with_policy_outcome(mut self, policy_outcome: Option<SimulatedPolicyOutcome>) -> Self {
+        self.policy_outcome = policy_outcome;
         self
     }
 
@@ -1542,9 +1559,61 @@ fn simulate_tx_execution(
     Ok(())
 }
 
+/// A refusal by Blokli's HOPR-aware transaction policy, for a test to replay.
+///
+/// Mirrors the two outcomes that stop a transaction being broadcast. They differ in what the
+/// caller should do next: a rejection stands until the on-chain state changes, while a
+/// throttle clears on its own after `retry_after`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SimulatedPolicyOutcome {
+    /// Blokli refused the action as deterministically invalid.
+    Rejected {
+        /// The HOPR operation, such as `finalize_channel_closure`.
+        operation: String,
+        /// Stable code for the precondition that failed.
+        reason: String,
+    },
+    /// Blokli is suppressing this signer after repeated invalid submissions.
+    Throttled {
+        /// The HOPR operation, such as `finalize_channel_closure`.
+        operation: String,
+        /// Stable code for the precondition that most recently failed.
+        reason: String,
+        /// How long until the same operation may be submitted again.
+        retry_after: Duration,
+    },
+}
+
+impl From<SimulatedPolicyOutcome> for BlokliClientError {
+    fn from(value: SimulatedPolicyOutcome) -> Self {
+        match value {
+            SimulatedPolicyOutcome::Rejected { operation, reason } => ErrorKind::HoprActionRejected {
+                message: format!("simulated rejection of {operation}"),
+                operation,
+                reason,
+            },
+            SimulatedPolicyOutcome::Throttled {
+                operation,
+                reason,
+                retry_after,
+            } => ErrorKind::HoprActionThrottled {
+                message: format!("simulated suppression of {operation}"),
+                operation,
+                reason,
+                retry_after,
+            },
+        }
+        .into()
+    }
+}
+
 #[async_trait::async_trait]
 impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for BlokliTestClient<M> {
     async fn submit_transaction(&self, signed_tx: &[u8]) -> Result<TxReceipt> {
+        if let Some(outcome) = &self.policy_outcome {
+            return Err(outcome.clone().into());
+        }
+
         let mut tx_receipt = [0u8; 32];
         rand::fill(&mut tx_receipt);
 
@@ -1559,6 +1628,10 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
     }
 
     async fn submit_and_track_transaction(&self, signed_tx: &[u8]) -> Result<TxId> {
+        if let Some(outcome) = &self.policy_outcome {
+            return Err(outcome.clone().into());
+        }
+
         let tx_id = hex::encode(rand::random_iter::<u8>().take(16).collect::<Vec<_>>());
         let tx_hash = hex::encode(rand::random_iter::<u8>().take(32).collect::<Vec<_>>());
 
@@ -1610,6 +1683,10 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
     }
 
     async fn submit_and_confirm_transaction(&self, signed_tx: &[u8], num_confirmations: usize) -> Result<TxReceipt> {
+        if let Some(outcome) = &self.policy_outcome {
+            return Err(outcome.clone().into());
+        }
+
         futures_time::task::sleep((self.tx_simulation_delay * num_confirmations as u32).into()).await;
 
         let mut tx_receipt = [0u8; 32];
@@ -1949,12 +2026,16 @@ mod tests {
         let mut stream = client.subscribe_service_types(Some(GVPN_EXIT))?;
         client.submit_transaction(&[0]).await?;
 
-        let updates = stream.by_ref().take(2).collect::<Vec<_>>().await;
+        // The subscription replays the service types that already exist before it streams
+        // live changes, so the seeded `gvpn:exit` arrives as a `Registered` event first. The
+        // two field changes then follow as one event each.
+        let updates = stream.by_ref().take(3).collect::<Vec<_>>().await;
         let updates = updates.into_iter().collect::<Result<Vec<_>>>()?;
 
         assert_eq!(
             updates.iter().map(|update| update.kind).collect::<Vec<_>>(),
             vec![
+                ServiceTypeUpdateKind::Registered,
                 ServiceTypeUpdateKind::OwnerChanged,
                 ServiceTypeUpdateKind::UpdateBurnChanged
             ]

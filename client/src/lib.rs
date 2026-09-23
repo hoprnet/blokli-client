@@ -172,7 +172,8 @@ pub use api::{
 pub use client::{BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport};
 #[cfg(feature = "testing")]
 pub use client::{
-    BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, GraphQlQueries, NopStateMutator,
+    BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, GraphQlQueries,
+    NopStateMutator, SimulatedPolicyOutcome,
 };
 pub use errors::{BlokliClientError, ErrorKind, TrackingErrorKind};
 

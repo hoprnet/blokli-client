@@ -255,12 +255,121 @@ impl From<ContractNotAllowedError> for BlokliClientError {
     }
 }
 
+/// Error returned when Blokli has no spare capacity to track another submitted transaction.
+///
+/// This is a transient condition: the submission was not broadcast, and the same
+/// transaction can be retried once Blokli has drained its monitoring backlog.
+#[derive(cynic::QueryFragment, Debug)]
+pub struct OverloadedError {
+    /// GraphQL concrete type name.
+    pub __typename: String,
+    /// Stable Blokli error code.
+    pub code: String,
+    /// Human-readable error message from Blokli.
+    pub message: String,
+}
+
+impl From<OverloadedError> for BlokliClientError {
+    fn from(value: OverloadedError) -> Self {
+        ErrorKind::BlokliError {
+            kind: "overloaded",
+            code: value.code,
+            message: value.message,
+        }
+        .into()
+    }
+}
+
+/// Error returned when Blokli refuses a known HOPR action before broadcasting it.
+///
+/// Blokli decoded the transaction as a supported HOPR node-management operation and found a
+/// precondition that the indexed chain state contradicts, so the transaction was never sent.
+/// Resubmitting the same action will be refused again until the on-chain state changes.
+#[derive(cynic::QueryFragment, Debug)]
+pub struct HoprActionRejectedError {
+    /// GraphQL concrete type name.
+    pub __typename: String,
+    /// Stable Blokli error code.
+    pub code: String,
+    /// Human-readable error message from Blokli.
+    pub message: String,
+    /// The HOPR operation Blokli decoded, such as `finalize_channel_closure`.
+    pub operation: String,
+    /// Stable code for the precondition that failed.
+    pub reason: String,
+}
+
+impl From<HoprActionRejectedError> for BlokliClientError {
+    fn from(value: HoprActionRejectedError) -> Self {
+        ErrorKind::HoprActionRejected {
+            operation: value.operation,
+            reason: value.reason,
+            message: value.message,
+        }
+        .into()
+    }
+}
+
+/// Error returned when Blokli temporarily suppresses a signer's repeated invalid actions.
+///
+/// Unlike [`HoprActionRejectedError`] this is transient: the same action may be submitted
+/// again once `retry_after_seconds` has elapsed.
+#[derive(cynic::QueryFragment, Debug)]
+pub struct HoprActionThrottledError {
+    /// GraphQL concrete type name.
+    pub __typename: String,
+    /// Stable Blokli error code.
+    pub code: String,
+    /// Human-readable error message from Blokli.
+    pub message: String,
+    /// The HOPR operation Blokli decoded, such as `finalize_channel_closure`.
+    pub operation: String,
+    /// Stable code for the precondition that most recently failed.
+    pub reason: String,
+    /// Seconds until this signer may submit this operation again.
+    #[cynic(rename = "retryAfterSeconds")]
+    pub retry_after_seconds: i32,
+}
+
+impl From<HoprActionThrottledError> for BlokliClientError {
+    fn from(value: HoprActionThrottledError) -> Self {
+        ErrorKind::HoprActionThrottled {
+            operation: value.operation,
+            reason: value.reason,
+            // Blokli reports whole seconds and never a negative delay; a malformed value
+            // becomes "retry now" rather than a panic.
+            retry_after: std::time::Duration::from_secs(value.retry_after_seconds.max(0) as u64),
+            message: value.message,
+        }
+        .into()
+    }
+}
+
+/// An equivalent logical HOPR action was already in flight, so nothing was broadcast.
+///
+/// Retries of a HOPR action are re-signed with a new nonce, so they are distinct raw
+/// transactions expressing one intent. Blokli hands back the transaction already tracking
+/// that intent, which callers follow exactly as if they had submitted it themselves.
+#[derive(cynic::QueryFragment, Debug)]
+pub struct DeduplicatedTransaction {
+    /// GraphQL concrete type name.
+    pub __typename: String,
+    /// The transaction already tracking this logical action.
+    pub transaction: Transaction,
+    /// The HOPR operation Blokli decoded.
+    pub operation: String,
+}
+
 #[derive(cynic::InlineFragments, Debug)]
 pub enum SendTransactionAsyncResult {
     Transaction(Transaction),
     ContractNotAllowedError(ContractNotAllowedError),
     FunctionNotAllowedError(FunctionNotAllowedError),
     RpcError(RpcError),
+    OverloadedError(OverloadedError),
+    HoprActionRejectedError(HoprActionRejectedError),
+    HoprActionThrottledError(HoprActionThrottledError),
+    DeduplicatedTransaction(DeduplicatedTransaction),
     #[cynic(fallback)]
     Unknown,
 }
@@ -272,6 +381,12 @@ impl From<SendTransactionAsyncResult> for Result<Transaction, BlokliClientError>
             SendTransactionAsyncResult::ContractNotAllowedError(e) => Err(e.into()),
             SendTransactionAsyncResult::FunctionNotAllowedError(e) => Err(e.into()),
             SendTransactionAsyncResult::RpcError(e) => Err(e.into()),
+            SendTransactionAsyncResult::OverloadedError(e) => Err(e.into()),
+            SendTransactionAsyncResult::HoprActionRejectedError(e) => Err(e.into()),
+            SendTransactionAsyncResult::HoprActionThrottledError(e) => Err(e.into()),
+            // Nothing was broadcast, but the intent is being tracked by the returned
+            // transaction: the caller follows it exactly as it would its own submission.
+            SendTransactionAsyncResult::DeduplicatedTransaction(d) => Ok(d.transaction),
             SendTransactionAsyncResult::Unknown => Err(ErrorKind::NoData.into()),
         }
     }
@@ -283,6 +398,8 @@ pub enum SendTransactionResult {
     ContractNotAllowedError(ContractNotAllowedError),
     FunctionNotAllowedError(FunctionNotAllowedError),
     RpcError(RpcError),
+    HoprActionRejectedError(HoprActionRejectedError),
+    HoprActionThrottledError(HoprActionThrottledError),
     #[cynic(fallback)]
     Unknown,
 }
@@ -300,6 +417,8 @@ impl From<SendTransactionResult> for Result<TxReceipt, BlokliClientError> {
             SendTransactionResult::ContractNotAllowedError(e) => Err(e.into()),
             SendTransactionResult::FunctionNotAllowedError(e) => Err(e.into()),
             SendTransactionResult::RpcError(e) => Err(e.into()),
+            SendTransactionResult::HoprActionRejectedError(e) => Err(e.into()),
+            SendTransactionResult::HoprActionThrottledError(e) => Err(e.into()),
             SendTransactionResult::Unknown => Err(ErrorKind::NoData.into()),
         }
     }
@@ -312,6 +431,8 @@ pub enum SendTransactionSyncResult {
     FunctionNotAllowedError(FunctionNotAllowedError),
     RpcError(RpcError),
     TimeoutError(TimeoutError),
+    HoprActionRejectedError(HoprActionRejectedError),
+    HoprActionThrottledError(HoprActionThrottledError),
     #[cynic(fallback)]
     Unknown,
 }
@@ -324,6 +445,8 @@ impl From<SendTransactionSyncResult> for Result<Transaction, BlokliClientError> 
             SendTransactionSyncResult::FunctionNotAllowedError(e) => Err(e.into()),
             SendTransactionSyncResult::RpcError(e) => Err(e.into()),
             SendTransactionSyncResult::TimeoutError(e) => Err(e.into()),
+            SendTransactionSyncResult::HoprActionRejectedError(e) => Err(e.into()),
+            SendTransactionSyncResult::HoprActionThrottledError(e) => Err(e.into()),
             SendTransactionSyncResult::Unknown => Err(ErrorKind::NoData.into()),
         }
     }
