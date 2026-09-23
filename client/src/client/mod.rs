@@ -19,6 +19,7 @@ use reqwest::redirect::Policy as RedirectPolicy;
 #[cfg(feature = "testing")]
 pub use testing::{
     BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, NopStateMutator,
+    SimulatedPolicyOutcome,
 };
 
 use crate::{

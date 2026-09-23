@@ -2,6 +2,15 @@
 source: client/src/client/testing/mod.rs
 expression: updates
 ---
+- kind: REGISTERED
+  service_type: "gvpn:exit"
+  config:
+    service_type: "gvpn:exit"
+    owner: "0x4444"
+    requirement: ~
+    registration_burn: 1 wxHOPR
+    update_burn: 0 wxHOPR
+  registry_config: ~
 - kind: OWNER_CHANGED
   service_type: "gvpn:exit"
   config:

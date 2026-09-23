@@ -49,7 +49,7 @@ build-release:
 
 # Check all workspace code without building binaries
 check:
-    cargo check --workspace
+    cargo check --workspace --all-features
 
 # Clean all build artifacts
 clean:
@@ -61,15 +61,15 @@ clean:
 
 # Run unit tests in the workspace
 test:
-    cargo test --workspace --exclude blokli-integration-tests --no-fail-fast
+    cargo test --workspace --exclude blokli-integration-tests --all-features --no-fail-fast
 
 # Run tests for a specific package
 test-package package:
-    cargo test -p {{ package }} --no-fail-fast
+    cargo test -p {{ package }} --all-features --no-fail-fast
 
 # Run tests in single thread mode with output
 test-debug:
-    cargo test --workspace --exclude blokli-integration-tests -- --test-threads=1 --nocapture
+    cargo test --workspace --exclude blokli-integration-tests --all-features -- --test-threads=1 --nocapture
 
 # Run tests for a specific package with execution time reported
 test-profile package:
@@ -77,11 +77,11 @@ test-profile package:
 
 # Run all unit tests using nextest
 nextest:
-    cargo nextest run --workspace --exclude blokli-integration-tests
+    cargo nextest run --workspace --exclude blokli-integration-tests --all-features
 
 # Run tests for a specific package using nextest
 nextest-package package:
-    cargo nextest run -p {{ package }}
+    cargo nextest run -p {{ package }} --all-features
 
 # Build and run the archived integration test suite
 test-integration:
@@ -97,11 +97,11 @@ fmt:
 
 # Run clippy lints with warnings as errors
 clippy:
-    cargo clippy --workspace -- -D warnings
+    cargo clippy --workspace --all-features -- -D warnings
 
 # Run clippy on all non-integration targets
 clippy-all:
-    cargo clippy --workspace --exclude blokli-integration-tests --all-targets -- -D warnings
+    cargo clippy --workspace --exclude blokli-integration-tests --all-targets --all-features -- -D warnings
 
 # Automatically fix clippy warnings
 clippy-fix:
