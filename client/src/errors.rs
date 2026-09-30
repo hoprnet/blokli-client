@@ -62,6 +62,37 @@ pub enum ErrorKind {
         /// Human-readable error message returned by Blokli.
         message: String,
     },
+    /// Blokli refused a known HOPR action before broadcasting it.
+    ///
+    /// Blokli decoded the transaction as a supported HOPR node-management operation and found
+    /// a precondition that the indexed chain state contradicts, so nothing was sent. Retrying
+    /// the same action is futile until the on-chain state changes — unlike
+    /// [`ErrorKind::HoprActionThrottled`], waiting alone will not help.
+    #[error("blokli rejected the {operation} action ({reason}): {message}")]
+    HoprActionRejected {
+        /// The HOPR operation Blokli decoded, such as `finalize_channel_closure`.
+        operation: String,
+        /// Stable code for the precondition that failed.
+        reason: String,
+        /// Human-readable explanation from Blokli.
+        message: String,
+    },
+    /// Blokli is temporarily suppressing this signer's submissions of this operation.
+    ///
+    /// Raised after repeated deterministically invalid submissions. The transaction was not
+    /// broadcast, but unlike [`ErrorKind::HoprActionRejected`] this clears on its own: use
+    /// `retry_after` to back off rather than retrying immediately.
+    #[error("blokli suppressed the {operation} action ({reason}); retry in {}s", retry_after.as_secs())]
+    HoprActionThrottled {
+        /// The HOPR operation Blokli decoded.
+        operation: String,
+        /// Stable code for the precondition that most recently failed.
+        reason: String,
+        /// How long to wait before submitting this operation again.
+        retry_after: std::time::Duration,
+        /// Human-readable explanation from Blokli.
+        message: String,
+    },
     /// Local input was rejected before the request was sent.
     #[error("invalid query input: {0}")]
     InvalidInput(&'static str),
