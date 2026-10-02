@@ -189,7 +189,7 @@ impl HttpTransport for ReqwestTransport {
 pub struct BlokliClient {
     base_url: url::Url,
     cfg: BlokliClientConfig,
-    // Built once and shared by clones: a fresh client per request meant a new pool + TLS handshake each time
+    // Shared by all clones so requests reuse pooled connections instead of paying a TLS handshake each
     query_client: Arc<OnceLock<reqwest::Client>>,
     subscription_client: Arc<OnceLock<reqwest::Client>>,
 }
