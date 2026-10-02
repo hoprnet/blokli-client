@@ -8,6 +8,7 @@ use std::{
     fmt::Debug,
     future::Future,
     net::{IpAddr, SocketAddr},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -188,6 +189,9 @@ impl HttpTransport for ReqwestTransport {
 pub struct BlokliClient {
     base_url: url::Url,
     cfg: BlokliClientConfig,
+    // Built once and shared by clones: a fresh client per request meant a new pool + TLS handshake each time
+    query_client: Arc<OnceLock<reqwest::Client>>,
+    subscription_client: Arc<OnceLock<reqwest::Client>>,
 }
 
 const REDIRECT_LIMIT: usize = 3;
@@ -198,7 +202,20 @@ pub struct GraphQlQueries;
 impl BlokliClient {
     /// Creates a new instance given Blokli base URL and configuration.
     pub fn new(base_url: url::Url, cfg: BlokliClientConfig) -> Self {
-        Self { base_url, cfg }
+        Self {
+            base_url,
+            cfg,
+            query_client: Arc::default(),
+            subscription_client: Arc::default(),
+        }
+    }
+
+    /// Like [`Self::new`], but builds both HTTP clients up front so configuration errors surface here.
+    pub fn try_new(base_url: url::Url, cfg: BlokliClientConfig) -> Result<Self, BlokliClientError> {
+        let client = Self::new(base_url, cfg);
+        client.query_client()?;
+        client.subscription_client()?;
+        Ok(client)
     }
 
     /// Returns the client's base Blokli URL.
@@ -236,6 +253,22 @@ impl BlokliClient {
         let addr = SocketAddr::new(dns_override.ip, port);
 
         Ok(builder.resolve(host, addr))
+    }
+
+    fn query_client(&self) -> Result<reqwest::Client, BlokliClientError> {
+        if let Some(client) = self.query_client.get() {
+            return Ok(client.clone());
+        }
+        let client = self.build_reqwest_client()?;
+        Ok(self.query_client.get_or_init(|| client).clone())
+    }
+
+    fn subscription_client(&self) -> Result<reqwest::Client, BlokliClientError> {
+        if let Some(client) = self.subscription_client.get() {
+            return Ok(client.clone());
+        }
+        let client = self.build_subscription_reqwest_client()?;
+        Ok(self.subscription_client.get_or_init(|| client).clone())
     }
 
     fn build_reqwest_client(&self) -> Result<reqwest::Client, BlokliClientError> {
@@ -286,7 +319,7 @@ impl BlokliClient {
         let query = serde_json::to_string(&op).map_err(ErrorKind::from)?;
         tracing::debug!(query, "sending SSE query");
         let graphql_url = self.graphql_url()?;
-        let reqwest_client = self.build_subscription_reqwest_client()?;
+        let reqwest_client = self.subscription_client()?;
 
         struct PendingSubscriptionState {
             graphql_url: url::Url,
@@ -386,7 +419,7 @@ impl BlokliClient {
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Debug + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let client = self.build_reqwest_client()?;
+        let client = self.query_client()?;
         tracing::debug!(query = ?serde_json::to_string(&op), "sending Blokli query");
 
         Ok(client
@@ -447,13 +480,17 @@ pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::R
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use cynic::GraphQlResponse;
     use futures::TryStreamExt;
     use launchdarkly_sdk_transport::HttpTransport;
     use mockito::{Matcher, Server};
     use serde_json::json;
 
-    use super::{BlokliClient, BlokliClientConfig, ReqwestTransport, SCHEMA_VERSION, response_to_data};
+    use super::{
+        BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport, SCHEMA_VERSION, response_to_data,
+    };
     use crate::{
         api::{BlokliQueryClient, BlokliTransactionClient},
         errors::ErrorKind,
@@ -506,6 +543,22 @@ mod tests {
         };
 
         assert!(error.to_string().contains("builder error"));
+    }
+
+    #[test]
+    fn try_new_reports_dns_override_errors_that_new_defers_to_the_first_request() {
+        let hostless_url = url::Url::parse("data:text/plain,blokli").expect("valid URL");
+        let cfg = BlokliClientConfig {
+            dns_override: Some(BlokliDnsOverride {
+                ip: IpAddr::from([203, 0, 113, 10]),
+                port: Some(443),
+            }),
+            ..Default::default()
+        };
+
+        let lazy = BlokliClient::new(hostless_url.clone(), cfg.clone());
+        assert!(lazy.query_client().is_err());
+        assert!(BlokliClient::try_new(hostless_url, cfg).is_err());
     }
 
     #[test]
