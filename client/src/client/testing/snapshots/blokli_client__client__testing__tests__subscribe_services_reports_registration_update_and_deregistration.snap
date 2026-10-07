@@ -10,8 +10,8 @@ expression: updates
     node: "1111111111111111111111111111111111111111"
     safe: "3333333333333333333333333333333333333333"
     metadata: "0xdeadbeef"
-    registered_at: 1700000000
-    updated_at: 1700000000
+    registered_at: "1700000000"
+    updated_at: "1700000000"
 - kind: UPDATED
   service_type: "gvpn:exit"
   node: "1111111111111111111111111111111111111111"
@@ -20,8 +20,8 @@ expression: updates
     node: "1111111111111111111111111111111111111111"
     safe: "3333333333333333333333333333333333333333"
     metadata: "0xc0ffee"
-    registered_at: 1700000000
-    updated_at: 1700000100
+    registered_at: "1700000000"
+    updated_at: "1700000100"
 - kind: DEREGISTERED
   service_type: "gvpn:exit"
   node: "1111111111111111111111111111111111111111"
