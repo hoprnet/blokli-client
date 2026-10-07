@@ -4,8 +4,8 @@ use anyhow::Result;
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
-        BlokliSubscriptionClient, ServiceSelector,
-        types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind},
+        BlokliSubscriptionClient, BlokliTransactionClient, ServiceSelector,
+        types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind, TransactionStatus},
     },
 };
 use futures::StreamExt;
@@ -37,6 +37,7 @@ impl ReadinessEvent {
                 "health": match self.0 {
                     ReadinessState::Ready => "READY",
                     ReadinessState::NotReady => "NOT_READY",
+                    other => panic!("tests never emit {other:?}"),
                 }
             }
         });
@@ -344,6 +345,45 @@ async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result
     Ok(())
 }
 
+/// A newer Blokli may report a channel status this client does not know: it must decode rather than end the
+/// subscription with an error.
+#[tokio::test]
+async fn subscribe_graph_decodes_an_unknown_channel_status() -> Result<()> {
+    let channel_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let (base_url, server) = spawn_single_streaming_server(format_graph_event(channel_id, "SOMETHING_NEW")).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_graph()?;
+    let entry = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering graph event"))??;
+
+    assert_eq!(entry.channel.status, ChannelStatus::Unknown);
+
+    server.await??;
+    Ok(())
+}
+
+/// A status added by a newer Blokli must neither fail decoding nor end tracking: the client keeps waiting for a
+/// status it knows.
+#[tokio::test]
+async fn track_transaction_waits_through_an_unknown_status() -> Result<()> {
+    let body = ["SUBMITTED", "SOMETHING_NEW", "CONFIRMED"]
+        .map(format_transaction_event)
+        .concat();
+    let (base_url, server) = spawn_single_streaming_server(body).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let transaction = client
+        .track_transaction("tx-1".to_string(), Duration::from_secs(2))
+        .await?;
+
+    assert_eq!(transaction.status, TransactionStatus::Confirmed);
+
+    server.await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn subscribe_services_forwards_a_registration() -> Result<()> {
     let (base_url, server) = spawn_single_streaming_server(format_service_event(
@@ -508,6 +548,21 @@ fn format_service_event(kind: &str, entry: Option<serde_json::Value>) -> String 
                 "serviceType": "gvpn:exit",
                 "node": "0x1111111111111111111111111111111111111111",
                 "entry": entry,
+            },
+        },
+    });
+    format!("event: next\ndata: {payload}\n\n")
+}
+
+fn format_transaction_event(status: &str) -> String {
+    let payload = serde_json::json!({
+        "data": {
+            "transactionUpdated": {
+                "id": "tx-1",
+                "status": status,
+                "submittedAt": "2026-10-07T00:00:00Z",
+                "transactionHash": format!("0x{}", "ab".repeat(32)),
+                "safeExecution": null,
             },
         },
     });
