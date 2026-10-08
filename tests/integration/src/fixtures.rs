@@ -1030,8 +1030,8 @@ async fn wait_for_blokli_ready(client: &BlokliClient) -> Result<()> {
                 info!(base_url = %client.base_url(), "integration stack is ready");
                 return Ok(());
             }
-            Ok(Some(Ok(ReadinessState::NotReady))) => {
-                last_observation = "received NOT_READY".to_string();
+            Ok(Some(Ok(state))) => {
+                last_observation = format!("received {state:?}");
             }
             Ok(Some(Err(error))) => {
                 last_observation = format!("subscription error: {error}");
