@@ -1843,8 +1843,8 @@ mod tests {
 
     use super::{
         BlokliQueryClient, BlokliSubscriptionClient, BlokliTestClient, BlokliTestState, BlokliTransactionClient,
-        ChainAddress, NopStateMutator, Result, ServiceEntry, ServiceRegistryConfig, ServiceSelector, ServiceTypeInfo,
-        ServiceTypeUpdateKind, ServiceUpdateKind, Uint64,
+        ChainAddress, NopStateMutator, Result, SafeHoprAllowance, ServiceEntry, ServiceRegistryConfig, ServiceSelector,
+        ServiceTypeInfo, ServiceTypeUpdateKind, ServiceUpdateKind, TokenValueString, Uint64,
     };
 
     /// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
@@ -2009,6 +2009,93 @@ mod tests {
         let config = client.query_service_registry_config().await?;
 
         insta::assert_yaml_snapshot!(config);
+        Ok(())
+    }
+
+    const SAFE: ChainAddress = [0x33; 20];
+
+    fn allowance(value: &str) -> SafeHoprAllowance {
+        SafeHoprAllowance {
+            __typename: "SafeHoprAllowance".into(),
+            allowance: TokenValueString(value.into()),
+        }
+    }
+
+    fn state_with_safe_allowance(value: &str) -> BlokliTestState {
+        let mut state = BlokliTestState::default();
+        state.safe_allowances.insert(hex::encode(SAFE), allowance(value));
+        state
+            .safe_allowances
+            .insert(hex::encode(OTHER_NODE), allowance("999 wxHOPR"));
+        state
+    }
+
+    #[tokio::test]
+    async fn subscribe_safe_hopr_approval_reports_snapshot_then_simulated_changes() -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(
+            state_with_safe_allowance("100 wxHOPR"),
+            |signed_tx: &[u8], state: &mut BlokliTestState| {
+                // [0]: channel funding consumes allowance, [1]: approval restores it,
+                // [2]: an unrelated Safe changes, [3]: nothing changes.
+                let (safe, value) = match signed_tx {
+                    [0] => (hex::encode(SAFE), "62.5 wxHOPR"),
+                    [1] => (
+                        hex::encode(SAFE),
+                        "115792089237316195423570985008687907853269984665640564039457.584007913129639935 wxHOPR",
+                    ),
+                    [2] => (hex::encode(OTHER_NODE), "1 wxHOPR"),
+                    _ => return Result::Ok(()),
+                };
+                state.safe_allowances.insert(safe, allowance(value));
+                Result::Ok(())
+            },
+        );
+
+        let mut stream = client.subscribe_safe_hopr_approval(SAFE)?;
+        for step in [0u8, 2, 3, 1] {
+            client.submit_transaction(&[step]).await?;
+        }
+
+        let approvals = stream.by_ref().take(3).collect::<Vec<_>>().await;
+        let approvals = approvals.into_iter().collect::<Result<Vec<_>>>()?;
+
+        let owner = format!("0x{}", hex::encode(SAFE));
+        let spender = "0x77c9414043d27fdc98a6a2d73fc77b9b383092a7";
+        assert!(
+            approvals
+                .iter()
+                .all(|approval| approval.owner == owner && approval.spender == spender)
+        );
+        assert_eq!(
+            approvals
+                .iter()
+                .map(|approval| approval.allowance.0.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "100 wxHOPR",
+                "62.5 wxHOPR",
+                "115792089237316195423570985008687907853269984665640564039457.584007913129639935 wxHOPR",
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn subscribe_safe_hopr_approval_reports_direct_updates_without_snapshot_for_unknown_safe()
+    -> anyhow::Result<()> {
+        let client = BlokliTestClient::new(BlokliTestState::default(), NopStateMutator);
+
+        let mut stream = client.subscribe_safe_hopr_approval(SAFE)?;
+        client.update_safe_allowance(&OTHER_NODE, TokenValueString("5 wxHOPR".into()));
+        client.update_safe_allowance(&SAFE, TokenValueString("0 wxHOPR".into()));
+
+        let approval = stream.next().await.expect("stream should not end")?;
+        assert_eq!(approval.allowance.0, "0 wxHOPR");
+        assert_eq!(
+            client.query_safe_allowance(&SAFE).await?.allowance.0,
+            "0 wxHOPR",
+            "direct updates must also be visible to queries"
+        );
         Ok(())
     }
 

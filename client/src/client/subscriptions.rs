@@ -260,6 +260,26 @@ impl BlokliSubscriptionClient for BlokliClient {
     }
 }
 
+#[cfg(test)]
+mod safe_hopr_approval_tests {
+    use serde_json::json;
+
+    use super::GraphQlQueries;
+
+    #[test]
+    fn safe_hopr_approval_subscription_serializes_the_safe_address() {
+        let operation = GraphQlQueries::subscribe_safe_hopr_approval(&[0xab; 20]);
+
+        let serialized = serde_json::to_value(operation).expect("subscription operation should serialize");
+
+        assert_eq!(serialized["variables"], json!({ "address": "ab".repeat(20) }));
+        let query = serialized["query"].as_str().expect("query should be a string");
+        for field in ["safeHoprApproval(address: $address)", "owner", "spender", "allowance"] {
+            assert!(query.contains(field), "query should select {field}: {query}");
+        }
+    }
+}
+
 #[cfg(all(test, feature = "curvy"))]
 mod tests {
     use serde_json::json;
