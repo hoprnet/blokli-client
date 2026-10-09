@@ -132,6 +132,36 @@ impl From<SafeHoprAllowanceResult> for Result<SafeHoprAllowance, BlokliClientErr
     }
 }
 
+/// Variables of the `safeHoprApproval` subscription.
+#[derive(cynic::QueryVariables, Debug)]
+pub struct SafeHoprApprovalVariables {
+    /// Safe address encoded as a hex string.
+    pub address: String,
+}
+
+/// Absolute wxHOPR allowance that a Safe grants to the configured Channels contract.
+///
+/// Emitted by the `safeHoprApproval` subscription: first as a snapshot of the current allowance,
+/// then once per matching `Approval` event of the configured wxHOPR token.
+#[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SafeHoprApproval {
+    /// Safe address (token owner) encoded as a lowercase `0x`-prefixed hexadecimal string.
+    pub owner: String,
+    /// Channels contract address (spender) encoded as a lowercase `0x`-prefixed hexadecimal string.
+    pub spender: String,
+    /// Absolute allowance after the approval, using the same lossless token string as
+    /// `SafeHoprAllowance::allowance` (for example, "1 wxHOPR"), not a delta.
+    pub allowance: TokenValueString,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "SubscriptionRoot", variables = "SafeHoprApprovalVariables")]
+pub struct SubscribeSafeHoprApproval {
+    #[arguments(address: $address)]
+    pub safe_hopr_approval: SafeHoprApproval,
+}
+
 /// Aggregate ticket redemption statistics.
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
