@@ -657,8 +657,9 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
     /// Sets the wxHOPR allowance that the given Safe grants to the Channels contract.
     ///
     /// Models an approval made outside the simulated transactions, for example by a Safe owner. The
-    /// change is broadcast to active [`subscribe_safe_hopr_approval`](BlokliSubscriptionClient::subscribe_safe_hopr_approval)
-    /// subscribers, like an `Approval` event indexed by Blokli.
+    /// change is broadcast to active
+    /// [`subscribe_safe_hopr_approval`](BlokliSubscriptionClient::subscribe_safe_hopr_approval) subscribers, like
+    /// an `Approval` event indexed by Blokli.
     pub fn update_safe_allowance(&self, safe_address: &ChainAddress, allowance: TokenValueString) {
         let approval = {
             let mut state = self.state.write();
