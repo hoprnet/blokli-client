@@ -1,19 +1,20 @@
 use cynic::SubscriptionBuilder;
 use futures::{Stream, TryStreamExt};
+use hex::ToHex;
 
 use super::{BlokliClient, GraphQlQueries};
 use crate::api::{
-    AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId, TicketSelector,
-    TxId,
+    AccountSelector, BlokliSubscriptionClient, ChainAddress, ChannelSelector, Result, ServiceSelector, ServiceTypeId,
+    TicketSelector, TxId,
     internal::{
-        AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
-        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceRegistryConfig,
-        SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed,
-        TicketRedeemedVariables,
+        AccountVariables, ChannelsVariables, SafeHoprApprovalVariables, ServiceTypeVariables, ServiceVariables,
+        SubscribeAccounts, SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment,
+        SubscribeSafeHoprApproval, SubscribeServiceRegistryConfig, SubscribeServiceTypes, SubscribeServices,
+        SubscribeTicketParams, SubscribeTicketRedeemed, TicketRedeemedVariables,
     },
     types::{
-        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceRegistryConfig,
-        ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
+        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, SafeHoprApproval,
+        ServiceRegistryConfig, ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
     },
 };
 #[cfg(feature = "curvy")]
@@ -58,6 +59,15 @@ impl GraphQlQueries {
     /// `SubscribeSafeDeployment` subscription GraphQL query.
     pub fn subscribe_safe_deployments() -> cynic::StreamingOperation<SubscribeSafeDeployment, ()> {
         SubscribeSafeDeployment::build(())
+    }
+
+    /// `SubscribeSafeHoprApproval` subscription GraphQL query.
+    pub fn subscribe_safe_hopr_approval(
+        safe_address: &ChainAddress,
+    ) -> cynic::StreamingOperation<SubscribeSafeHoprApproval, SafeHoprApprovalVariables> {
+        SubscribeSafeHoprApproval::build(SafeHoprApprovalVariables {
+            address: safe_address.encode_hex(),
+        })
     }
 
     /// `SubscribeServices` subscription GraphQL query.
@@ -158,6 +168,16 @@ impl BlokliSubscriptionClient for BlokliClient {
         Ok(self
             .build_subscription_stream(GraphQlQueries::subscribe_safe_deployments())?
             .try_filter_map(|item| futures::future::ok(Some(item.safe_deployed))))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(safe_address = %hex::encode(safe_address)))]
+    fn subscribe_safe_hopr_approval(
+        &self,
+        safe_address: ChainAddress,
+    ) -> Result<impl Stream<Item = Result<SafeHoprApproval>> + Send + 'static> {
+        Ok(self
+            .build_subscription_stream(GraphQlQueries::subscribe_safe_hopr_approval(&safe_address))?
+            .map_ok(|item| item.safe_hopr_approval))
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(?selector))]

@@ -276,6 +276,34 @@ impl BlokliTestState {
         self.safe_allowances.get_mut(&account)
     }
 
+    /// Returns the wxHOPR allowance that the Safe with the given address grants to the Channels contract.
+    pub fn get_safe_allowance(&self, safe_address: &ChainAddress) -> Option<&SafeHoprAllowance> {
+        self.safe_allowances.get(&hex::encode(safe_address))
+    }
+
+    /// Returns the Channels contract address from [`ChainInfo::contract_addresses`], as a lowercase
+    /// `0x`-prefixed hex string.
+    ///
+    /// This is the spender of every Safe allowance tracked in [`safe_allowances`](BlokliTestState::safe_allowances).
+    pub fn channels_contract_address(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&self.chain_info.contract_addresses.0)
+            .ok()?
+            .get("channels")?
+            .as_str()
+            .map(str::to_lowercase)
+    }
+
+    /// Builds the `safeHoprApproval` subscription item for the allowance of the given Safe.
+    ///
+    /// `safe_key` is the key of [`safe_allowances`](BlokliTestState::safe_allowances).
+    fn safe_hopr_approval(&self, safe_key: &str, allowance: &SafeHoprAllowance) -> SafeHoprApproval {
+        SafeHoprApproval {
+            owner: format!("0x{}", safe_key.trim_start_matches("0x").to_lowercase()),
+            spender: self.channels_contract_address().unwrap_or_default(),
+            allowance: allowance.allowance.clone(),
+        }
+    }
+
     /// Gets [`RedeemedStats`] for the given Safe address.
     pub fn get_safe_redeem_stats(&self, chain_address: &ChainAddress) -> Option<&RedeemedStats> {
         self.safe_redeem_stats.get(&hex::encode(chain_address))
@@ -356,6 +384,11 @@ type TicketParamEvents = (
 
 type SafeDeployEvents = (async_broadcast::Sender<Safe>, async_broadcast::InactiveReceiver<Safe>);
 
+type SafeApprovalEvents = (
+    async_broadcast::Sender<SafeHoprApproval>,
+    async_broadcast::InactiveReceiver<SafeHoprApproval>,
+);
+
 type ServiceEvents = (
     async_broadcast::Sender<ServiceUpdate>,
     async_broadcast::InactiveReceiver<ServiceUpdate>,
@@ -427,6 +460,7 @@ pub struct BlokliTestClient<M> {
     channels_channel: GraphEvents,
     ticket_channel: TicketParamEvents,
     safe_deployed_channel: SafeDeployEvents,
+    safe_approval_channel: SafeApprovalEvents,
     services_channel: ServiceEvents,
     service_types_channel: ServiceTypeEvents,
     service_registry_config_channel: ServiceRegistryConfigEvents,
@@ -523,6 +557,10 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
         safes_tx.set_await_active(false);
         safes_tx.set_overflow(false);
 
+        let (mut safe_approvals_tx, safe_approvals_rx) = async_broadcast::broadcast(1024);
+        safe_approvals_tx.set_await_active(false);
+        safe_approvals_tx.set_overflow(false);
+
         let (mut services_tx, services_rx) = async_broadcast::broadcast(1024);
         services_tx.set_await_active(false);
         services_tx.set_overflow(false);
@@ -542,6 +580,7 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             channels_channel: (channels_tx, channels_rx.deactivate()),
             ticket_channel: (tickets_tx, tickets_rx.deactivate()),
             safe_deployed_channel: (safes_tx, safes_rx.deactivate()),
+            safe_approval_channel: (safe_approvals_tx, safe_approvals_rx.deactivate()),
             services_channel: (services_tx, services_rx.deactivate()),
             service_types_channel: (service_types_tx, service_types_rx.deactivate()),
             service_registry_config_channel: (service_registry_config_tx, service_registry_config_rx.deactivate()),
@@ -613,6 +652,26 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
     pub fn hidden_state_update(&self, update: impl FnOnce(&mut BlokliTestState)) {
         let mut state = self.state.write();
         update(&mut state);
+    }
+
+    /// Sets the wxHOPR allowance that the given Safe grants to the Channels contract.
+    ///
+    /// Models an approval made outside the simulated transactions, for example by a Safe owner. The
+    /// change is broadcast to active [`subscribe_safe_hopr_approval`](BlokliSubscriptionClient::subscribe_safe_hopr_approval)
+    /// subscribers, like an `Approval` event indexed by Blokli.
+    pub fn update_safe_allowance(&self, safe_address: &ChainAddress, allowance: TokenValueString) {
+        let approval = {
+            let mut state = self.state.write();
+            let key = hex::encode(safe_address);
+            let allowance = SafeHoprAllowance {
+                __typename: "SafeHoprAllowance".into(),
+                allowance,
+            };
+            let approval = state.safe_hopr_approval(&key, &allowance);
+            state.safe_allowances.insert(key, allowance);
+            approval
+        };
+        broadcast_or_log(&self.safe_approval_channel.0, approval, "safe allowance change");
     }
 
     /// Updates the ticket price and/or minimum ticket-winning probability.
@@ -1167,6 +1226,31 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
             .map(Ok))
     }
 
+    /// Streams the current allowance of the Safe, if known, followed by its changes.
+    ///
+    /// Changes come from simulated transactions and from [`BlokliTestClient::update_safe_allowance`].
+    /// Unlike Blokli, which reads the snapshot from the chain, no snapshot is emitted for a Safe that has
+    /// no entry in [`BlokliTestState::safe_allowances`].
+    fn subscribe_safe_hopr_approval(
+        &self,
+        safe_address: ChainAddress,
+    ) -> Result<impl Stream<Item = Result<SafeHoprApproval>> + Send + 'static> {
+        let owner = format!("0x{}", hex::encode(safe_address));
+        // Activate the receiver before reading the snapshot, so no change can be missed in between.
+        let updates = self.safe_approval_channel.1.activate_cloned();
+        let initial = {
+            let state = self.state.read();
+            let key = hex::encode(safe_address);
+            state
+                .safe_allowances
+                .get(&key)
+                .map(|allowance| state.safe_hopr_approval(&key, allowance))
+        };
+        Ok(futures::stream::iter(initial)
+            .chain(updates.filter(move |approval| futures::future::ready(approval.owner == owner)))
+            .map(Ok))
+    }
+
     /// Streams current matching entries followed by changes produced by simulated transactions.
     fn subscribe_services(
         &self,
@@ -1304,6 +1388,7 @@ struct SubscriptionSenders<'a> {
     channels: &'a async_broadcast::Sender<(Account, Channel, Account)>,
     tickets: &'a async_broadcast::Sender<TicketParameters>,
     safes: &'a async_broadcast::Sender<Safe>,
+    safe_approvals: &'a async_broadcast::Sender<SafeHoprApproval>,
     services: &'a async_broadcast::Sender<ServiceUpdate>,
     service_types: &'a async_broadcast::Sender<ServiceTypeUpdate>,
     service_registry_config: &'a async_broadcast::Sender<ServiceRegistryConfig>,
@@ -1316,6 +1401,7 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             channels: &self.channels_channel.0,
             tickets: &self.ticket_channel.0,
             safes: &self.safe_deployed_channel.0,
+            safe_approvals: &self.safe_approval_channel.0,
             services: &self.services_channel.0,
             service_types: &self.service_types_channel.0,
             service_registry_config: &self.service_registry_config_channel.0,
@@ -1545,6 +1631,24 @@ fn simulate_tx_execution(
                 _ => {}
             },
         );
+
+    // Compare Safe allowances and broadcast changes, like Blokli does for indexed `Approval` events
+    state
+        .safe_allowances
+        .iter()
+        .filter(|&(safe, new_allowance)| {
+            old_state
+                .safe_allowances
+                .get(safe)
+                .is_none_or(|old_allowance| old_allowance.allowance != new_allowance.allowance)
+        })
+        .for_each(|(safe, allowance)| {
+            broadcast_or_log(
+                senders.safe_approvals,
+                state.safe_hopr_approval(safe, allowance),
+                "safe allowance change",
+            );
+        });
 
     broadcast_service_changes(&old_state, state, senders.services);
     broadcast_service_type_changes(&old_state, state, senders.service_types);
