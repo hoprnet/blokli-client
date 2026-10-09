@@ -651,7 +651,8 @@ pub trait BlokliSubscriptionClient {
     /// predate the first item, so callers should re-read the allowance via
     /// [`BlokliQueryClient::query_safe_allowance`] before acting on a value.
     ///
-    /// The stream ends on lag, chain reorganization or server shutdown; reconnect to get a fresh snapshot.
+    /// The stream ends on lag, chain reorganization, channel closure or server shutdown; reconnect to get a fresh
+    /// snapshot.
     fn subscribe_safe_hopr_approval(
         &self,
         safe_address: ChainAddress,

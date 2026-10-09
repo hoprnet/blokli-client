@@ -146,11 +146,12 @@ pub struct SafeHoprApprovalVariables {
 #[derive(cynic::QueryFragment, Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SafeHoprApproval {
-    /// Safe address (token owner) encoded as a hex string.
+    /// Safe address (token owner) encoded as a lowercase `0x`-prefixed hexadecimal string.
     pub owner: String,
-    /// Channels contract address (spender) encoded as a hex string.
+    /// Channels contract address (spender) encoded as a lowercase `0x`-prefixed hexadecimal string.
     pub spender: String,
-    /// Absolute allowance after the approval, not a delta.
+    /// Absolute allowance after the approval, using the same lossless token string as
+    /// `SafeHoprAllowance::allowance` (for example, "1 wxHOPR"), not a delta.
     pub allowance: TokenValueString,
 }
 
