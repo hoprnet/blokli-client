@@ -196,6 +196,7 @@ pub struct ServiceRegistryConfig {
 
 /// Kind of change reported for a single registry entry.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceUpdateKind {
     /// The entry was created.
     #[cynic(rename = "REGISTERED")]
@@ -206,10 +207,16 @@ pub enum ServiceUpdateKind {
     /// The entry was removed.
     #[cynic(rename = "DEREGISTERED")]
     Deregistered,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Kind of change reported for service-type or registry-wide configuration.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceTypeUpdateKind {
     /// A new service type was registered.
     #[cynic(rename = "REGISTERED")]
@@ -232,6 +239,11 @@ pub enum ServiceTypeUpdateKind {
     /// The node-safe registry the service registry points at changed.
     #[cynic(rename = "REGISTRY_POINTER_CHANGED")]
     RegistryPointerChanged,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Change to one registry entry.

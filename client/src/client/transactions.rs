@@ -106,6 +106,15 @@ impl BlokliTransactionClient for BlokliClient {
                     TransactionStatus::ValidationFailed => {
                         Err(ErrorKind::TrackingError(TrackingErrorKind::ValidationFailed).into())
                     }
+                    // A status added by a newer Blokli. Whether it is final is unknown, so keep
+                    // waiting: a later known status ends tracking, or the client timeout does.
+                    TransactionStatus::Unknown => {
+                        tracing::warn!(
+                            tx_id = item.transaction_updated.id.inner(),
+                            "unknown transaction status from blokli, still waiting"
+                        );
+                        Ok(None)
+                    }
                 })
             })
             .try_next()

@@ -310,6 +310,8 @@ fn build_node_overview(
                 ChannelStatus::Open => open_count += 1,
                 ChannelStatus::PendingToClose => pending_to_close_count += 1,
                 ChannelStatus::Closed => closed_count += 1,
+                // A status added by a newer Blokli: shown in the list, not counted
+                _ => {}
             }
             let destination = accounts
                 .get(&channel.destination)

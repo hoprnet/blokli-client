@@ -128,6 +128,7 @@ impl From<TransactionResult> for Result<Transaction, BlokliClientError> {
 
 /// Transaction lifecycle state reported by Blokli.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransactionStatus {
     /// Transaction reached the configured confirmation requirement.
     #[cynic(rename = "CONFIRMED")]
@@ -150,6 +151,11 @@ pub enum TransactionStatus {
     /// Blokli rejected the transaction before submission.
     #[cynic(rename = "VALIDATION_FAILED")]
     ValidationFailed,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Timeout returned by a synchronous transaction operation.

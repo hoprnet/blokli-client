@@ -66,9 +66,15 @@ pub struct RedeemTicketDetails {
 
 /// Outcome of an on-chain ticket redemption attempt.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RedemptionResult {
     #[cynic(rename = "REDEEMED")]
     Redeemed,
     #[cynic(rename = "REJECTED")]
     Rejected,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
