@@ -61,7 +61,7 @@ pub mod types {
     pub use super::graphql::{
         ChannelStatus, DateTime, Hex32, ReadinessState, Token, TokenValueString, Uint64, Uint256,
         accounts::Account,
-        balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
+        balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance, SafeHoprApproval},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
         graph::OpenedChannelsGraphEntry,
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
@@ -94,7 +94,7 @@ pub(crate) mod internal {
         },
         balances::{
             BalanceVariables, QueryHoprBalance, QueryNativeBalance, QueryRedeemedStats, QuerySafeAllowance,
-            RedeemedStatsFilter, RedeemedStatsVariables,
+            RedeemedStatsFilter, RedeemedStatsVariables, SafeHoprApprovalVariables, SubscribeSafeHoprApproval,
         },
         channels::{
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
@@ -641,6 +641,22 @@ pub trait BlokliSubscriptionClient {
     fn subscribe_service_registry_config(
         &self,
     ) -> Result<impl futures::Stream<Item = Result<types::ServiceRegistryConfig>> + Send + 'static>;
+    /// Streams the wxHOPR allowance that the given Safe grants to the configured Channels contract.
+    ///
+    /// The first item is the current allowance, read from the chain. Later items are emitted for each
+    /// `Approval` event of the configured wxHOPR token where the Safe is the owner and Channels is the
+    /// spender, including the allowance decrease caused by channel funding.
+    ///
+    /// Every item carries the absolute allowance, never a delta. Buffered updates may overlap with or
+    /// predate the first item, so callers should re-read the allowance via
+    /// [`BlokliQueryClient::query_safe_allowance`] before acting on a value.
+    ///
+    /// The stream ends on lag, chain reorganization, channel closure or server shutdown; reconnect to get a fresh
+    /// snapshot.
+    fn subscribe_safe_hopr_approval(
+        &self,
+        safe_address: ChainAddress,
+    ) -> Result<impl futures::Stream<Item = Result<types::SafeHoprApproval>> + Send + 'static>;
     /// Streams status updates for a tracked transaction id.
     ///
     /// The `tx_id` is the Blokli tracking id returned by
