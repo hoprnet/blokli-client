@@ -371,6 +371,22 @@ impl IntegrationFixture {
             .await
     }
 
+    /// Builds an allow-listed wxHOPR approval transaction for relay-path tests.
+    pub async fn build_allowed_token_approval_tx(
+        &self,
+        sender: &AnvilAccount,
+        spender: &AnvilAccount,
+        nonce: u64,
+    ) -> Result<Box<[u8]>> {
+        let payload_generator = BasicPayloadGenerator::new(sender.address, *self.contract_addresses());
+        let amount: HoprBalance = "0 wei wxHOPR".parse().context("failed to parse approval amount")?;
+        let payload = payload_generator.approve(spender.address, amount)?;
+
+        Ok(payload
+            .sign_and_encode_to_eip2718(nonce, self.rpc().chain_id().await?, None, &sender.keypair)
+            .await?)
+    }
+
     async fn resolve_eip1559_gas_parameters(&self, gas: Option<Eip1559GasParameters>) -> Eip1559GasParameters {
         if let Some(gas) = gas {
             return gas;
