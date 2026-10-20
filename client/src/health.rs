@@ -17,6 +17,7 @@
 
 use std::{
     fmt::{self, Display, Formatter},
+    mem,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -200,10 +201,15 @@ impl SubscriptionHealthHandle {
 
 /// Write side of a subscription's health, owned by the subscription stream.
 ///
+/// It also writes the subscription's log lines, so they follow the health changes and stay few: one WARN when an
+/// outage starts, DEBUG for every further failure, one WARN when the outage turns into a stall, and one INFO with the
+/// outage length on recovery. Log lines carry the subscription and the error, never the query or event payloads.
+///
 /// Dropping it before the subscription ended on its own marks the subscription as
 /// [`Cancelled`](SubscriptionEnd::Cancelled), because that only happens when the caller drops the stream.
 #[derive(Debug)]
 pub(crate) struct HealthTracker {
+    subscription: SubscriptionId,
     state: Arc<Mutex<SubscriptionHealth>>,
     /// When the subscription was created; stalls are measured from here until the transport first works.
     created: Instant,
@@ -214,7 +220,7 @@ pub(crate) struct HealthTracker {
 impl HealthTracker {
     pub(crate) fn new(name: &'static str) -> (Self, SubscriptionHealthHandle) {
         let health = SubscriptionHealth::new(SubscriptionStatus::Connecting);
-        let outage_since = health.status_since;
+        let created = health.status_since;
         let subscription = SubscriptionId::new(name);
         let state = Arc::new(Mutex::new(health));
         let handle = SubscriptionHealthHandle {
@@ -223,12 +229,17 @@ impl HealthTracker {
         };
         (
             Self {
+                subscription,
                 state,
-                created: outage_since,
-                outage_since,
+                created,
+                outage_since: created,
             },
             handle,
         )
+    }
+
+    pub(crate) fn subscription(&self) -> SubscriptionId {
+        self.subscription
     }
 
     /// The connection delivered a keepalive or an event.
@@ -246,21 +257,30 @@ impl HealthTracker {
 
     fn record_activity(&mut self, ends_rejection: bool) {
         let outage_since = self.outage_since;
-        self.update(|health, now| {
+        let change = self.update(|health, now| {
             health.last_transport_activity = Some(now);
+            let outage = now.saturating_duration_since(outage_since);
             let next = match health.status {
                 SubscriptionStatus::Connecting => SubscriptionStatus::Healthy,
-                SubscriptionStatus::Degraded | SubscriptionStatus::Stalled => SubscriptionStatus::Recovered {
-                    outage: now.saturating_duration_since(outage_since),
-                },
-                SubscriptionStatus::Rejected if ends_rejection => SubscriptionStatus::Recovered {
-                    outage: now.saturating_duration_since(outage_since),
-                },
-                _ => return,
+                SubscriptionStatus::Degraded | SubscriptionStatus::Stalled => SubscriptionStatus::Recovered { outage },
+                SubscriptionStatus::Rejected if ends_rejection => SubscriptionStatus::Recovered { outage },
+                _ => return None,
             };
-            health.failures = 0;
-            set_status(health, next, now);
+            let failures = mem::take(&mut health.failures);
+            set_status(health, next.clone(), now);
+            Some((next, failures, health.last_problem))
         });
+        match change {
+            Some((SubscriptionStatus::Recovered { outage }, failures, last_problem)) => tracing::info!(
+                subscription = %self.subscription,
+                ?outage,
+                failures,
+                ?last_problem,
+                "subscription recovered"
+            ),
+            Some(_) => tracing::debug!(subscription = %self.subscription, "subscription connected"),
+            None => {}
+        }
     }
 
     /// An update was decoded and is about to be yielded.
@@ -270,44 +290,73 @@ impl HealthTracker {
     }
 
     /// Something went wrong; the subscription keeps reconnecting.
-    pub(crate) fn problem(&mut self, problem: SubscriptionProblem) {
-        let mut outage_started = None;
-        self.update(|health, now| {
+    pub(crate) fn problem(&mut self, problem: SubscriptionProblem, error: &dyn Display) {
+        let (outage_started, failures) = self.update(|health, now| {
             health.failures = health.failures.saturating_add(1);
             health.last_problem = Some(problem);
-            match health.status {
-                SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => {
-                    outage_started = Some(now);
-                    set_status(health, SubscriptionStatus::Degraded, now);
-                }
+            let outage_started = match health.status {
+                SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => Some(now),
                 // A subscription that never connected has been out since it was created.
-                SubscriptionStatus::Connecting => set_status(health, SubscriptionStatus::Degraded, now),
-                _ => {}
+                SubscriptionStatus::Connecting => Some(self.created),
+                _ => None,
+            };
+            if outage_started.is_some() {
+                set_status(health, SubscriptionStatus::Degraded, now);
             }
+            (outage_started, health.failures)
+        });
+        if let Some(since) = outage_started {
+            self.outage_since = since;
+            tracing::warn!(
+                subscription = %self.subscription,
+                ?problem,
+                %error,
+                "subscription interrupted, reconnecting"
+            );
+        } else {
+            tracing::debug!(
+                subscription = %self.subscription,
+                ?problem,
+                %error,
+                failures,
+                "subscription still failing"
+            );
+        }
+    }
+
+    /// The server refused the subscription and it is retried after `retry_in`. Returns whether this starts a new
+    /// rejection, so the caller yields the error only once per rejection.
+    pub(crate) fn reject(&mut self, problem: SubscriptionProblem, error: &dyn Display, retry_in: Duration) -> bool {
+        let (first, outage_started, failures) = self.update(|health, now| {
+            health.failures = health.failures.saturating_add(1);
+            health.last_problem = Some(problem);
+            let outage_started = match health.status {
+                SubscriptionStatus::Rejected | SubscriptionStatus::Ended(_) => return (false, None, health.failures),
+                SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => Some(now),
+                _ => None,
+            };
+            set_status(health, SubscriptionStatus::Rejected, now);
+            (true, outage_started, health.failures)
         });
         if let Some(since) = outage_started {
             self.outage_since = since;
         }
-    }
-
-    /// The server refused the subscription. Returns whether this starts a new rejection, so the caller yields the
-    /// error only once per rejection.
-    pub(crate) fn reject(&mut self, problem: SubscriptionProblem) -> bool {
-        let mut first = false;
-        let mut outage_started = None;
-        self.update(|health, now| {
-            health.failures = health.failures.saturating_add(1);
-            health.last_problem = Some(problem);
-            match health.status {
-                SubscriptionStatus::Rejected | SubscriptionStatus::Ended(_) => return,
-                SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => outage_started = Some(now),
-                _ => {}
-            }
-            first = true;
-            set_status(health, SubscriptionStatus::Rejected, now);
-        });
-        if let Some(since) = outage_started {
-            self.outage_since = since;
+        if first {
+            tracing::warn!(
+                subscription = %self.subscription,
+                ?problem,
+                %error,
+                ?retry_in,
+                "Blokli rejected the subscription, retrying slowly"
+            );
+        } else {
+            tracing::debug!(
+                subscription = %self.subscription,
+                ?problem,
+                %error,
+                failures,
+                "Blokli still rejects the subscription"
+            );
         }
         first
     }
@@ -326,35 +375,61 @@ impl HealthTracker {
     /// Nothing has come over the connection for the stall threshold.
     pub(crate) fn stalled(&mut self) {
         let created = self.created;
-        let mut outage_started = None;
-        self.update(|health, now| {
-            match health.status {
+        let outage_since = self.outage_since;
+        let summary = self.update(|health, now| {
+            let since = match health.status {
                 // A silent connection: the outage began with the last sign of life.
                 SubscriptionStatus::Connecting | SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => {
-                    outage_started = Some(health.last_transport_activity.unwrap_or(created));
+                    health.last_transport_activity.unwrap_or(created)
                 }
-                SubscriptionStatus::Degraded => {}
-                _ => return,
-            }
+                SubscriptionStatus::Degraded => outage_since,
+                _ => return None,
+            };
             set_status(health, SubscriptionStatus::Stalled, now);
+            Some((
+                since,
+                now.saturating_duration_since(health.last_transport_activity.unwrap_or(created)),
+                health.failures,
+                health.last_problem,
+            ))
         });
-        if let Some(since) = outage_started {
+        if let Some((since, silent_for, failures, last_problem)) = summary {
             self.outage_since = since;
+            tracing::warn!(
+                subscription = %self.subscription,
+                ?silent_for,
+                failures,
+                ?last_problem,
+                "subscription stalled: no traffic from Blokli, still reconnecting"
+            );
         }
     }
 
     /// The subscription is over.
     pub(crate) fn end(&mut self, end: SubscriptionEnd) {
-        self.update(|health, now| {
-            if !matches!(health.status, SubscriptionStatus::Ended(_)) {
-                set_status(health, SubscriptionStatus::Ended(end), now);
+        let ended = self.update(|health, now| {
+            if matches!(health.status, SubscriptionStatus::Ended(_)) {
+                return false;
             }
+            set_status(health, SubscriptionStatus::Ended(end), now);
+            true
         });
+        if ended {
+            match end {
+                SubscriptionEnd::Cancelled => {
+                    tracing::debug!(subscription = %self.subscription, "subscription dropped")
+                }
+                SubscriptionEnd::Completed => {
+                    tracing::info!(subscription = %self.subscription, "subscription completed")
+                }
+                SubscriptionEnd::Failed => tracing::warn!(subscription = %self.subscription, "subscription failed"),
+            }
+        }
     }
 
-    fn update(&self, change: impl FnOnce(&mut SubscriptionHealth, Instant)) {
+    fn update<R>(&self, change: impl FnOnce(&mut SubscriptionHealth, Instant) -> R) -> R {
         let mut health = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        change(&mut health, Instant::now());
+        change(&mut health, Instant::now())
     }
 }
 
@@ -393,8 +468,8 @@ mod tests {
         let (mut tracker, handle) = HealthTracker::new("graph");
         tracker.transport_activity();
 
-        tracker.problem(SubscriptionProblem::Closed);
-        tracker.problem(SubscriptionProblem::HttpStatus(503));
+        tracker.problem(SubscriptionProblem::Closed, &"test error");
+        tracker.problem(SubscriptionProblem::HttpStatus(503), &"test error");
         let degraded = handle.get();
         assert_eq!(degraded.status, SubscriptionStatus::Degraded);
         assert_eq!(degraded.failures, 2);
@@ -422,7 +497,7 @@ mod tests {
         assert!(!stalled.is_healthy());
         assert_eq!(tracker.stall_deadline(threshold), None, "a stall is reported once");
 
-        tracker.problem(SubscriptionProblem::Timeout);
+        tracker.problem(SubscriptionProblem::Timeout, &"test error");
         assert_eq!(
             handle.get().status,
             SubscriptionStatus::Stalled,
@@ -452,11 +527,11 @@ mod tests {
         tracker.connected();
 
         assert!(
-            tracker.reject(SubscriptionProblem::GraphQl),
+            tracker.reject(SubscriptionProblem::GraphQl, &"test error", Duration::from_secs(30)),
             "the first rejection is new"
         );
         assert!(
-            !tracker.reject(SubscriptionProblem::GraphQl),
+            !tracker.reject(SubscriptionProblem::GraphQl, &"test error", Duration::from_secs(30)),
             "a repeated rejection is not"
         );
         assert_eq!(handle.get().status, SubscriptionStatus::Rejected);
@@ -464,7 +539,7 @@ mod tests {
         assert!(!handle.get().is_healthy());
         assert_eq!(tracker.stall_deadline(Duration::from_secs(90)), None);
 
-        tracker.problem(SubscriptionProblem::Closed);
+        tracker.problem(SubscriptionProblem::Closed, &"test error");
         tracker.stalled();
         tracker.connected();
         assert_eq!(
@@ -476,7 +551,11 @@ mod tests {
         tracker.transport_activity();
         assert!(matches!(handle.get().status, SubscriptionStatus::Recovered { .. }));
         assert!(
-            tracker.reject(SubscriptionProblem::HttpStatus(401)),
+            tracker.reject(
+                SubscriptionProblem::HttpStatus(401),
+                &"test error",
+                Duration::from_secs(30)
+            ),
             "a rejection after recovery is new again"
         );
     }

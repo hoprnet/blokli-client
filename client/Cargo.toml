@@ -59,13 +59,14 @@ testing = [
 cynic-codegen = { workspace = true }
 
 [dev-dependencies]
-anyhow      = { workspace = true }
-insta       = { workspace = true, features = ["json", "yaml"] }
-mockito     = { workspace = true }
-parking_lot = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true, features = ["preserve_order"] }
-tokio       = { workspace = true, features = ["io-util", "net"] }
+anyhow             = { workspace = true }
+insta              = { workspace = true, features = ["json", "yaml"] }
+mockito            = { workspace = true }
+parking_lot        = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true, features = ["preserve_order"] }
+tokio              = { workspace = true, features = ["io-util", "net"] }
+tracing-subscriber = { workspace = true }
 
 # `cynic-codegen` is a build-dependency used only in `build.rs` (GraphQL schema
 # registration). cargo-machete does not scan build scripts, so it reports it as unused.

@@ -442,10 +442,13 @@ mod tests {
 
 #[cfg(test)]
 mod stream_tests {
-    use std::time::Duration;
+    use std::{cell::RefCell, io, sync::Once, time::Duration};
 
     use futures::StreamExt;
-    use tokio::time::{Instant, sleep, timeout};
+    use tokio::{
+        net::TcpListener,
+        time::{Instant, sleep, timeout},
+    };
 
     use super::super::sse_test_server::{Connection, SseTestServer, Step, event, keepalive};
     use crate::{
@@ -848,6 +851,205 @@ mod stream_tests {
 
         assert!(item.is_err(), "nothing was sent, got {item:?}");
         assert_eq!(health.get().status, SubscriptionStatus::Healthy);
+        Ok(())
+    }
+
+    thread_local! {
+        /// Log lines of the test running on this thread, while it captures them.
+        static CAPTURED: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    }
+
+    /// Writes log output into the capture of the current thread, if there is one.
+    struct ThreadCapture;
+
+    impl io::Write for ThreadCapture {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            CAPTURED.with_borrow_mut(|captured| {
+                if let Some(captured) = captured {
+                    captured.extend_from_slice(buf);
+                }
+            });
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Log output of the client and of eventsource-client, collected for assertions.
+    ///
+    /// One process-wide subscriber writes into a per-thread buffer. A `#[tokio::test]` runs the client on its own
+    /// thread, so each test sees only its own lines. Thread-local subscribers would be simpler, but tracing caches per
+    /// call site whether anyone listens, and parallel tests adding and dropping them make that cache flaky.
+    struct CapturedLogs;
+
+    impl CapturedLogs {
+        fn start() -> Self {
+            static INSTALLED: Once = Once::new();
+            INSTALLED.call_once(|| {
+                // `try_init` also forwards the `log` records of eventsource-client. If something else installed a
+                // subscriber first, nothing is captured and the assertions say so.
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter("blokli_client=trace,eventsource_client=trace")
+                    .with_ansi(false)
+                    .with_writer(|| ThreadCapture)
+                    .try_init();
+            });
+            CAPTURED.with_borrow_mut(|captured| *captured = Some(Vec::new()));
+            Self
+        }
+
+        fn lines(&self) -> Vec<String> {
+            CAPTURED.with_borrow(|captured| {
+                String::from_utf8_lossy(captured.as_deref().unwrap_or_default())
+                    .lines()
+                    .map(str::to_owned)
+                    .collect()
+            })
+        }
+
+        /// Number of this crate's lines at `level` that contain `message`.
+        fn count(&self, level: &str, message: &str) -> usize {
+            self.ours()
+                .iter()
+                .filter(|line| line.contains(&format!(" {level} ")) && line.contains(message))
+                .count()
+        }
+
+        /// Lines written by this crate, leaving out eventsource-client's own.
+        fn ours(&self) -> Vec<String> {
+            self.lines()
+                .into_iter()
+                .filter(|line| line.contains("blokli_client"))
+                .collect()
+        }
+    }
+
+    impl Drop for CapturedLogs {
+        fn drop(&mut self) {
+            CAPTURED.with_borrow_mut(|captured| *captured = None);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_outage_logs_one_warning_and_one_recovery_without_payloads() -> anyhow::Result<()> {
+        let logs = CapturedLogs::start();
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![event(READY)]),
+            Connection::error(503),
+            Connection::error(503),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        for _ in 0..2 {
+            let item = timeout(Duration::from_secs(5), stream.next()).await?;
+            assert!(matches!(item, Some(Ok(ReadinessState::Ready))), "got {item:?}");
+        }
+
+        let subscription = health.subscription().to_string();
+        assert_eq!(logs.count("WARN", "subscription interrupted"), 1, "{:#?}", logs.lines());
+        assert_eq!(logs.count("WARN", ""), 1, "only the start of the outage is a warning");
+        assert!(
+            logs.count("DEBUG", "subscription still failing") >= 2,
+            "{:#?}",
+            logs.lines()
+        );
+        assert_eq!(logs.count("INFO", "subscription recovered"), 1, "{:#?}", logs.lines());
+        let lines = logs.ours();
+        assert!(
+            lines
+                .iter()
+                .filter(|line| line.contains(" WARN ") || line.contains(" INFO "))
+                .all(|line| line.contains(&subscription)),
+            "every warning and recovery names the subscription: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("subscription recovered") && line.contains("outage=")),
+            "the recovery states the outage length"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("READY") || line.contains("SubscribeHealth")),
+            "no payload or query in the logs: {lines:#?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stall_is_logged_once() -> anyhow::Result<()> {
+        let logs = CapturedLogs::start();
+        let server = SseTestServer::start(vec![Connection::ok(vec![Step::Hang])]).await?;
+        let client = client(&server, with_stall_threshold(Some(Duration::from_millis(200))));
+        let (stream, _health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let _ = timeout(Duration::from_millis(900), stream.next()).await;
+
+        assert_eq!(logs.count("WARN", "subscription stalled"), 1, "{:#?}", logs.lines());
+        assert_eq!(logs.count("WARN", ""), 1, "{:#?}", logs.lines());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_lasting_rejection_is_logged_as_a_warning_once() -> anyhow::Result<()> {
+        let logs = CapturedLogs::start();
+        let server = SseTestServer::start(vec![Connection::error(403)]).await?;
+        let client = client(&server, fast_restarts());
+        let (stream, _health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let _ = timeout(Duration::from_millis(1300), async {
+            while stream.next().await.is_some() {}
+        })
+        .await;
+
+        assert_eq!(
+            logs.count("WARN", "Blokli rejected the subscription"),
+            1,
+            "{:#?}",
+            logs.lines()
+        );
+        assert_eq!(logs.count("WARN", ""), 1, "{:#?}", logs.lines());
+        assert!(
+            logs.count("DEBUG", "Blokli still rejects the subscription") >= 1,
+            "{:#?}",
+            logs.lines()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transport_errors_are_logged_without_the_url() -> anyhow::Result<()> {
+        let logs = CapturedLogs::start();
+        // A port nothing listens on, so every connection attempt fails.
+        let closed_port = TcpListener::bind("127.0.0.1:0").await?.local_addr()?.port();
+        let client = BlokliClient::new(
+            // reqwest names the request URL in its errors; the path stands in for anything sensitive in it.
+            format!("http://127.0.0.1:{closed_port}/secret-token/").parse()?,
+            fast_restarts(),
+        );
+        let (stream, _health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let _ = timeout(Duration::from_millis(500), stream.next()).await;
+
+        let lines = logs.lines();
+        assert!(
+            lines.iter().any(|line| line.contains("request returned an error")),
+            "eventsource-client should have logged the failed connections: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("secret-token")),
+            "the URL leaked into the logs: {lines:#?}"
+        );
         Ok(())
     }
 }
