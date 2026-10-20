@@ -77,7 +77,15 @@ pub enum SubscriptionStatus {
     ///
     /// The subscription keeps reconnecting; this status only says that the problem has lasted long.
     Stalled,
-    /// Connected again after being [`Degraded`](Self::Degraded) or [`Stalled`](Self::Stalled).
+    /// The server refused the subscription: an HTTP 4xx answer (other than 408, 425 or 429) or GraphQL errors
+    /// without data.
+    ///
+    /// The error was yielded on the stream once. The subscription keeps retrying at the slow pace of
+    /// [`stream_reconnect_timeout`](crate::BlokliClientConfig::stream_reconnect_timeout), so it recovers without a
+    /// restart once the server accepts it again.
+    Rejected,
+    /// Connected again after being [`Degraded`](Self::Degraded), [`Stalled`](Self::Stalled) or
+    /// [`Rejected`](Self::Rejected).
     ///
     /// The server replays its current snapshot after every reconnect, so the stream yields items that were already
     /// seen before the outage. Apply them idempotently.
@@ -117,6 +125,8 @@ pub enum SubscriptionProblem {
     Closed,
     /// The server sent data that is not a valid event or not a valid response.
     MalformedEvent,
+    /// The server answered with GraphQL errors and no data.
+    GraphQl,
 }
 
 /// Snapshot of one subscription's health.
@@ -221,14 +231,29 @@ impl HealthTracker {
         )
     }
 
-    /// The connection works: it was (re)established, or it delivered a keepalive or an event.
+    /// The connection delivered a keepalive or an event.
     pub(crate) fn transport_activity(&mut self) {
+        self.record_activity(true);
+    }
+
+    /// A connection was (re)established.
+    ///
+    /// This does not end a rejection: a server that refuses the query with GraphQL errors accepts the connection
+    /// first.
+    pub(crate) fn connected(&mut self) {
+        self.record_activity(false);
+    }
+
+    fn record_activity(&mut self, ends_rejection: bool) {
         let outage_since = self.outage_since;
         self.update(|health, now| {
             health.last_transport_activity = Some(now);
             let next = match health.status {
                 SubscriptionStatus::Connecting => SubscriptionStatus::Healthy,
                 SubscriptionStatus::Degraded | SubscriptionStatus::Stalled => SubscriptionStatus::Recovered {
+                    outage: now.saturating_duration_since(outage_since),
+                },
+                SubscriptionStatus::Rejected if ends_rejection => SubscriptionStatus::Recovered {
                     outage: now.saturating_duration_since(outage_since),
                 },
                 _ => return,
@@ -265,13 +290,35 @@ impl HealthTracker {
         }
     }
 
+    /// The server refused the subscription. Returns whether this starts a new rejection, so the caller yields the
+    /// error only once per rejection.
+    pub(crate) fn reject(&mut self, problem: SubscriptionProblem) -> bool {
+        let mut first = false;
+        let mut outage_started = None;
+        self.update(|health, now| {
+            health.failures = health.failures.saturating_add(1);
+            health.last_problem = Some(problem);
+            match health.status {
+                SubscriptionStatus::Rejected | SubscriptionStatus::Ended(_) => return,
+                SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => outage_started = Some(now),
+                _ => {}
+            }
+            first = true;
+            set_status(health, SubscriptionStatus::Rejected, now);
+        });
+        if let Some(since) = outage_started {
+            self.outage_since = since;
+        }
+        first
+    }
+
     /// When the subscription counts as stalled if nothing comes over the connection until then.
     ///
     /// `None` when it is already stalled or has ended, so there is nothing left to wait for.
     pub(crate) fn stall_deadline(&self, threshold: Duration) -> Option<Instant> {
         let health = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         match health.status {
-            SubscriptionStatus::Stalled | SubscriptionStatus::Ended(_) => None,
+            SubscriptionStatus::Stalled | SubscriptionStatus::Rejected | SubscriptionStatus::Ended(_) => None,
             _ => Some(health.last_transport_activity.unwrap_or(self.created) + threshold),
         }
     }
@@ -397,6 +444,41 @@ mod tests {
         let threshold = Duration::from_millis(10);
 
         assert_eq!(tracker.stall_deadline(threshold), Some(created + threshold));
+    }
+
+    #[test]
+    fn a_rejection_is_reported_once_and_only_traffic_after_connecting_ends_it() {
+        let (mut tracker, handle) = HealthTracker::new("services");
+        tracker.connected();
+
+        assert!(
+            tracker.reject(SubscriptionProblem::GraphQl),
+            "the first rejection is new"
+        );
+        assert!(
+            !tracker.reject(SubscriptionProblem::GraphQl),
+            "a repeated rejection is not"
+        );
+        assert_eq!(handle.get().status, SubscriptionStatus::Rejected);
+        assert_eq!(handle.get().failures, 2);
+        assert!(!handle.get().is_healthy());
+        assert_eq!(tracker.stall_deadline(Duration::from_secs(90)), None);
+
+        tracker.problem(SubscriptionProblem::Closed);
+        tracker.stalled();
+        tracker.connected();
+        assert_eq!(
+            handle.get().status,
+            SubscriptionStatus::Rejected,
+            "connecting alone does not end it"
+        );
+
+        tracker.transport_activity();
+        assert!(matches!(handle.get().status, SubscriptionStatus::Recovered { .. }));
+        assert!(
+            tracker.reject(SubscriptionProblem::HttpStatus(401)),
+            "a rejection after recovery is new again"
+        );
     }
 
     #[test]

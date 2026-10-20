@@ -445,11 +445,11 @@ mod stream_tests {
     use std::time::Duration;
 
     use futures::StreamExt;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::{Instant, sleep, timeout};
 
     use super::super::sse_test_server::{Connection, SseTestServer, Step, event, keepalive};
     use crate::{
-        BlokliClient, BlokliClientConfig, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem,
+        BlokliClient, BlokliClientConfig, ErrorKind, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem,
         SubscriptionStatus,
         api::{BlokliSubscriptionClient, types::ReadinessState},
     };
@@ -630,23 +630,96 @@ mod stream_tests {
         Ok(())
     }
 
+    const GRAPHQL_ERROR: &str = r#"{"errors":[{"message":"unknown field"}]}"#;
+
     #[tokio::test]
-    async fn a_graphql_error_ends_the_subscription_as_failed() -> anyhow::Result<()> {
-        let server = SseTestServer::start(vec![Connection::ok(vec![
-            event(r#"{"errors":[{"message":"unknown field"}]}"#),
-            Step::Hang,
-        ])])
+    async fn a_graphql_error_is_yielded_once_and_retried_slowly() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![event(GRAPHQL_ERROR), Step::Hang]),
+            Connection::ok(vec![event(GRAPHQL_ERROR), Step::Hang]),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
         .await?;
+        let cfg = fast_restarts();
+        let slow_retry = cfg.stream_reconnect_timeout;
+        let client = client(&server, cfg);
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+        let started = Instant::now();
+
+        let first = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(
+            matches!(&first, Some(Err(error)) if matches!(error.kind(), ErrorKind::GraphQLError(_))),
+            "got {first:?}"
+        );
+        assert_eq!(health.get().status, SubscriptionStatus::Rejected);
+        assert_eq!(health.get().last_problem, Some(SubscriptionProblem::GraphQl));
+
+        // The second rejection is not yielded again; the next item is the update after it.
+        let next = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(matches!(next, Some(Ok(ReadinessState::Ready))), "got {next:?}");
+        assert!(started.elapsed() >= slow_retry * 2, "retried faster than the slow pace");
+        assert!(matches!(health.get().status, SubscriptionStatus::Recovered { .. }));
+        assert_eq!(server.connections(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_http_rejection_is_yielded_once_and_retried_slowly() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::error(401),
+            Connection::error(401),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
+        .await?;
+        let cfg = fast_restarts();
+        let slow_retry = cfg.stream_reconnect_timeout;
+        let client = client(&server, cfg);
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+        let started = Instant::now();
+
+        let first = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(
+            matches!(&first, Some(Err(error)) if matches!(error.kind(), ErrorKind::Subscription(_))),
+            "got {first:?}"
+        );
+        assert_eq!(health.get().status, SubscriptionStatus::Rejected);
+        assert_eq!(health.get().last_problem, Some(SubscriptionProblem::HttpStatus(401)));
+
+        let next = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(matches!(next, Some(Ok(ReadinessState::Ready))), "got {next:?}");
+        assert!(started.elapsed() >= slow_retry * 2, "retried faster than the slow pace");
+        assert!(matches!(health.get().status, SubscriptionStatus::Recovered { .. }));
+        assert_eq!(server.connections(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_lasting_rejection_is_retried_at_the_slow_pace_without_ending() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::error(403)]).await?;
         let client = client(&server, fast_restarts());
         let (stream, health) = client.subscribe_health_with_health()?;
         futures::pin_mut!(stream);
 
-        let error = timeout(Duration::from_secs(5), stream.next()).await?;
-        assert!(matches!(error, Some(Err(_))), "got {error:?}");
-        let end = timeout(Duration::from_secs(5), stream.next()).await?;
-        assert!(end.is_none(), "got {end:?}");
+        let mut items = Vec::new();
+        let _ = timeout(Duration::from_millis(1300), async {
+            while let Some(item) = stream.next().await {
+                items.push(item);
+            }
+        })
+        .await;
 
-        assert_eq!(health.get().status, SubscriptionStatus::Ended(SubscriptionEnd::Failed));
+        assert_eq!(items.len(), 1, "the rejection is yielded once, got {items:?}");
+        assert!(items[0].is_err());
+        assert_eq!(health.get().status, SubscriptionStatus::Rejected);
+        // One try at the start, then one every 400 ms.
+        let connections = server.connections();
+        assert!(
+            (2..=4).contains(&connections),
+            "unexpected number of connections: {connections}"
+        );
+        assert!(health.get().failures >= 2);
         Ok(())
     }
 
