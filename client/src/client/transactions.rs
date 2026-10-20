@@ -93,7 +93,8 @@ impl BlokliTransactionClient for BlokliClient {
     }
 
     async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<Transaction> {
-        self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id))?
+        self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id), "track_transaction")?
+            .0
             .try_filter_map(|item| {
                 futures::future::ready(match &item.transaction_updated.status {
                     TransactionStatus::Confirmed => Ok(Some(item.transaction_updated)),

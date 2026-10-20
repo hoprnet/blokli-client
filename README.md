@@ -33,6 +33,19 @@ Common public items are re-exported at the crate root:
 Full API documentation, including advanced configuration such as timeouts, subscriptions, transactions, and DNS overrides, is available on
 [docs.rs](https://docs.rs/blokli-client).
 
+### Subscriptions
+
+Subscriptions reconnect automatically with no retry limit. Use a `subscribe_*_with_health` method to also get a `SubscriptionHealthHandle`
+that reports the subscription's status. Keepalive messages keep a quiet subscription healthy.
+
+When using subscriptions:
+
+- Blokli sends its current snapshot after each reconnect. Handle repeated items safely, for example by updating existing records by key.
+- To reduce log noise and avoid logging event data, set `eventsource_client=error` in your log filter. The client's health logs use
+  `blokli_client`.
+
+See the `health` module on [docs.rs](https://docs.rs/blokli-client) for status details and stall settings.
+
 ## Components
 
 - `client/`: `blokli-client` library, Cynic GraphQL types, query helpers, subscriptions, transactions, and test utilities
