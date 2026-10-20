@@ -27,8 +27,8 @@
 //! a [`TxId`] is a Blokli tracking id, while a [`TxReceipt`] is the on-chain transaction hash returned by submission
 //! endpoints.
 //!
-//! Subscriptions are GraphQL operations delivered over server-sent events. They yield streams of `Result<T, E>` so
-//! callers can decide how to handle item-level errors. Transaction helpers operate on already-signed raw transaction
+//! Subscriptions use GraphQL over server-sent events. They reconnect automatically and can report their health
+//! separately from their data. Transaction helpers operate on already-signed raw transaction
 //! bytes; this crate does not sign transactions.
 //!
 //! # Quick start
@@ -73,8 +73,15 @@
 //!
 //! # Subscriptions
 //!
-//! Subscription methods return [`futures::Stream`] values. Streams use Blokli's SSE endpoint and yield `Result` items
-//! so callers can decide how to handle transient transport, parsing, or GraphQL errors.
+//! Subscription methods return [`futures::Stream`] values using Blokli's SSE endpoint.
+//!
+//! - **Retries:** the client retries lost connections, timeouts, and invalid events with no limit. The stream does not
+//!   return these errors.
+//! - **Rejections:** if Blokli returns HTTP 4xx or GraphQL errors without data, the stream returns the error once. The
+//!   client keeps retrying at the slower interval set by
+//!   [`stream_reconnect_timeout`](BlokliClientConfig::stream_reconnect_timeout).
+//! - **Repeated items:** Blokli sends no event IDs and sends its current snapshot after each reconnect. The stream can
+//!   return the same items again. Handle them safely, for example by updating existing records by key.
 //!
 //! ```no_run
 //! use blokli_client::{AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient};
@@ -86,6 +93,35 @@
 //!
 //!     while let Some(account) = accounts.try_next().await? {
 //!         println!("account key id: {}", account.keyid);
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Subscription health
+//!
+//! Each `subscribe_*` method has a `subscribe_*_with_health` version that also returns a [`SubscriptionHealthHandle`].
+//! The handle reports that subscription's status. See [`health`] for details.
+//!
+//! ```no_run
+//! use blokli_client::{
+//!     AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient, SubscriptionStatus,
+//! };
+//! use futures::TryStreamExt;
+//!
+//! async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//!     let client = BlokliClient::new("https://blokli.example.org".parse()?, BlokliClientConfig::default());
+//!     let (accounts, health) = client.subscribe_accounts_with_health(AccountSelector::Any)?;
+//!     let mut accounts = Box::pin(accounts);
+//!
+//!     while let Some(account) = accounts.try_next().await? {
+//!         println!("account key id: {}", account.keyid);
+//!
+//!         // You can also check health from a separate task, such as a timer.
+//!         if let SubscriptionStatus::Recovered { outage } = health.get().status {
+//!             println!("{} recovered after {outage:?}", health.subscription());
+//!         }
 //!     }
 //!
 //!     Ok(())

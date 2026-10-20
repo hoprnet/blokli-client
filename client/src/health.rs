@@ -14,6 +14,39 @@
 //! stream that is not polled does not read from its connection either, and its health keeps the last known value.
 //!
 //! Retries are not limited: a degraded subscription keeps reconnecting until it recovers or its stream is dropped.
+//!
+//! # Statuses
+//!
+//! - [`Connecting`](SubscriptionStatus::Connecting): waiting for the first connection.
+//! - [`Healthy`](SubscriptionStatus::Healthy): the connection is working.
+//! - [`Degraded`](SubscriptionStatus::Degraded): retrying after a connection failure or invalid data.
+//! - [`Stalled`](SubscriptionStatus::Stalled): no traffic within the configured [stall
+//!   threshold](crate::BlokliClientConfig::subscription_stall_threshold). Retries continue.
+//! - [`Rejected`](SubscriptionStatus::Rejected): Blokli refused the subscription. Retries continue at a slower rate
+//!   until a keepalive or update arrives.
+//! - [`Recovered`](SubscriptionStatus::Recovered): working again after a degraded, stalled, or rejected state. Includes
+//!   the outage duration.
+//! - [`Ended`](SubscriptionStatus::Ended): the stream completed, was dropped by the caller, or failed.
+//!
+//! A subscription stalls when it receives no traffic for too long, even if the connection stays open without errors.
+//! If server keepalives are disabled, a quiet subscription can also stall. See
+//! [`subscription_stall_threshold`](crate::BlokliClientConfig::subscription_stall_threshold) for settings.
+//!
+//! # Limitation
+//!
+//! If a connection is refused, DNS fails, or a connection times out, eventsource-client retries without reporting the
+//! error to this client. The subscription keeps its last status until the stall threshold is reached, then becomes
+//! [`Stalled`](SubscriptionStatus::Stalled).
+//!
+//! # Logs
+//!
+//! Health logs use `blokli_client` and identify each subscription as `name#id`. The client logs WARN when an outage
+//! starts or the subscription stalls, DEBUG for later failures, and INFO with the outage duration when it recovers.
+//! These logs do not include queries or event data.
+//!
+//! eventsource-client also logs under `eventsource_client`: INFO for each reconnect, WARN for each failed connection,
+//! and DEBUG with event data and response headers. Set `eventsource_client=error` in your log filter to reduce noise
+//! and avoid logging this data.
 
 use std::{
     fmt::{self, Display, Formatter},
