@@ -9,14 +9,18 @@ mod transactions;
 use std::{
     fmt::Debug,
     future::Future,
+    io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cynic::GraphQlResponse;
 use eventsource_client::{Client, Error as SseError, ReconnectOptionsBuilder, SSE};
-use futures::{StreamExt, TryFutureExt, TryStreamExt};
+use futures::{
+    StreamExt, TryFutureExt, TryStreamExt,
+    future::{Either, select},
+};
 use launchdarkly_sdk_transport::{ByteStream, HttpTransport, ResponseFuture, TransportError};
 use reqwest::redirect::Policy as RedirectPolicy;
 #[cfg(feature = "testing")]
@@ -80,6 +84,19 @@ pub struct BlokliClientConfig {
     /// If `None`, completed streams are not recreated and the returned subscription stream terminates.
     #[default(Some(Duration::from_secs(1)))]
     pub subscription_stream_restart_delay: Option<Duration>,
+    /// How long a subscription may go without any traffic before its health reports it as
+    /// [`Stalled`](crate::SubscriptionStatus::Stalled). `None` turns stall detection off.
+    ///
+    /// Traffic includes the keepalive comments Blokli sends while nothing changes (every 15 s by default), so a quiet
+    /// subscription does not stall. The check uses elapsed time, not the number of failures, and runs while the
+    /// stream is being polled even if no error arrives.
+    ///
+    /// If the server's keepalives are turned off, a quiet subscription has no traffic between reconnects. With a
+    /// [read timeout](Self::subscription_read_timeout) it reconnects every time the timeout passes, which counts as
+    /// traffic but replays the server's snapshot each time. Without a read timeout it is reported as stalled after
+    /// this threshold, so turn stall detection off in that setup.
+    #[default(Some(Duration::from_secs(90)))]
+    pub subscription_stall_threshold: Option<Duration>,
     /// Optional DNS override for the Blokli base URL host.
     ///
     /// When `None`, the client uses system DNS. When set, both GraphQL requests and SSE subscription connections use
@@ -419,7 +436,27 @@ impl BlokliClient {
                     };
 
                     if let Some(stream) = &mut stream_state.stream {
-                        match stream.next().await {
+                        // Waits for the next item, but no longer than until the subscription would count as
+                        // stalled, so a silent connection is reported without needing an error to arrive.
+                        let stall_deadline = stream_state
+                            .cfg
+                            .subscription_stall_threshold
+                            .and_then(|threshold| health.stall_deadline(threshold));
+                        let next = match stall_deadline {
+                            Some(deadline) => {
+                                let wait = deadline.saturating_duration_since(Instant::now());
+                                match select(stream.next(), Box::pin(futures_time::task::sleep(wait.into()))).await {
+                                    Either::Left((next, _)) => next,
+                                    Either::Right(_) => {
+                                        health.stalled();
+                                        state = SubscriptionState::Active(stream_state);
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => stream.next().await,
+                        };
+                        match next {
                             Some(Ok(SSE::Event(event))) => {
                                 tracing::debug!(?event, "SSE event");
                                 let error = match serde_json::from_str::<GraphQlResponse<Q>>(&event.data) {
@@ -539,6 +576,8 @@ impl BlokliClient {
 fn problem_of(error: &SseError) -> SubscriptionProblem {
     match error {
         SseError::TimedOut => SubscriptionProblem::Timeout,
+        // reqwest reports its read timeout as a transport error.
+        SseError::Transport(_) | SseError::HttpStream(_) if caused_by_timeout(error) => SubscriptionProblem::Timeout,
         SseError::UnexpectedResponse(response, _) => SubscriptionProblem::HttpStatus(response.status()),
         SseError::Eof => SubscriptionProblem::Closed,
         SseError::UnexpectedEof | SseError::InvalidLine(_) | SseError::InvalidEvent => {
@@ -546,6 +585,24 @@ fn problem_of(error: &SseError) -> SubscriptionProblem {
         }
         _ => SubscriptionProblem::Transport,
     }
+}
+
+/// Whether a timeout anywhere in the error's causes made the SSE request fail.
+fn caused_by_timeout(error: &SseError) -> bool {
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let timed_out = error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::TimedOut);
+        if timed_out {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
 }
 
 pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::Result<Q> {

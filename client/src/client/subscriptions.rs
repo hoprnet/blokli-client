@@ -676,4 +676,105 @@ mod stream_tests {
         assert_eq!(failing.last_problem, Some(SubscriptionProblem::HttpStatus(503)));
         Ok(())
     }
+
+    fn with_stall_threshold(threshold: Option<Duration>) -> BlokliClientConfig {
+        BlokliClientConfig {
+            subscription_stall_threshold: threshold,
+            ..fast_restarts()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_connection_is_reported_as_stalled_without_an_error() -> anyhow::Result<()> {
+        // Answers with the response head, then sends nothing: no events, no keepalives, no error.
+        let server = SseTestServer::start(vec![Connection::ok(vec![Step::Hang])]).await?;
+        let client = client(&server, with_stall_threshold(Some(Duration::from_millis(300))));
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_millis(700), stream.next()).await;
+
+        assert!(item.is_err(), "nothing was sent, got {item:?}");
+        let health = health.get();
+        assert_eq!(health.status, SubscriptionStatus::Stalled);
+        assert_eq!(health.failures, 0, "no error arrived");
+        assert_eq!(health.last_problem, None);
+        assert_eq!(server.connections(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keepalives_keep_a_quiet_subscription_from_stalling() -> anyhow::Result<()> {
+        let mut steps = Vec::new();
+        for _ in 0..10 {
+            steps.push(keepalive());
+            steps.push(Step::Wait(Duration::from_millis(100)));
+        }
+        steps.push(Step::Hang);
+        let server = SseTestServer::start(vec![Connection::ok(steps)]).await?;
+        let client = client(&server, with_stall_threshold(Some(Duration::from_millis(300))));
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_millis(800), stream.next()).await;
+
+        assert!(item.is_err(), "no update was sent, got {item:?}");
+        assert_eq!(health.get().status, SubscriptionStatus::Healthy);
+        assert_eq!(health.get().last_update, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stalled_subscription_recovers_after_reconnecting() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![Step::Hang]),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
+        .await?;
+        let threshold = Duration::from_millis(200);
+        let client = client(
+            &server,
+            BlokliClientConfig {
+                // Cuts the silent connection after the stall was reported, so the client reconnects.
+                subscription_read_timeout: Some(Duration::from_millis(500)),
+                ..with_stall_threshold(Some(threshold))
+            },
+        );
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let mut seen = Vec::new();
+        let item = tokio::select! {
+            item = timeout(Duration::from_secs(5), stream.next()) => item?,
+            _ = record_statuses(&health, &mut seen) => unreachable!("recording never ends"),
+        };
+
+        assert!(matches!(item, Some(Ok(ReadinessState::Ready))), "got {item:?}");
+        assert!(seen.contains(&SubscriptionStatus::Stalled), "statuses seen: {seen:?}");
+        let health = health.get();
+        let SubscriptionStatus::Recovered { outage } = health.status else {
+            panic!("expected Recovered, got {:?}", health.status);
+        };
+        assert!(
+            outage >= threshold,
+            "outage {outage:?} is shorter than the stall threshold"
+        );
+        assert_eq!(health.last_problem, Some(SubscriptionProblem::Timeout));
+        assert_eq!(server.connections(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stall_detection_can_be_turned_off() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![Step::Hang])]).await?;
+        let client = client(&server, with_stall_threshold(None));
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_millis(500), stream.next()).await;
+
+        assert!(item.is_err(), "nothing was sent, got {item:?}");
+        assert_eq!(health.get().status, SubscriptionStatus::Healthy);
+        Ok(())
+    }
 }

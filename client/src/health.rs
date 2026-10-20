@@ -72,7 +72,12 @@ pub enum SubscriptionStatus {
     Healthy,
     /// The connection was lost or delivered unusable data. The subscription is reconnecting.
     Degraded,
-    /// Connected again after being [`Degraded`](Self::Degraded).
+    /// Nothing at all has come over the connection for at least the
+    /// [stall threshold](crate::BlokliClientConfig::subscription_stall_threshold), not even a keepalive comment.
+    ///
+    /// The subscription keeps reconnecting; this status only says that the problem has lasted long.
+    Stalled,
+    /// Connected again after being [`Degraded`](Self::Degraded) or [`Stalled`](Self::Stalled).
     ///
     /// The server replays its current snapshot after every reconnect, so the stream yields items that were already
     /// seen before the outage. Apply them idempotently.
@@ -190,6 +195,8 @@ impl SubscriptionHealthHandle {
 #[derive(Debug)]
 pub(crate) struct HealthTracker {
     state: Arc<Mutex<SubscriptionHealth>>,
+    /// When the subscription was created; stalls are measured from here until the transport first works.
+    created: Instant,
     /// Start of the current outage. For a subscription that never connected, its creation.
     outage_since: Instant,
 }
@@ -204,7 +211,14 @@ impl HealthTracker {
             subscription,
             state: state.clone(),
         };
-        (Self { state, outage_since }, handle)
+        (
+            Self {
+                state,
+                created: outage_since,
+                outage_since,
+            },
+            handle,
+        )
     }
 
     /// The connection works: it was (re)established, or it delivered a keepalive or an event.
@@ -214,7 +228,7 @@ impl HealthTracker {
             health.last_transport_activity = Some(now);
             let next = match health.status {
                 SubscriptionStatus::Connecting => SubscriptionStatus::Healthy,
-                SubscriptionStatus::Degraded => SubscriptionStatus::Recovered {
+                SubscriptionStatus::Degraded | SubscriptionStatus::Stalled => SubscriptionStatus::Recovered {
                     outage: now.saturating_duration_since(outage_since),
                 },
                 _ => return,
@@ -251,6 +265,37 @@ impl HealthTracker {
         }
     }
 
+    /// When the subscription counts as stalled if nothing comes over the connection until then.
+    ///
+    /// `None` when it is already stalled or has ended, so there is nothing left to wait for.
+    pub(crate) fn stall_deadline(&self, threshold: Duration) -> Option<Instant> {
+        let health = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match health.status {
+            SubscriptionStatus::Stalled | SubscriptionStatus::Ended(_) => None,
+            _ => Some(health.last_transport_activity.unwrap_or(self.created) + threshold),
+        }
+    }
+
+    /// Nothing has come over the connection for the stall threshold.
+    pub(crate) fn stalled(&mut self) {
+        let created = self.created;
+        let mut outage_started = None;
+        self.update(|health, now| {
+            match health.status {
+                // A silent connection: the outage began with the last sign of life.
+                SubscriptionStatus::Connecting | SubscriptionStatus::Healthy | SubscriptionStatus::Recovered { .. } => {
+                    outage_started = Some(health.last_transport_activity.unwrap_or(created));
+                }
+                SubscriptionStatus::Degraded => {}
+                _ => return,
+            }
+            set_status(health, SubscriptionStatus::Stalled, now);
+        });
+        if let Some(since) = outage_started {
+            self.outage_since = since;
+        }
+    }
+
     /// The subscription is over.
     pub(crate) fn end(&mut self, end: SubscriptionEnd) {
         self.update(|health, now| {
@@ -279,6 +324,8 @@ fn set_status(health: &mut SubscriptionHealth, status: SubscriptionStatus, now: 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{HealthTracker, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem, SubscriptionStatus};
 
     #[test]
@@ -311,6 +358,45 @@ mod tests {
         assert!(matches!(recovered.status, SubscriptionStatus::Recovered { .. }));
         assert_eq!(recovered.failures, 0);
         assert_eq!(recovered.last_problem, Some(SubscriptionProblem::HttpStatus(503)));
+    }
+
+    #[test]
+    fn a_silent_connection_stalls_and_recovers_with_the_outage_since_its_last_activity() {
+        let (mut tracker, handle) = HealthTracker::new("accounts");
+        tracker.transport_activity();
+        let last_activity = handle.get().last_transport_activity.expect("activity was recorded");
+
+        let threshold = Duration::from_secs(90);
+        assert_eq!(tracker.stall_deadline(threshold), Some(last_activity + threshold));
+        tracker.stalled();
+
+        let stalled = handle.get();
+        assert_eq!(stalled.status, SubscriptionStatus::Stalled);
+        assert!(!stalled.is_healthy());
+        assert_eq!(tracker.stall_deadline(threshold), None, "a stall is reported once");
+
+        tracker.problem(SubscriptionProblem::Timeout);
+        assert_eq!(
+            handle.get().status,
+            SubscriptionStatus::Stalled,
+            "errors do not undo the stall"
+        );
+
+        tracker.transport_activity();
+        let recovered = handle.get();
+        let SubscriptionStatus::Recovered { outage } = recovered.status else {
+            panic!("expected Recovered, got {:?}", recovered.status);
+        };
+        assert_eq!(outage, recovered.status_since.saturating_duration_since(last_activity));
+    }
+
+    #[test]
+    fn a_subscription_that_never_connected_stalls_from_its_creation() {
+        let (tracker, handle) = HealthTracker::new("graph");
+        let created = handle.get().status_since;
+        let threshold = Duration::from_millis(10);
+
+        assert_eq!(tracker.stall_deadline(threshold), Some(created + threshold));
     }
 
     #[test]
