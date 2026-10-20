@@ -65,7 +65,7 @@ mockito     = { workspace = true }
 parking_lot = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true, features = ["preserve_order"] }
-tokio       = { workspace = true }
+tokio       = { workspace = true, features = ["io-util", "net"] }
 
 # `cynic-codegen` is a build-dependency used only in `build.rs` (GraphQL schema
 # registration). cargo-machete does not scan build scripts, so it reports it as unused.

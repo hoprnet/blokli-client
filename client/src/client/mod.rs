@@ -1,4 +1,6 @@
 mod queries;
+#[cfg(test)]
+mod sse_test_server;
 mod subscriptions;
 #[cfg(feature = "testing")]
 mod testing;
@@ -29,6 +31,8 @@ use crate::{
 };
 
 const MIN_RECONNECTION_DELAY: Duration = Duration::from_millis(1);
+/// First wait before reconnecting after a malformed event, used when no stream restart delay is configured.
+const DEFAULT_MALFORMED_EVENT_DELAY: Duration = Duration::from_secs(1);
 
 /// Schema version sent with every request via `X-Blokli-Schema-Version`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -89,6 +93,8 @@ struct SubscriptionStreamState {
     cfg: BlokliClientConfig,
     reqwest_client: reqwest::Client,
     stream: Option<eventsource_client::BoxStream<eventsource_client::Result<SSE>>>,
+    /// The wait used after the last malformed event, if the problem is still going on.
+    malformed_event_delay: Option<Duration>,
 }
 
 impl SubscriptionStreamState {
@@ -97,6 +103,7 @@ impl SubscriptionStreamState {
         query: String,
         config: BlokliClientConfig,
         reqwest_client: reqwest::Client,
+        malformed_event_delay: Option<Duration>,
     ) -> Result<Self, BlokliClientError> {
         let mut instance = Self {
             graphql_url,
@@ -104,6 +111,7 @@ impl SubscriptionStreamState {
             cfg: config,
             reqwest_client,
             stream: None,
+            malformed_event_delay,
         };
 
         instance.start_stream()?;
@@ -141,6 +149,21 @@ impl SubscriptionStreamState {
 
         self.stream = Some(client.stream());
         Ok(())
+    }
+
+    /// The wait before reconnecting after a malformed event: the restart delay at first, then doubling up to
+    /// [`stream_reconnect_timeout`](BlokliClientConfig::stream_reconnect_timeout) while the events stay malformed.
+    fn next_malformed_event_delay(&mut self) -> Duration {
+        let first = self
+            .cfg
+            .subscription_stream_restart_delay
+            .unwrap_or(DEFAULT_MALFORMED_EVENT_DELAY)
+            .max(MIN_RECONNECTION_DELAY);
+        let delay = self.malformed_event_delay.map_or(first, |last| {
+            last.saturating_mul(2).min(self.cfg.stream_reconnect_timeout.max(first))
+        });
+        self.malformed_event_delay = Some(delay);
+        delay
     }
 }
 
@@ -326,6 +349,19 @@ impl BlokliClient {
             query: String,
             cfg: BlokliClientConfig,
             reqwest_client: reqwest::Client,
+            malformed_event_delay: Option<Duration>,
+        }
+
+        impl From<Box<SubscriptionStreamState>> for PendingSubscriptionState {
+            fn from(state: Box<SubscriptionStreamState>) -> Self {
+                Self {
+                    graphql_url: state.graphql_url,
+                    query: state.query,
+                    cfg: state.cfg,
+                    reqwest_client: state.reqwest_client,
+                    malformed_event_delay: state.malformed_event_delay,
+                }
+            }
         }
 
         enum SubscriptionState {
@@ -339,6 +375,7 @@ impl BlokliClient {
                 query,
                 cfg: self.cfg.clone(),
                 reqwest_client,
+                malformed_event_delay: None,
             })),
             move |state| async move {
                 let mut state = state;
@@ -350,6 +387,7 @@ impl BlokliClient {
                             pending_state.query,
                             pending_state.cfg,
                             pending_state.reqwest_client,
+                            pending_state.malformed_event_delay,
                         )?));
                         continue;
                     }
@@ -362,10 +400,26 @@ impl BlokliClient {
                         match stream.next().await {
                             Some(Ok(SSE::Event(event))) => {
                                 tracing::debug!(?event, "SSE event");
-                                let response = serde_json::from_str::<GraphQlResponse<Q>>(&event.data)
-                                    .map_err(BlokliClientError::from)
-                                    .and_then(response_to_data)?;
-                                return Ok(Some((response, SubscriptionState::Active(stream_state))));
+                                let error = match serde_json::from_str::<GraphQlResponse<Q>>(&event.data) {
+                                    Ok(response) => {
+                                        stream_state.malformed_event_delay = None;
+                                        let data = response_to_data(response)?;
+                                        return Ok(Some((data, SubscriptionState::Active(stream_state))));
+                                    }
+                                    Err(error) => error,
+                                };
+                                // A broken event says nothing about the subscription itself. Reconnecting makes the
+                                // server replay its snapshot, so the lost update is not silently missed; the growing
+                                // wait keeps a server that keeps sending broken data from being hit in a tight loop.
+                                let delay = stream_state.next_malformed_event_delay();
+                                tracing::warn!(
+                                    %error,
+                                    bytes = event.data.len(),
+                                    ?delay,
+                                    "malformed SSE event, reconnecting the subscription"
+                                );
+                                futures_time::task::sleep(delay.into()).await;
+                                state = SubscriptionState::Pending(Box::new(stream_state.into()));
                             }
                             Some(Ok(SSE::Comment(comment))) => {
                                 tracing::debug!(comment, "SSE comment");
@@ -387,12 +441,7 @@ impl BlokliClient {
                                         "SSE stream ended, sleeping before attempting to restart"
                                     );
                                     futures_time::task::sleep(actual_delay.into()).await;
-                                    state = SubscriptionState::Pending(Box::new(PendingSubscriptionState {
-                                        graphql_url: stream_state.graphql_url,
-                                        query: stream_state.query,
-                                        cfg: stream_state.cfg,
-                                        reqwest_client: stream_state.reqwest_client,
-                                    }));
+                                    state = SubscriptionState::Pending(Box::new(stream_state.into()));
                                 } else {
                                     tracing::warn!(
                                         "SSE stream ended and no restart delay configured, stopping subscription"

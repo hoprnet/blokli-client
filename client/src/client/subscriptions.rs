@@ -271,3 +271,100 @@ mod tests {
         let _position: Option<CurvyEventPosition> = None;
     }
 }
+
+#[cfg(test)]
+mod stream_tests {
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use tokio::time::timeout;
+
+    use super::super::sse_test_server::{Connection, SseTestServer, Step, event, keepalive};
+    use crate::{
+        BlokliClient, BlokliClientConfig,
+        api::{BlokliSubscriptionClient, types::ReadinessState},
+    };
+
+    const READY: &str = r#"{"data":{"health":"READY"}}"#;
+    /// Cut off mid-object, as a truncated frame would be.
+    const TRUNCATED: &str = r#"{"data":{"heal"#;
+
+    fn client(server: &SseTestServer, cfg: BlokliClientConfig) -> BlokliClient {
+        BlokliClient::new(server.url(), cfg)
+    }
+
+    fn fast_restarts() -> BlokliClientConfig {
+        BlokliClientConfig {
+            stream_reconnect_timeout: Duration::from_millis(400),
+            subscription_stream_restart_delay: Some(Duration::from_millis(50)),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn keepalive_comments_keep_a_quiet_subscription_open() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![
+            keepalive(),
+            Step::Wait(Duration::from_millis(100)),
+            keepalive(),
+            Step::Wait(Duration::from_millis(100)),
+            event(READY),
+            Step::Hang,
+        ])])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let stream = client.subscribe_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_secs(5), stream.next()).await?;
+
+        assert!(matches!(item, Some(Ok(ReadinessState::Ready))), "got {item:?}");
+        assert_eq!(server.connections(), 1, "keepalives alone must not cause a reconnect");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_malformed_event_does_not_end_the_subscription() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![event(TRUNCATED), Step::Hang]),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let stream = client.subscribe_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_secs(5), stream.next()).await?;
+
+        assert!(
+            matches!(item, Some(Ok(ReadinessState::Ready))),
+            "expected the update sent after the malformed one, got {item:?}"
+        );
+        assert_eq!(
+            server.connections(),
+            2,
+            "the malformed event should cause one reconnect"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_malformed_events_back_off_instead_of_reconnecting_in_a_tight_loop() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![event(TRUNCATED), Step::Hang])]).await?;
+        let client = client(&server, fast_restarts());
+        let stream = client.subscribe_health()?;
+        futures::pin_mut!(stream);
+
+        // Nothing valid ever arrives, so this only ends by the timeout.
+        let item = timeout(Duration::from_millis(1200), stream.next()).await;
+
+        assert!(item.is_err(), "the subscription must keep retrying, got {item:?}");
+        // Waits of 50, 100, 200, 400, 400 ms fit about six connections into 1.2 s; a fixed 50 ms would give ~20.
+        let connections = server.connections();
+        assert!(
+            (2..=7).contains(&connections),
+            "unexpected number of connections: {connections}"
+        );
+        Ok(())
+    }
+}
