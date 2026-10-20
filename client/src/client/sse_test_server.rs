@@ -44,6 +44,11 @@ impl Connection {
     pub(crate) fn ok(steps: Vec<Step>) -> Self {
         Self { status: 200, steps }
     }
+
+    /// A response with the error `status` and an empty body.
+    pub(crate) fn error(status: u16) -> Self {
+        Self { status, steps: vec![] }
+    }
 }
 
 /// An SSE event carrying `data` as its payload.

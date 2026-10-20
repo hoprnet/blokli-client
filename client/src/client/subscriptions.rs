@@ -2,20 +2,6 @@ use cynic::SubscriptionBuilder;
 use futures::{Stream, TryStreamExt};
 
 use super::{BlokliClient, GraphQlQueries};
-use crate::api::{
-    AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId, TicketSelector,
-    TxId,
-    internal::{
-        AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
-        SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment, SubscribeServiceRegistryConfig,
-        SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams, SubscribeTicketRedeemed,
-        TicketRedeemedVariables,
-    },
-    types::{
-        Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe, ServiceRegistryConfig,
-        ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
-    },
-};
 #[cfg(feature = "curvy")]
 use crate::api::{
     internal::{
@@ -23,6 +9,23 @@ use crate::api::{
         SubscribeCurvyPendingNote,
     },
     types::{CurvyCommittedNote, CurvyCommittedNullifier, CurvyPendingNote, Uint64},
+};
+use crate::{
+    api::{
+        AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId,
+        TicketSelector, TxId,
+        internal::{
+            AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
+            SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment,
+            SubscribeServiceRegistryConfig, SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams,
+            SubscribeTicketRedeemed, TicketRedeemedVariables,
+        },
+        types::{
+            Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe,
+            ServiceRegistryConfig, ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
+        },
+    },
+    health::SubscriptionHealthHandle,
 };
 
 impl GraphQlQueries {
@@ -118,125 +121,290 @@ impl GraphQlQueries {
 }
 
 impl BlokliSubscriptionClient for BlokliClient {
-    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
     fn subscribe_channels(&self, selector: ChannelSelector) -> Result<impl Stream<Item = Result<Channel>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_channels(selector))?
-            .try_filter_map(|item| futures::future::ok(Some(item.channel_updated))))
+        Ok(self.subscribe_channels_with_health(selector)?.0)
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_channels_with_health(
+        &self,
+        selector: ChannelSelector,
+    ) -> Result<(impl Stream<Item = Result<Channel>> + Send, SubscriptionHealthHandle)> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_channels(selector), "channels")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.channel_updated))),
+            health,
+        ))
+    }
+
     fn subscribe_accounts(&self, selector: AccountSelector) -> Result<impl Stream<Item = Result<Account>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_accounts(selector))?
-            .try_filter_map(|item| futures::future::ok(Some(item.account_updated))))
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    fn subscribe_graph(&self) -> Result<impl Stream<Item = Result<OpenedChannelsGraphEntry>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_graph())?
-            .try_filter_map(|item| futures::future::ok(Some(item.opened_channel_graph_updated))))
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    fn subscribe_ticket_params(&self) -> Result<impl Stream<Item = Result<TicketParameters>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_ticket_params())?
-            .try_filter_map(|item| futures::future::ok(Some(item.ticket_parameters_updated))))
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    fn subscribe_health(&self) -> Result<impl Stream<Item = Result<ReadinessState>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_health())?
-            .try_filter_map(|item| futures::future::ok(Some(item.health))))
-    }
-
-    #[tracing::instrument(level = "debug", skip(self))]
-    fn subscribe_safe_deployments(&self) -> Result<impl Stream<Item = Result<Safe>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_safe_deployments())?
-            .try_filter_map(|item| futures::future::ok(Some(item.safe_deployed))))
+        Ok(self.subscribe_accounts_with_health(selector)?.0)
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_accounts_with_health(
+        &self,
+        selector: AccountSelector,
+    ) -> Result<(impl Stream<Item = Result<Account>> + Send, SubscriptionHealthHandle)> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_accounts(selector), "accounts")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.account_updated))),
+            health,
+        ))
+    }
+
+    fn subscribe_graph(&self) -> Result<impl Stream<Item = Result<OpenedChannelsGraphEntry>> + Send> {
+        Ok(self.subscribe_graph_with_health()?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_graph_with_health(
+        &self,
+    ) -> Result<(
+        impl Stream<Item = Result<OpenedChannelsGraphEntry>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(GraphQlQueries::subscribe_graph(), "graph")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.opened_channel_graph_updated))),
+            health,
+        ))
+    }
+
+    fn subscribe_ticket_params(&self) -> Result<impl Stream<Item = Result<TicketParameters>> + Send> {
+        Ok(self.subscribe_ticket_params_with_health()?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_ticket_params_with_health(
+        &self,
+    ) -> Result<(
+        impl Stream<Item = Result<TicketParameters>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_ticket_params(), "ticket_params")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.ticket_parameters_updated))),
+            health,
+        ))
+    }
+
+    fn subscribe_health(&self) -> Result<impl Stream<Item = Result<ReadinessState>> + Send> {
+        Ok(self.subscribe_health_with_health()?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_health_with_health(
+        &self,
+    ) -> Result<(
+        impl Stream<Item = Result<ReadinessState>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(GraphQlQueries::subscribe_health(), "health")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.health))),
+            health,
+        ))
+    }
+
+    fn subscribe_safe_deployments(&self) -> Result<impl Stream<Item = Result<Safe>> + Send> {
+        Ok(self.subscribe_safe_deployments_with_health()?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_safe_deployments_with_health(
+        &self,
+    ) -> Result<(impl Stream<Item = Result<Safe>> + Send, SubscriptionHealthHandle)> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_safe_deployments(), "safe_deployments")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.safe_deployed))),
+            health,
+        ))
+    }
+
     fn subscribe_services(
         &self,
         selector: ServiceSelector,
     ) -> Result<impl Stream<Item = Result<ServiceUpdate>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_services(selector))?
-            .try_filter_map(|item| futures::future::ok(Some(item.service_updated))))
+        Ok(self.subscribe_services_with_health(selector)?.0)
     }
 
-    #[tracing::instrument(level = "debug", skip(self))]
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_services_with_health(
+        &self,
+        selector: ServiceSelector,
+    ) -> Result<(
+        impl Stream<Item = Result<ServiceUpdate>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_services(selector), "services")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.service_updated))),
+            health,
+        ))
+    }
+
     fn subscribe_service_types(
         &self,
         service_type: Option<ServiceTypeId>,
     ) -> Result<impl Stream<Item = Result<ServiceTypeUpdate>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_service_types(service_type))?
-            .try_filter_map(|item| futures::future::ok(Some(item.service_type_updated))))
+        Ok(self.subscribe_service_types_with_health(service_type)?.0)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_service_types_with_health(
+        &self,
+        service_type: Option<ServiceTypeId>,
+    ) -> Result<(
+        impl Stream<Item = Result<ServiceTypeUpdate>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_service_types(service_type), "service_types")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.service_type_updated))),
+            health,
+        ))
+    }
+
     fn subscribe_service_registry_config(
         &self,
     ) -> Result<impl Stream<Item = Result<ServiceRegistryConfig>> + Send + 'static> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_service_registry_config())?
-            .try_filter_map(|item| futures::future::ok(Some(item.service_registry_config_updated))))
+        Ok(self.subscribe_service_registry_config_with_health()?.0)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    fn subscribe_track_transaction(&self, tx_id: TxId) -> Result<impl Stream<Item = Result<Transaction>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id))?
-            .try_filter_map(|item| futures::future::ok(Some(item.transaction_updated))))
+    fn subscribe_service_registry_config_with_health(
+        &self,
+    ) -> Result<(
+        impl Stream<Item = Result<ServiceRegistryConfig>> + Send + 'static,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(
+            GraphQlQueries::subscribe_service_registry_config(),
+            "service_registry_config",
+        )?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.service_registry_config_updated))),
+            health,
+        ))
     }
 
-    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_track_transaction(&self, tx_id: TxId) -> Result<impl Stream<Item = Result<Transaction>> + Send> {
+        Ok(self.subscribe_track_transaction_with_health(tx_id)?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_track_transaction_with_health(
+        &self,
+        tx_id: TxId,
+    ) -> Result<(impl Stream<Item = Result<Transaction>> + Send, SubscriptionHealthHandle)> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id), "track_transaction")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.transaction_updated))),
+            health,
+        ))
+    }
+
     fn subscribe_ticket_redeemed(
         &self,
         selector: TicketSelector,
     ) -> Result<impl futures::Stream<Item = Result<RedeemTicketDetails>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_ticket_redeemed(selector))?
-            .try_filter_map(|item| futures::future::ok(Some(item.ticket_redeemed))))
+        Ok(self.subscribe_ticket_redeemed_with_health(selector)?.0)
+    }
+
+    #[tracing::instrument(level = "debug", skip(self), fields(?selector))]
+    fn subscribe_ticket_redeemed_with_health(
+        &self,
+        selector: TicketSelector,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<RedeemTicketDetails>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) =
+            self.build_subscription_stream(GraphQlQueries::subscribe_ticket_redeemed(selector), "ticket_redeemed")?;
+        Ok((
+            stream.try_filter_map(|item| futures::future::ok(Some(item.ticket_redeemed))),
+            health,
+        ))
     }
 
     #[cfg(feature = "curvy")]
-    #[tracing::instrument(level = "debug", skip(self))]
     fn subscribe_curvy_pending_notes(
         &self,
         from_block: Option<u64>,
     ) -> Result<impl futures::Stream<Item = Result<CurvyPendingNote>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_curvy_pending_notes(from_block))?
-            .map_ok(|item| item.curvy_pending_note))
+        Ok(self.subscribe_curvy_pending_notes_with_health(from_block)?.0)
     }
 
     #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_curvy_pending_notes_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<CurvyPendingNote>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(
+            GraphQlQueries::subscribe_curvy_pending_notes(from_block),
+            "curvy_pending_notes",
+        )?;
+        Ok((stream.map_ok(|item| item.curvy_pending_note), health))
+    }
+
+    #[cfg(feature = "curvy")]
     fn subscribe_curvy_committed_notes(
         &self,
         from_block: Option<u64>,
     ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNote>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_curvy_committed_notes(from_block))?
-            .map_ok(|item| item.curvy_committed_note))
+        Ok(self.subscribe_curvy_committed_notes_with_health(from_block)?.0)
     }
 
     #[cfg(feature = "curvy")]
     #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_curvy_committed_notes_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<CurvyCommittedNote>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(
+            GraphQlQueries::subscribe_curvy_committed_notes(from_block),
+            "curvy_committed_notes",
+        )?;
+        Ok((stream.map_ok(|item| item.curvy_committed_note), health))
+    }
+
+    #[cfg(feature = "curvy")]
     fn subscribe_curvy_committed_nullifiers(
         &self,
         from_block: Option<u64>,
     ) -> Result<impl futures::Stream<Item = Result<CurvyCommittedNullifier>> + Send> {
-        Ok(self
-            .build_subscription_stream(GraphQlQueries::subscribe_curvy_committed_nullifiers(from_block))?
-            .map_ok(|item| item.curvy_committed_nullifier))
+        Ok(self.subscribe_curvy_committed_nullifiers_with_health(from_block)?.0)
+    }
+
+    #[cfg(feature = "curvy")]
+    #[tracing::instrument(level = "debug", skip(self))]
+    fn subscribe_curvy_committed_nullifiers_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<CurvyCommittedNullifier>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        let (stream, health) = self.build_subscription_stream(
+            GraphQlQueries::subscribe_curvy_committed_nullifiers(from_block),
+            "curvy_committed_nullifiers",
+        )?;
+        Ok((stream.map_ok(|item| item.curvy_committed_nullifier), health))
     }
 }
 
@@ -277,11 +445,12 @@ mod stream_tests {
     use std::time::Duration;
 
     use futures::StreamExt;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     use super::super::sse_test_server::{Connection, SseTestServer, Step, event, keepalive};
     use crate::{
-        BlokliClient, BlokliClientConfig,
+        BlokliClient, BlokliClientConfig, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem,
+        SubscriptionStatus,
         api::{BlokliSubscriptionClient, types::ReadinessState},
     };
 
@@ -365,6 +534,146 @@ mod stream_tests {
             (2..=7).contains(&connections),
             "unexpected number of connections: {connections}"
         );
+        Ok(())
+    }
+
+    /// Records every status the handle reports until the future is dropped.
+    async fn record_statuses(handle: &SubscriptionHealthHandle, seen: &mut Vec<SubscriptionStatus>) {
+        loop {
+            let status = handle.get().status;
+            if seen.last() != Some(&status) {
+                seen.push(status);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quiet_subscription_with_only_keepalives_is_healthy() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![
+            keepalive(),
+            Step::Wait(Duration::from_millis(100)),
+            keepalive(),
+            Step::Wait(Duration::from_millis(100)),
+            keepalive(),
+            Step::Hang,
+        ])])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let item = timeout(Duration::from_millis(400), stream.next()).await;
+
+        assert!(item.is_err(), "no update was sent, got {item:?}");
+        let health = health.get();
+        assert_eq!(health.status, SubscriptionStatus::Healthy);
+        assert!(health.last_transport_activity.is_some());
+        assert_eq!(health.last_update, None, "keepalives are not updates");
+        assert_eq!(health.failures, 0);
+        assert_eq!(server.connections(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_outage_degrades_the_subscription_and_a_reconnect_recovers_it() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![event(READY)]),
+            Connection::error(503),
+            Connection::error(503),
+            Connection::ok(vec![event(READY), Step::Hang]),
+        ])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let first = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(matches!(first, Some(Ok(ReadinessState::Ready))), "got {first:?}");
+        assert_eq!(health.get().status, SubscriptionStatus::Healthy);
+        assert!(health.get().last_update.is_some());
+
+        let mut seen = Vec::new();
+        let replayed = tokio::select! {
+            item = timeout(Duration::from_secs(5), stream.next()) => item?,
+            _ = record_statuses(&health, &mut seen) => unreachable!("recording never ends"),
+        };
+
+        assert!(matches!(replayed, Some(Ok(ReadinessState::Ready))), "got {replayed:?}");
+        assert!(seen.contains(&SubscriptionStatus::Degraded), "statuses seen: {seen:?}");
+        let health = health.get();
+        let SubscriptionStatus::Recovered { outage } = health.status else {
+            panic!("expected Recovered, got {:?}", health.status);
+        };
+        assert!(outage > Duration::ZERO);
+        assert_eq!(health.failures, 0);
+        assert_eq!(health.last_problem, Some(SubscriptionProblem::HttpStatus(503)));
+        assert_eq!(server.connections(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_the_stream_ends_the_subscription_as_cancelled() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![event(READY), Step::Hang])]).await?;
+        let client = client(&server, fast_restarts());
+        let (stream, health) = client.subscribe_health_with_health()?;
+        let mut stream = Box::pin(stream);
+
+        let item = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(matches!(item, Some(Ok(ReadinessState::Ready))), "got {item:?}");
+        drop(stream);
+
+        assert_eq!(
+            health.get().status,
+            SubscriptionStatus::Ended(SubscriptionEnd::Cancelled)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_graphql_error_ends_the_subscription_as_failed() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![
+            event(r#"{"errors":[{"message":"unknown field"}]}"#),
+            Step::Hang,
+        ])])
+        .await?;
+        let client = client(&server, fast_restarts());
+        let (stream, health) = client.subscribe_health_with_health()?;
+        futures::pin_mut!(stream);
+
+        let error = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(matches!(error, Some(Err(_))), "got {error:?}");
+        let end = timeout(Duration::from_secs(5), stream.next()).await?;
+        assert!(end.is_none(), "got {end:?}");
+
+        assert_eq!(health.get().status, SubscriptionStatus::Ended(SubscriptionEnd::Failed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_subscriptions_report_their_own_health() -> anyhow::Result<()> {
+        let working = SseTestServer::start(vec![Connection::ok(vec![event(READY), Step::Hang])]).await?;
+        let failing = SseTestServer::start(vec![Connection::error(503)]).await?;
+        let working_client = client(&working, fast_restarts());
+        let failing_client = client(&failing, fast_restarts());
+        let (working_stream, working_health) = working_client.subscribe_health_with_health()?;
+        let (failing_stream, failing_health) = failing_client.subscribe_health_with_health()?;
+        futures::pin_mut!(working_stream, failing_stream);
+
+        // Poll both at the same time, as a caller merging several subscriptions would.
+        let polled = timeout(
+            Duration::from_millis(600),
+            futures::future::join(working_stream.next(), failing_stream.next()),
+        )
+        .await;
+        assert!(polled.is_err(), "the failing subscription must keep retrying");
+
+        assert_ne!(working_health.subscription(), failing_health.subscription());
+        assert!(working_health.get().is_healthy(), "{:?}", working_health.get());
+        let failing = failing_health.get();
+        assert_eq!(failing.status, SubscriptionStatus::Degraded);
+        assert!(failing.failures >= 1);
+        assert_eq!(failing.last_problem, Some(SubscriptionProblem::HttpStatus(503)));
         Ok(())
     }
 }

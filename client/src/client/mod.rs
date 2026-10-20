@@ -15,7 +15,7 @@ use std::{
 };
 
 use cynic::GraphQlResponse;
-use eventsource_client::{Client, ReconnectOptionsBuilder, SSE};
+use eventsource_client::{Client, Error as SseError, ReconnectOptionsBuilder, SSE};
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use launchdarkly_sdk_transport::{ByteStream, HttpTransport, ResponseFuture, TransportError};
 use reqwest::redirect::Policy as RedirectPolicy;
@@ -28,6 +28,7 @@ pub use testing::{
 use crate::{
     api::VERSION,
     errors::{BlokliClientError, ErrorKind},
+    health::{HealthTracker, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem},
 };
 
 const MIN_RECONNECTION_DELAY: Duration = Duration::from_millis(1);
@@ -331,10 +332,20 @@ impl BlokliClient {
             .map_err(ErrorKind::from)?)
     }
 
+    /// Opens the subscription `op` and returns its stream together with its health.
+    ///
+    /// `name` says what the subscription is for; it identifies the subscription in health reports.
     fn build_subscription_stream<Q, V>(
         &self,
         op: cynic::StreamingOperation<Q, V>,
-    ) -> Result<impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static, BlokliClientError>
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
     where
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
@@ -369,26 +380,37 @@ impl BlokliClient {
             Active(Box<SubscriptionStreamState>),
         }
 
-        Ok(futures::stream::try_unfold(
-            SubscriptionState::Pending(Box::new(PendingSubscriptionState {
-                graphql_url,
-                query,
-                cfg: self.cfg.clone(),
-                reqwest_client,
-                malformed_event_delay: None,
-            })),
-            move |state| async move {
+        let (health, handle) = HealthTracker::new(name);
+
+        let stream = futures::stream::try_unfold(
+            (
+                SubscriptionState::Pending(Box::new(PendingSubscriptionState {
+                    graphql_url,
+                    query,
+                    cfg: self.cfg.clone(),
+                    reqwest_client,
+                    malformed_event_delay: None,
+                })),
+                health,
+            ),
+            move |(state, mut health)| async move {
                 let mut state = state;
 
                 loop {
                     if let SubscriptionState::Pending(pending_state) = state {
-                        state = SubscriptionState::Active(Box::new(SubscriptionStreamState::new(
+                        match SubscriptionStreamState::new(
                             pending_state.graphql_url,
                             pending_state.query,
                             pending_state.cfg,
                             pending_state.reqwest_client,
                             pending_state.malformed_event_delay,
-                        )?));
+                        ) {
+                            Ok(stream_state) => state = SubscriptionState::Active(Box::new(stream_state)),
+                            Err(error) => {
+                                health.end(SubscriptionEnd::Failed);
+                                return Err(error);
+                            }
+                        }
                         continue;
                     }
 
@@ -403,14 +425,23 @@ impl BlokliClient {
                                 let error = match serde_json::from_str::<GraphQlResponse<Q>>(&event.data) {
                                     Ok(response) => {
                                         stream_state.malformed_event_delay = None;
-                                        let data = response_to_data(response)?;
-                                        return Ok(Some((data, SubscriptionState::Active(stream_state))));
+                                        return match response_to_data(response) {
+                                            Ok(data) => {
+                                                health.data_update();
+                                                Ok(Some((data, (SubscriptionState::Active(stream_state), health))))
+                                            }
+                                            Err(error) => {
+                                                health.end(SubscriptionEnd::Failed);
+                                                Err(error)
+                                            }
+                                        };
                                     }
                                     Err(error) => error,
                                 };
                                 // A broken event says nothing about the subscription itself. Reconnecting makes the
                                 // server replay its snapshot, so the lost update is not silently missed; the growing
                                 // wait keeps a server that keeps sending broken data from being hit in a tight loop.
+                                health.problem(SubscriptionProblem::MalformedEvent);
                                 let delay = stream_state.next_malformed_event_delay();
                                 tracing::warn!(
                                     %error,
@@ -423,14 +454,17 @@ impl BlokliClient {
                             }
                             Some(Ok(SSE::Comment(comment))) => {
                                 tracing::debug!(comment, "SSE comment");
+                                health.transport_activity();
                                 state = SubscriptionState::Active(stream_state);
                             }
                             Some(Ok(SSE::Connected(details))) => {
                                 tracing::debug!(?details, "SSE connection details");
+                                health.transport_activity();
                                 state = SubscriptionState::Active(stream_state);
                             }
                             Some(Err(error)) => {
                                 tracing::warn!(%error, "SSE transport issue detected, continuing subscription");
+                                health.problem(problem_of(&error));
                                 state = SubscriptionState::Active(stream_state);
                             }
                             None => {
@@ -446,18 +480,21 @@ impl BlokliClient {
                                     tracing::warn!(
                                         "SSE stream ended and no restart delay configured, stopping subscription"
                                     );
+                                    health.end(SubscriptionEnd::Completed);
                                     return Ok(None);
                                 }
                             }
                         }
                     } else {
                         tracing::warn!("SSE stream missing, stopping subscription");
+                        health.end(SubscriptionEnd::Failed);
                         return Ok(None);
                     }
                 }
             },
-        )
-        .boxed())
+        );
+
+        Ok((stream.boxed(), handle))
     }
 
     fn build_raw_operation<Q, V>(
@@ -495,6 +532,19 @@ impl BlokliClient {
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
         self.build_raw_operation(op)
+    }
+}
+
+/// What an SSE error says about the subscription.
+fn problem_of(error: &SseError) -> SubscriptionProblem {
+    match error {
+        SseError::TimedOut => SubscriptionProblem::Timeout,
+        SseError::UnexpectedResponse(response, _) => SubscriptionProblem::HttpStatus(response.status()),
+        SseError::Eof => SubscriptionProblem::Closed,
+        SseError::UnexpectedEof | SseError::InvalidLine(_) | SseError::InvalidEvent => {
+            SubscriptionProblem::MalformedEvent
+        }
+        _ => SubscriptionProblem::Transport,
     }
 }
 

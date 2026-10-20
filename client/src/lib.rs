@@ -160,6 +160,7 @@ pub mod api;
 mod client;
 /// Errors returned by the Blokli client.
 pub mod errors;
+pub mod health;
 
 /// Version of the `blokli-client` crate.
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -176,6 +177,10 @@ pub use client::{
     NopStateMutator, SimulatedPolicyOutcome,
 };
 pub use errors::{BlokliClientError, ErrorKind, TrackingErrorKind};
+pub use health::{
+    SubscriptionEnd, SubscriptionHealth, SubscriptionHealthHandle, SubscriptionId, SubscriptionProblem,
+    SubscriptionStatus,
+};
 
 #[cfg(feature = "testing")]
 pub mod internal {
