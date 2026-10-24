@@ -4072,9 +4072,8 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9edbc7eef689f0dde57fb481404f15b671f0877dd75ff1e88c125f19a09efaf7"
+version = "4.1.1"
+source = "git+https://github.com/hoprnet/hopr-types?branch=q-core-1024-jura-prod-safes-wxhopr-allowance-exhausted-all-channel#5df6f2be99433dcb506b79fc11f49583784eab92"
 dependencies = [
  "aes",
  "anyhow",
