@@ -584,8 +584,8 @@ pub trait BlokliQueryClient {
 /// Subscription methods return streams of `Result<T, BlokliClientError>`. The client uses the configured reconnect,
 /// read-timeout, TCP keepalive, and restart-delay options from [`BlokliClientConfig`](crate::BlokliClientConfig).
 /// Transport issues and malformed events are retried internally without a limit and are not yielded. When Blokli
-/// rejects a subscription (an HTTP 4xx answer or GraphQL errors without data), the error is yielded once and the
-/// subscription keeps retrying at the slow pace of
+/// rejects a subscription (an HTTP 4xx answer other than 408, 425 or 429, or GraphQL errors without data), the
+/// error is yielded once and the subscription keeps retrying at the slow pace of
 /// [`stream_reconnect_timeout`](crate::BlokliClientConfig::stream_reconnect_timeout). Errors that cannot be retried
 /// at all are yielded and end the stream. The `*_with_health` variants also return a [`SubscriptionHealthHandle`]
 /// that reports the state of that one subscription.
