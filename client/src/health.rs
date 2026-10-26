@@ -178,6 +178,13 @@ pub struct SubscriptionHealth {
     pub failures: u32,
     /// The most recent problem, kept after recovery.
     pub last_problem: Option<SubscriptionProblem>,
+    /// Number of connections the server accepted so far, the first one included.
+    ///
+    /// It grows with every reconnect. A caller that keeps the last value it saw can tell that the subscription
+    /// reconnected since then, even if the outage was too short to show up in [`status`](Self::status). Updates sent
+    /// while the subscription was disconnected are lost; snapshot-first subscriptions replay the current state after
+    /// reconnecting, but cannot replay what was removed in between.
+    pub connections: u64,
 }
 
 impl SubscriptionHealth {
@@ -189,6 +196,7 @@ impl SubscriptionHealth {
             last_update: None,
             failures: 0,
             last_problem: None,
+            connections: 0,
         }
     }
 
@@ -285,6 +293,7 @@ impl HealthTracker {
     /// This does not end a rejection: a server that refuses the query with GraphQL errors accepts the connection
     /// first.
     pub(crate) fn connected(&mut self) {
+        self.update(|health, _| health.connections = health.connections.saturating_add(1));
         self.record_activity(false);
     }
 
