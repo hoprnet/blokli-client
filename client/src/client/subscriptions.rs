@@ -611,6 +611,7 @@ mod stream_tests {
         assert!(outage > Duration::ZERO);
         assert_eq!(health.failures, 0);
         assert_eq!(health.last_problem, Some(SubscriptionProblem::HttpStatus(503)));
+        assert_eq!(health.connections, 2, "refused connections are not counted");
         assert_eq!(server.connections(), 4);
         Ok(())
     }

@@ -555,6 +555,25 @@ mod tests {
     }
 
     #[test]
+    fn only_new_connections_are_counted() {
+        let (mut tracker, handle) = HealthTracker::new("graph");
+        assert_eq!(handle.get().connections, 0);
+
+        tracker.connected();
+        tracker.transport_activity();
+        tracker.data_update();
+        assert_eq!(
+            handle.get().connections,
+            1,
+            "keepalives and updates are not connections"
+        );
+
+        tracker.problem(SubscriptionProblem::Closed, &"test error");
+        tracker.connected();
+        assert_eq!(handle.get().connections, 2);
+    }
+
+    #[test]
     fn a_subscription_that_never_connected_stalls_from_its_creation() {
         let (tracker, handle) = HealthTracker::new("graph");
         let created = handle.get().status_since;
