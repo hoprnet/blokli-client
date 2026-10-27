@@ -528,6 +528,48 @@ mod tests {
         assert_eq!(body, b"data: hello\n\n");
     }
 
+    // CVE-2026-111497 hits Google's C brotli decoder; the client uses the pure-Rust one,
+    // which must keep decoding valid bodies and reject corrupt ones with an error.
+    #[tokio::test]
+    async fn brotli_responses_decode_and_corrupt_ones_error() {
+        const HELLO_BR: &[u8] = &[0x0b, 0x02, 0x80, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x03];
+        const CORRUPT_BR: &[u8] = &[0x0b, 0x02, 0x80, 0xff, 0xff, 0xff, 0xff, 0x00, 0x13, 0x37];
+
+        let mut server = Server::new_async().await;
+        let _valid = server
+            .mock("GET", "/valid")
+            .with_header("content-encoding", "br")
+            .with_body(HELLO_BR)
+            .create_async()
+            .await;
+        let _corrupt = server
+            .mock("GET", "/corrupt")
+            .with_header("content-encoding", "br")
+            .with_body(CORRUPT_BR)
+            .create_async()
+            .await;
+
+        let client = BlokliClient::new(server.url().parse().expect("valid URL"), BlokliClientConfig::default());
+        let http = client.query_client().expect("query client");
+
+        let body = http
+            .get(format!("{}/valid", server.url()))
+            .send()
+            .await
+            .expect("request should succeed")
+            .text()
+            .await
+            .expect("valid brotli body should decode");
+        assert_eq!(body, "hello");
+
+        let corrupt = http.get(format!("{}/corrupt", server.url())).send().await;
+        let result = match corrupt {
+            Ok(response) => response.bytes().await.map(|_| ()),
+            Err(error) => Err(error),
+        };
+        assert!(result.is_err(), "corrupt brotli body must fail to decode");
+    }
+
     #[tokio::test]
     async fn reqwest_transport_returns_error_for_invalid_request_uri() {
         let transport = ReqwestTransport::new(reqwest::Client::new());
