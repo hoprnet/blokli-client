@@ -715,6 +715,7 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
     let payload = serde_json::json!({
         "data": {
             "openedChannelGraphUpdated": {
+                "cursor": null,
                 "channel": {
                     "balance": "0 wxHOPR",
                     "closureTime": null,
