@@ -32,4 +32,11 @@ ignore = [
   # RUSTSEC-2026-0253: lru unsound
   # Crate: lru 0.16.4
   "RUSTSEC-2026-0253",
+
+  # RUSTSEC-2026-0387: crypto-bigint timing variability in constant-time operations
+  # Crate: crypto-bigint 0.5.5 (the 0.7.x instance was bumped to 0.7.10 in Cargo.lock)
+  # Transitive: alloy-signer 2.5.0 -> k256 0.13.4 -> elliptic-curve 0.13.8 -> crypto-bigint 0.5
+  # Status: no fix released for the 0.5 line; alloy 2.5.0 is the newest release and still pins k256 0.13.
+  # Review by: 2026-12-31
+  "RUSTSEC-2026-0387",
 ]
