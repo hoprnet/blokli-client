@@ -2,50 +2,28 @@
 # All exceptions tracked under blokli-dependencies tracking ID
 # Owner: blokli-team
 # Review cycle: Quarterly (next review by dates listed)
-
 ignore = [
-  # RUSTSEC-2024-0388: derivative unmaintained
-  # Crate: derivative 2.2.0
-  # Transitive: ark-ff -> alloy/hopr-bindings
-  # Status: Macro library for cryptographic operations. No suitable alternative.
-  # Review by: 2026-06-30
-  "RUSTSEC-2024-0388",
+  "RUSTSEC-2024-0388", # derivative 2.2.0; transitive via ark-ff -> alloy/hopr-bindings
+  "RUSTSEC-2024-0436", # paste 1.0.15; transitive via syn-solidity -> alloy
+  "RUSTSEC-2024-0449", # unsafe-libyaml; transitive via serde_yaml
+  "RUSTSEC-2026-0173", # proc-macro-error2 2.0.1; via hopr-bindings -> alloy-sol-macro
+  "RUSTSEC-2026-0221", # event-listener 5.4.1; transitive dependency
+  "RUSTSEC-2026-0253", # lru 0.16.4; transitive dependency
+  "RUSTSEC-2026-0387", # crypto-bigint 0.5.x; transitive through cryptography dependencies
 
-  # RUSTSEC-2024-0436: paste unmaintained
-  # Crate: paste 1.0.15
-  # Transitive: syn-solidity -> alloy
-  # Status: Macro library for Solidity type generation. No runtime impact.
-  # Review by: 2026-06-30
-  "RUSTSEC-2024-0436",
-
-  # RUSTSEC-2026-0173: proc-macro-error2 unmaintained
-  # Crate: proc-macro-error2 2.0.1
-  # Transitive: hopr-bindings -> alloy -> alloy-sol-macro (proc-macro-error2)
-  # Status: Build-time proc-macro only; no runtime impact. Track upstream for a maintained replacement.
-  # Review by: 2026-06-30
-  "RUSTSEC-2026-0173",
-
-  # RUSTSEC-2026-0221: event-listener unsound
-  # Crate: event-listener 5.4.1
-  "RUSTSEC-2026-0221",
-
-  # RUSTSEC-2026-0253: lru unsound
-  # Crate: lru 0.16.4
-  "RUSTSEC-2024-0449", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0253",
-  "RUSTSEC-2026-0387", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0391", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0395", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0396", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0397", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0398", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0399", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0400", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0401", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0402", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0403", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0404", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0405", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0406", # legacy release branch; dependency upgrade requires coordinated migration
-  "RUSTSEC-2026-0410", # legacy release branch; dependency upgrade requires coordinated migration
+  # zstd 0.13 / zstd-safe 7.x; transitive compression dependency.
+  "RUSTSEC-2026-0391", # zstd
+  "RUSTSEC-2026-0395", # zstd-safe
+  "RUSTSEC-2026-0396", # zstd-safe
+  "RUSTSEC-2026-0397", # zstd-safe
+  "RUSTSEC-2026-0398", # zstd-safe
+  "RUSTSEC-2026-0399", # zstd-safe
+  "RUSTSEC-2026-0400", # zstd-safe
+  "RUSTSEC-2026-0401", # zstd-safe
+  "RUSTSEC-2026-0402", # zstd-safe
+  "RUSTSEC-2026-0403", # zstd-safe
+  "RUSTSEC-2026-0404", # zstd-safe
+  "RUSTSEC-2026-0405", # zstd-safe
+  "RUSTSEC-2026-0406", # zstd-safe
+  "RUSTSEC-2026-0410", # zstd-sys
 ]
