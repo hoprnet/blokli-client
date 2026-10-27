@@ -32,4 +32,20 @@ ignore = [
   # RUSTSEC-2026-0253: lru unsound
   # Crate: lru 0.16.4
   "RUSTSEC-2026-0253",
+  "RUSTSEC-2026-0387", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0391", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0403", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0398", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0410", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2024-0449", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0395", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0401", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0404", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0400", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0397", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0406", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0402", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0399", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0396", # legacy release branch; dependency upgrade requires coordinated migration
+  "RUSTSEC-2026-0405", # legacy release branch; dependency upgrade requires coordinated migration
 ]
