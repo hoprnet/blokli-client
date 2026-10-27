@@ -51,7 +51,7 @@ impl Formats {
     pub fn serialize<T: serde::Serialize>(&self, value: T) -> anyhow::Result<String> {
         match self {
             Formats::Json => Ok(serde_json::to_string_pretty(&value)?),
-            Formats::Yaml => Ok(serde_yaml::to_string(&value)?),
+            Formats::Yaml => Ok(serde_norway::to_string(&value)?),
             Formats::Table => table::serialize(value),
         }
     }
