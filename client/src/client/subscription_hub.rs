@@ -50,9 +50,14 @@ use crate::{
 /// Debounce applied before opening a connection so subscriptions registered in a burst share one document.
 const SLOT_CHANGE_DEBOUNCE: Duration = Duration::from_millis(25);
 
+/// Longest time a stream of slot changes can postpone opening a connection.
+const MAX_SLOT_CHANGE_WAIT: Duration = Duration::from_millis(250);
+
 /// Per-subscription queue depth. A slot that falls this far behind loses events instead of stalling the connection,
-/// and is resynchronised once it has caught up.
-const SLOT_CHANNEL_CAPACITY: usize = 1024;
+/// and is resynchronised once it has caught up. It has to hold the initial state of a subscription, such as one
+/// event per open channel, or a consumer slower than the network loses that state on every resynchronisation.
+/// The queue allocates as it fills, so an unused capacity costs no memory.
+const SLOT_CHANNEL_CAPACITY: usize = 16_384;
 
 /// Number of deregistered aliases tolerated in a live document before the connection is rebuilt.
 const MAX_STALE_ALIASES: usize = 32;
@@ -648,6 +653,8 @@ impl HubShared {
 
     /// Waits until the registered slot set is stable, then assembles the document to connect with.
     async fn prepare(&self, scope: Scope, generation: &mut watch::Receiver<u64>) -> Option<Connection> {
+        let wait_until = tokio::time::Instant::now() + MAX_SLOT_CHANGE_WAIT;
+
         loop {
             let slots = self.snapshot(scope);
             if slots.is_empty() {
@@ -655,8 +662,8 @@ impl HubShared {
             }
 
             // Only the shared connection of a client's hub gathers several subscriptions; any other one carries
-            // a single slot and has nothing to wait for.
-            if scope == Scope::Shared && !self.dedicated {
+            // a single slot and has nothing to wait for. Continuous changes do not postpone the connection forever.
+            if scope == Scope::Shared && !self.dedicated && tokio::time::Instant::now() < wait_until {
                 match tokio::time::timeout(SLOT_CHANGE_DEBOUNCE, generation.changed()).await {
                     Ok(Ok(())) => continue,
                     Ok(Err(_)) => return None,
@@ -1357,7 +1364,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use futures::{StreamExt, executor::block_on};
+    use futures::{FutureExt, StreamExt, executor::block_on};
     use serde_json::json;
     use tokio::{
         sync::mpsc,
@@ -1365,8 +1372,9 @@ mod tests {
     };
 
     use super::{
-        Scope, SlotEntry, SlotId, SlotSnapshot, SlotTarget, SubscriptionHub, SubscriptionSpec, build_connection,
-        decode, matching_paren, rename_variables, route, split_document,
+        MAX_SLOT_CHANGE_WAIT, SLOT_CHANNEL_CAPACITY, Scope, SlotEntry, SlotId, SlotSnapshot, SlotTarget,
+        SubscriptionHub, SubscriptionSpec, build_connection, decode, matching_paren, rename_variables, route,
+        split_document,
     };
     use crate::{
         SubscriptionEnd, SubscriptionProblem, SubscriptionStatus,
@@ -1669,6 +1677,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn continuous_registrations_do_not_postpone_the_connection_forever() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![Step::Hang])]).await?;
+        let client = BlokliClient::new(server.url(), config());
+        let started = Instant::now();
+        let mut streams = Vec::new();
+
+        // Every registration comes before the debounce of the previous one has passed.
+        while started.elapsed() < MAX_SLOT_CHANGE_WAIT * 3 && server.connections() == 0 {
+            let mut channels = client.subscribe_channels(channel_selector())?;
+            assert!(channels.next().now_or_never().is_none());
+            streams.push(channels);
+            sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(
+            server.connections() > 0,
+            "no connection after {} registrations",
+            streams.len()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn adding_a_subscription_rebuilds_the_document() -> anyhow::Result<()> {
         let server = SseTestServer::start(vec![
             Connection::ok(vec![event(&channel_event("s0", "0x01")), Step::Hang]),
@@ -1853,7 +1885,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_consumer_is_reported_and_resynchronised_once_it_catches_up() -> anyhow::Result<()> {
         let mut flood = vec![event(&channel_event("s0", "0x00"))];
-        flood.extend((0..1100).map(|_| event(&channel_event("s0", "0x01"))));
+        flood.extend((0..SLOT_CHANNEL_CAPACITY + 100).map(|_| event(&channel_event("s0", "0x01"))));
         // Traffic on the connection says nothing about the consumer, which is still behind.
         flood.push(keepalive());
         flood.push(Step::Hang);
