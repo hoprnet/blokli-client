@@ -1,6 +1,6 @@
 use std::{net::IpAddr, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
@@ -11,7 +11,7 @@ use blokli_client::{
 use futures::StreamExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 use url::Url;
 
@@ -204,6 +204,7 @@ async fn subscribe_health_streams_state_updates() -> Result<()> {
         let body = events.iter().map(ReadinessEvent::format_event).collect::<String>();
         let response = format_sse_response(&body);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response.as_bytes()).await?;
         conn.shutdown().await?;
         Ok::<_, anyhow::Error>(())
@@ -587,6 +588,7 @@ async fn spawn_reconnecting_server(
 
         for response in responses {
             let (mut conn, _) = listener.accept().await?;
+            read_http_request(&mut conn).await?;
             conn.write_all(response.as_bytes()).await?;
             conn.shutdown().await?;
         }
@@ -609,7 +611,7 @@ async fn spawn_dns_override_streaming_server(
     let server = tokio::spawn(async move {
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
-        let request = read_http_request_head(&mut conn).await?;
+        let request = read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(request)
@@ -618,21 +620,32 @@ async fn spawn_dns_override_streaming_server(
     Ok((base_url, server))
 }
 
-async fn read_http_request_head(conn: &mut tokio::net::TcpStream) -> Result<String> {
+/// Consume the complete POST before replying so closing the socket cannot discard unread request bytes.
+async fn read_http_request(conn: &mut TcpStream) -> Result<String> {
     let mut buf = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 1024];
+    let mut chunk = [0_u8; 4096];
+    let head_end = loop {
         let n = conn.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
+        ensure!(n > 0, "connection closed before the request head ended");
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
+        if let Some(position) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
         }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+    let body_len = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .map(|value| value.trim().parse::<usize>())
+        .transpose()?
+        .unwrap_or(0);
+    while buf.len() < head_end + body_len {
+        let n = conn.read(&mut chunk).await?;
+        ensure!(n > 0, "connection closed before the request body ended");
+        buf.extend_from_slice(&chunk[..n]);
     }
 
-    Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase())
+    Ok(head)
 }
 
 async fn spawn_delayed_streaming_server(
@@ -653,6 +666,7 @@ async fn spawn_delayed_streaming_server(
         .to_string();
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(initial_delay).await;
         conn.write_all(body.as_bytes()).await?;
@@ -680,11 +694,13 @@ async fn spawn_timed_out_then_reconnecting_server(
         .to_string();
 
         let (mut first_conn, _) = listener.accept().await?;
+        read_http_request(&mut first_conn).await?;
         first_conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         first_conn.shutdown().await?;
 
         let (mut second_conn, _) = listener.accept().await?;
+        read_http_request(&mut second_conn).await?;
         let body = format_ticket_params_events(&[event]);
         second_conn
             .write_all(format!("{response_headers}{body}").as_bytes())
@@ -703,6 +719,7 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
 
     let server = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(())
