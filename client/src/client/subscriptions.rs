@@ -457,7 +457,7 @@ mod stream_tests {
         api::{BlokliSubscriptionClient, types::ReadinessState},
     };
 
-    const READY: &str = r#"{"data":{"health":"READY"}}"#;
+    const READY: &str = r#"{"data":{"s0":"READY"}}"#;
     /// Cut off mid-object, as a truncated frame would be.
     const TRUNCATED: &str = r#"{"data":{"heal"#;
 
@@ -593,7 +593,9 @@ mod stream_tests {
 
         let first = timeout(Duration::from_secs(5), stream.next()).await?;
         assert!(matches!(first, Some(Ok(ReadinessState::Ready))), "got {first:?}");
-        assert_eq!(health.get().status, SubscriptionStatus::Healthy);
+        // The connection keeps reading while the caller is not polling, so the outage that follows this update may
+        // already have started.
+        assert_eq!(health.get().connections, 1);
         assert!(health.get().last_update.is_some());
 
         let mut seen = Vec::new();

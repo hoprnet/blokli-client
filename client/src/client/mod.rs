@@ -1,6 +1,7 @@
 mod queries;
 #[cfg(test)]
 mod sse_test_server;
+mod subscription_hub;
 mod subscriptions;
 #[cfg(feature = "testing")]
 mod testing;
@@ -12,17 +13,15 @@ use std::{
     io,
     net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use cynic::GraphQlResponse;
-use eventsource_client::{Client, Error as SseError, ReconnectOptionsBuilder, SSE};
-use futures::{
-    StreamExt, TryFutureExt, TryStreamExt,
-    future::{Either, select},
-};
+use eventsource_client::Error as SseError;
+use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use launchdarkly_sdk_transport::{ByteStream, HttpTransport, ResponseFuture, TransportError};
 use reqwest::redirect::Policy as RedirectPolicy;
+use subscription_hub::{SlotEvent, SubscriptionHub, SubscriptionSpec};
 #[cfg(feature = "testing")]
 pub use testing::{
     BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, NopStateMutator,
@@ -32,7 +31,7 @@ pub use testing::{
 use crate::{
     api::VERSION,
     errors::{BlokliClientError, ErrorKind},
-    health::{HealthTracker, SubscriptionEnd, SubscriptionHealthHandle, SubscriptionProblem},
+    health::{HealthTracker, SubscriptionHealthHandle, SubscriptionProblem},
 };
 
 const MIN_RECONNECTION_DELAY: Duration = Duration::from_millis(1);
@@ -104,87 +103,6 @@ pub struct BlokliClientConfig {
     pub dns_override: Option<BlokliDnsOverride>,
 }
 
-/// Internal state for managing GraphQL subscription streams.
-struct SubscriptionStreamState {
-    graphql_url: url::Url,
-    query: String,
-    cfg: BlokliClientConfig,
-    reqwest_client: reqwest::Client,
-    stream: Option<eventsource_client::BoxStream<eventsource_client::Result<SSE>>>,
-    /// The wait used after the last malformed event, if the problem is still going on.
-    malformed_event_delay: Option<Duration>,
-}
-
-impl SubscriptionStreamState {
-    fn new(
-        graphql_url: url::Url,
-        query: String,
-        config: BlokliClientConfig,
-        reqwest_client: reqwest::Client,
-        malformed_event_delay: Option<Duration>,
-    ) -> Result<Self, BlokliClientError> {
-        let mut instance = Self {
-            graphql_url,
-            query,
-            cfg: config,
-            reqwest_client,
-            stream: None,
-            malformed_event_delay,
-        };
-
-        instance.start_stream()?;
-
-        Ok(instance)
-    }
-
-    fn start_stream(&mut self) -> Result<(), BlokliClientError> {
-        let sse_err = |e| ErrorKind::Subscription(Box::new(e));
-        let initial_reconnect_delay = self
-            .cfg
-            .stream_reconnect_timeout
-            .min(Duration::from_secs(2))
-            .max(MIN_RECONNECTION_DELAY);
-        let client = eventsource_client::ClientBuilder::for_url(self.graphql_url.as_str())
-            .map_err(sse_err)?
-            .header("Accept", "text/event-stream")
-            .map_err(sse_err)?
-            .header("Content-Type", "application/json")
-            .map_err(sse_err)?
-            .header("X-Blokli-Schema-Version", &SCHEMA_VERSION.to_string())
-            .map_err(sse_err)?
-            .method("POST".into())
-            .body(self.query.clone())
-            .redirect_limit(REDIRECT_LIMIT as u32)
-            .reconnect(
-                ReconnectOptionsBuilder::new(true)
-                    .retry_initial(true)
-                    .delay(initial_reconnect_delay)
-                    .backoff_factor(2)
-                    .delay_max(self.cfg.stream_reconnect_timeout)
-                    .build(),
-            )
-            .build_with_transport(ReqwestTransport::new(self.reqwest_client.clone()));
-
-        self.stream = Some(client.stream());
-        Ok(())
-    }
-
-    /// The wait before reconnecting after a malformed event: the restart delay at first, then doubling up to
-    /// [`stream_reconnect_timeout`](BlokliClientConfig::stream_reconnect_timeout) while the events stay malformed.
-    fn next_malformed_event_delay(&mut self) -> Duration {
-        let first = self
-            .cfg
-            .subscription_stream_restart_delay
-            .unwrap_or(DEFAULT_MALFORMED_EVENT_DELAY)
-            .max(MIN_RECONNECTION_DELAY);
-        let delay = self.malformed_event_delay.map_or(first, |last| {
-            last.saturating_mul(2).min(self.cfg.stream_reconnect_timeout.max(first))
-        });
-        self.malformed_event_delay = Some(delay);
-        delay
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
@@ -241,6 +159,8 @@ pub struct BlokliClient {
     // Shared by all clones so requests reuse pooled connections instead of paying a TLS handshake each
     query_client: Arc<OnceLock<reqwest::Client>>,
     subscription_client: Arc<OnceLock<reqwest::Client>>,
+    // Shared by all clones so one client holds one SSE connection for all of its subscriptions
+    subscriptions: SubscriptionHub,
 }
 
 const REDIRECT_LIMIT: usize = 3;
@@ -251,11 +171,14 @@ pub struct GraphQlQueries;
 impl BlokliClient {
     /// Creates a new instance given Blokli base URL and configuration.
     pub fn new(base_url: url::Url, cfg: BlokliClientConfig) -> Self {
+        let subscriptions = SubscriptionHub::new(base_url.clone(), cfg.clone());
+
         Self {
             base_url,
             cfg,
             query_client: Arc::default(),
             subscription_client: Arc::default(),
+            subscriptions,
         }
     }
 
@@ -278,11 +201,7 @@ impl BlokliClient {
     }
 
     fn graphql_url(&self) -> Result<url::Url, BlokliClientError> {
-        let mut base = self.base_url.clone();
-        if !base.path().ends_with('/') {
-            base.set_path(&format!("{}/", base.path()));
-        }
-        Ok(base.join("graphql").map_err(ErrorKind::from)?)
+        derive_graphql_url(&self.base_url)
     }
 
     fn apply_dns_override(&self, builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BlokliClientError> {
@@ -360,6 +279,9 @@ impl BlokliClient {
     /// Opens the subscription `op` and returns its stream together with its health.
     ///
     /// `name` says what the subscription is for; it identifies the subscription in health reports.
+    ///
+    /// All subscriptions of one client share a single SSE connection, so this registers a slot on the client's hub
+    /// instead of opening a connection of its own.
     fn build_subscription_stream<Q, V>(
         &self,
         op: cynic::StreamingOperation<Q, V>,
@@ -375,223 +297,20 @@ impl BlokliClient {
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let query = serde_json::to_string(&op).map_err(ErrorKind::from)?;
-        let graphql_url = self.graphql_url()?;
+        let spec = SubscriptionSpec::new(op)?;
         let reqwest_client = self.subscription_client()?;
-
-        struct PendingSubscriptionState {
-            graphql_url: url::Url,
-            query: String,
-            cfg: BlokliClientConfig,
-            reqwest_client: reqwest::Client,
-            malformed_event_delay: Option<Duration>,
-        }
-
-        impl From<Box<SubscriptionStreamState>> for PendingSubscriptionState {
-            fn from(state: Box<SubscriptionStreamState>) -> Self {
-                Self {
-                    graphql_url: state.graphql_url,
-                    query: state.query,
-                    cfg: state.cfg,
-                    reqwest_client: state.reqwest_client,
-                    malformed_event_delay: state.malformed_event_delay,
-                }
-            }
-        }
-
-        enum SubscriptionState {
-            Pending(Box<PendingSubscriptionState>),
-            Active(Box<SubscriptionStreamState>),
-            /// The server rejected the subscription; wait the slow interval, then reconnect.
-            Rejected(Box<PendingSubscriptionState>),
-            /// An error that cannot be retried was yielded; the stream ends.
-            Finished,
-        }
-
         let (health, handle) = HealthTracker::new(name);
-        // The query itself is not logged: it can be long, and the subscription name says what it is for.
-        tracing::debug!(subscription = %health.subscription(), "opening SSE subscription");
 
-        let stream = futures::stream::unfold(
-            (
-                SubscriptionState::Pending(Box::new(PendingSubscriptionState {
-                    graphql_url,
-                    query,
-                    cfg: self.cfg.clone(),
-                    reqwest_client,
-                    malformed_event_delay: None,
-                })),
-                health,
-            ),
-            move |(state, mut health)| async move {
-                let mut state = state;
-
-                loop {
-                    let mut stream_state = match state {
-                        SubscriptionState::Finished => return None,
-                        SubscriptionState::Rejected(pending_state) => {
-                            futures_time::task::sleep(rejected_retry_delay(&pending_state.cfg).into()).await;
-                            state = SubscriptionState::Pending(pending_state);
-                            continue;
-                        }
-                        SubscriptionState::Pending(pending_state) => {
-                            match SubscriptionStreamState::new(
-                                pending_state.graphql_url,
-                                pending_state.query,
-                                pending_state.cfg,
-                                pending_state.reqwest_client,
-                                pending_state.malformed_event_delay,
-                            ) {
-                                Ok(stream_state) => state = SubscriptionState::Active(Box::new(stream_state)),
-                                Err(error) => {
-                                    health.end(SubscriptionEnd::Failed);
-                                    return Some((Err(error), (SubscriptionState::Finished, health)));
-                                }
-                            }
-                            continue;
-                        }
-                        SubscriptionState::Active(stream_state) => stream_state,
-                    };
-
-                    let Some(stream) = &mut stream_state.stream else {
-                        tracing::warn!(subscription = %health.subscription(), "SSE stream missing, stopping subscription");
-                        health.end(SubscriptionEnd::Failed);
-                        return None;
-                    };
-
-                    // Waits for the next item, but no longer than until the subscription would count as stalled,
-                    // so a silent connection is reported without needing an error to arrive.
-                    let stall_deadline = stream_state
-                        .cfg
-                        .subscription_stall_threshold
-                        .and_then(|threshold| health.stall_deadline(threshold));
-                    let next = match stall_deadline {
-                        Some(deadline) => {
-                            let wait = deadline.saturating_duration_since(Instant::now());
-                            match select(stream.next(), Box::pin(futures_time::task::sleep(wait.into()))).await {
-                                Either::Left((next, _)) => next,
-                                Either::Right(_) => {
-                                    health.stalled();
-                                    state = SubscriptionState::Active(stream_state);
-                                    continue;
-                                }
-                            }
-                        }
-                        None => stream.next().await,
-                    };
-
-                    match next {
-                        Some(Ok(SSE::Event(event))) => {
-                            // The payload is not logged: it can be large, and it is the caller's data.
-                            tracing::trace!(
-                                subscription = %health.subscription(),
-                                event_type = %event.event_type,
-                                bytes = event.data.len(),
-                                "SSE event"
-                            );
-                            // Scoped so the decoded value, which need not be `Send`, is gone before any wait.
-                            let error = {
-                                let decoded = match serde_json::from_str::<GraphQlResponse<Q>>(&event.data) {
-                                    Ok(response) => response_to_data(response),
-                                    Err(error) => Err(error.into()),
-                                };
-                                match decoded {
-                                    Ok(data) => {
-                                        stream_state.malformed_event_delay = None;
-                                        health.data_update();
-                                        return Some((Ok(data), (SubscriptionState::Active(stream_state), health)));
-                                    }
-                                    Err(error) => error,
-                                }
-                            };
-
-                            if matches!(error.kind(), ErrorKind::GraphQLError(_)) {
-                                // Blokli refused the query itself. Asking again right away gets the same answer.
-                                let first = health.reject(
-                                    SubscriptionProblem::GraphQl,
-                                    &error,
-                                    rejected_retry_delay(&stream_state.cfg),
-                                );
-                                let next_state = SubscriptionState::Rejected(Box::new(stream_state.into()));
-                                if first {
-                                    return Some((Err(error), (next_state, health)));
-                                }
-                                state = next_state;
-                                continue;
-                            }
-
-                            // A broken event says nothing about the subscription itself. Reconnecting makes the
-                            // server replay its snapshot, so the lost update is not silently missed; the growing
-                            // wait keeps a server that keeps sending broken data from being hit in a tight loop.
-                            health.problem(SubscriptionProblem::MalformedEvent, &error);
-                            let delay = stream_state.next_malformed_event_delay();
-                            tracing::debug!(
-                                subscription = %health.subscription(),
-                                bytes = event.data.len(),
-                                ?delay,
-                                "reconnecting after a malformed SSE event"
-                            );
-                            futures_time::task::sleep(delay.into()).await;
-                            state = SubscriptionState::Pending(Box::new(stream_state.into()));
-                        }
-                        Some(Ok(SSE::Comment(_))) => {
-                            tracing::trace!(subscription = %health.subscription(), "SSE keepalive");
-                            health.transport_activity();
-                            state = SubscriptionState::Active(stream_state);
-                        }
-                        Some(Ok(SSE::Connected(details))) => {
-                            // Only the status: the response headers may carry cookies or other server details.
-                            tracing::debug!(
-                                subscription = %health.subscription(),
-                                status = details.response().status(),
-                                "SSE connection established"
-                            );
-                            health.connected();
-                            state = SubscriptionState::Active(stream_state);
-                        }
-                        Some(Err(error)) => {
-                            let problem = problem_of(&error);
-                            if let SubscriptionProblem::HttpStatus(status) = problem
-                                && is_rejection(status)
-                            {
-                                // Retrying a refusal at the normal reconnect pace only adds load; retry slowly
-                                // instead, so the subscription still comes back without a restart once the server
-                                // accepts it again.
-                                let first =
-                                    health.reject(problem, &describe(&error), rejected_retry_delay(&stream_state.cfg));
-                                let next_state = SubscriptionState::Rejected(Box::new(stream_state.into()));
-                                if first {
-                                    let error = BlokliClientError::from(ErrorKind::Subscription(Box::new(error)));
-                                    return Some((Err(error), (next_state, health)));
-                                }
-                                state = next_state;
-                            } else {
-                                health.problem(problem, &describe(&error));
-                                state = SubscriptionState::Active(stream_state);
-                            }
-                        }
-                        None => {
-                            if let Some(delay) = stream_state.cfg.subscription_stream_restart_delay {
-                                let actual_delay = delay.max(MIN_RECONNECTION_DELAY);
-                                // The error that closed it was already reported.
-                                tracing::debug!(
-                                    subscription = %health.subscription(),
-                                    ?actual_delay,
-                                    "SSE stream ended, restarting it"
-                                );
-                                futures_time::task::sleep(actual_delay.into()).await;
-                                state = SubscriptionState::Pending(Box::new(stream_state.into()));
-                            } else {
-                                health.end(SubscriptionEnd::Completed);
-                                return None;
-                            }
-                        }
-                    }
-                }
-            },
-        );
-
-        Ok((stream.boxed(), handle))
+        Ok((
+            self.subscriptions
+                .subscribe(spec, health, reqwest_client)
+                .map(|event| match event {
+                    SlotEvent::Data(payload) => serde_json::from_value::<Q>(payload).map_err(BlokliClientError::from),
+                    SlotEvent::Error(error) => Err(error),
+                })
+                .boxed(),
+            handle,
+        ))
     }
 
     fn build_raw_operation<Q, V>(
@@ -630,6 +349,15 @@ impl BlokliClient {
     {
         self.build_raw_operation(op)
     }
+}
+
+/// Derives the GraphQL endpoint URL from a Blokli base URL.
+fn derive_graphql_url(base_url: &url::Url) -> Result<url::Url, BlokliClientError> {
+    let mut base = base_url.clone();
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    Ok(base.join("graphql").map_err(ErrorKind::from)?)
 }
 
 /// What an SSE error says about the subscription.

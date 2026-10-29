@@ -10,8 +10,9 @@
 //!   never makes a subscription unhealthy; only the caller can tell whether its data is too old.
 //!
 //! The handle is a cheap shared snapshot, not a channel. Read it with [`SubscriptionHealthHandle::get`] when the
-//! state is needed, for example on a timer. The state is updated while the subscription stream is being polled; a
-//! stream that is not polled does not read from its connection either, and its health keeps the last known value.
+//! state is needed, for example on a timer. The state follows the client's connection to Blokli, not the polling of
+//! the subscription stream: all subscriptions of one client share one connection, which the client keeps reading
+//! whether or not a stream is being polled at that moment.
 //!
 //! Retries are not limited: a degraded subscription keeps reconnecting until it recovers or its stream is dropped.
 //!
@@ -277,10 +278,6 @@ impl HealthTracker {
             },
             handle,
         )
-    }
-
-    pub(crate) fn subscription(&self) -> SubscriptionId {
-        self.subscription
     }
 
     /// The connection delivered a keepalive or an event.

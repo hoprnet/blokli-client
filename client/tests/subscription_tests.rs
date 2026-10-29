@@ -34,7 +34,7 @@ impl ReadinessEvent {
     fn format_event(&self) -> String {
         let payload = serde_json::json!({
             "data": {
-                "health": match self.0 {
+                "s0": match self.0 {
                     ReadinessState::Ready => "READY",
                     ReadinessState::NotReady => "NOT_READY",
                     other => panic!("tests never emit {other:?}"),
@@ -49,7 +49,7 @@ impl TicketParams {
     fn format_event(&self) -> String {
         let payload = serde_json::json!({
             "data": {
-                "ticketParametersUpdated": {
+                "s0": {
                     "minTicketWinningProbability": self.min_ticket_winning_probability,
                     "ticketPrice": self.ticket_price,
                 }
@@ -308,7 +308,7 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
 #[tokio::test]
 async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result<()> {
     let body = format_curvy_event(
-        "curvyPendingNote",
+        "s0",
         serde_json::json!({
             "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
             "ephemeralKey": ["11", "12"],
@@ -445,7 +445,7 @@ async fn subscribe_services_forwards_a_deregistration_without_an_entry() -> Resu
 #[tokio::test]
 async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Result<()> {
     let body = format_curvy_event(
-        "curvyCommittedNote",
+        "s0",
         serde_json::json!({
             "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
             "batchIndex": "0x0000000000000000000000000000000000000000000000000000000000000009",
@@ -486,7 +486,7 @@ async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Resul
 async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()> {
     let payload = serde_json::json!({
         "data": {
-            "serviceTypeUpdated": {
+            "s0": {
                 "kind": "REGISTRY_POINTER_CHANGED",
                 "serviceType": null,
                 "config": null,
@@ -524,7 +524,7 @@ async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()>
 async fn subscribe_service_registry_config_forwards_complete_state() -> Result<()> {
     let payload = serde_json::json!({
         "data": {
-            "serviceRegistryConfigUpdated": {
+            "s0": {
                 "typeRegistrationFee": "1 wxHOPR",
                 "nodeSafeRegistry": "0x5555555555555555555555555555555555555555",
             },
@@ -548,7 +548,7 @@ async fn subscribe_service_registry_config_forwards_complete_state() -> Result<(
 fn format_service_event(kind: &str, entry: Option<serde_json::Value>) -> String {
     let payload = serde_json::json!({
         "data": {
-            "serviceUpdated": {
+            "s0": {
                 "kind": kind,
                 "serviceType": "gvpn:exit",
                 "node": "0x1111111111111111111111111111111111111111",
@@ -562,7 +562,7 @@ fn format_service_event(kind: &str, entry: Option<serde_json::Value>) -> String 
 fn format_transaction_event(status: &str) -> String {
     let payload = serde_json::json!({
         "data": {
-            "transactionUpdated": {
+            "s0": {
                 "id": "tx-1",
                 "status": status,
                 "submittedAt": "2026-10-07T00:00:00Z",
@@ -714,7 +714,7 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
 fn format_graph_event(channel_id: &str, status: &str) -> String {
     let payload = serde_json::json!({
         "data": {
-            "openedChannelGraphUpdated": {
+            "s0": {
                 "channel": {
                     "balance": "0 wxHOPR",
                     "closureTime": null,
@@ -746,10 +746,10 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
 }
 
 #[cfg(feature = "curvy")]
-fn format_curvy_event(field: &str, note: serde_json::Value) -> String {
+fn format_curvy_event(alias: &str, note: serde_json::Value) -> String {
     let payload = serde_json::json!({
         "data": {
-            (field): note,
+            (alias): note,
         },
     });
     format!("event: next\ndata: {payload}\n\n")

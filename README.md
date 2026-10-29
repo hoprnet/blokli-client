@@ -25,7 +25,7 @@ async fn query_version() -> Result<String, Box<dyn std::error::Error>> {
 Common public items are re-exported at the crate root:
 
 - `BlokliQueryClient`: one-shot GraphQL queries
-- `BlokliSubscriptionClient`: SSE-backed subscriptions
+- `BlokliSubscriptionClient`: SSE-backed subscriptions, all sharing one SSE connection per client
 - `BlokliTransactionClient`: signed transaction submission and tracking
 - selector types such as `AccountSelector`, `ChannelSelector`, `SafeSelector`, `ServiceSelector`, and `TicketSelector`
 - response models under `blokli_client::types`

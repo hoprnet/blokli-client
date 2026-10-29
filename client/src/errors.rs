@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use cynic::http::CynicReqwestError;
 
 /// Error type for the Blokli client.
@@ -5,8 +7,11 @@ use cynic::http::CynicReqwestError;
 /// Most public methods return this type for transport failures, GraphQL errors, Blokli application errors, parsing
 /// failures, invalid local inputs, and transaction tracking failures. Use [`BlokliClientError::kind`] to inspect the
 /// stable [`ErrorKind`] category.
-#[derive(Debug)]
-pub struct BlokliClientError(Box<ErrorKind>);
+///
+/// Cloning an error is cheap and shares the underlying [`ErrorKind`], which lets one connection-level failure be
+/// reported to every subscription stream that depends on it.
+#[derive(Clone, Debug)]
+pub struct BlokliClientError(Arc<ErrorKind>);
 
 impl BlokliClientError {
     /// Returns the reference to [`ErrorKind`].
@@ -17,7 +22,7 @@ impl BlokliClientError {
 
 impl<T: Into<ErrorKind>> From<T> for BlokliClientError {
     fn from(kind: T) -> Self {
-        Self(Box::new(kind.into()))
+        Self(Arc::new(kind.into()))
     }
 }
 
