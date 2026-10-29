@@ -14,8 +14,7 @@ use blokli_integration_tests::{
 use eventsource_client::{Client, ClientBuilder, SSE};
 use futures::stream::StreamExt;
 use futures_time::{future::FutureExt as FutureTimeoutExt, time::Duration as FuturesDuration};
-use hex::{FromHex, ToHex};
-use hopr_bindings::exports::alloy::primitives::U256;
+use hex::ToHex;
 use hopr_types::{
     crypto::{keypairs::Keypair, types::Hash},
     internal::{
@@ -640,12 +639,10 @@ async fn subscribe_account_no_duplicate_initial_state(#[future(awt)] fixture: In
 async fn subscribe_transaction_status_updates(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     // 1. Build and submit transaction
     let [sender, recipient] = fixture.sample_accounts::<2>();
-    let tx_value = U256::from(1_000_000u128); // 0.000000000001 ETH
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
-
-    let raw_tx = fixture.build_raw_tx(tx_value, sender, recipient, nonce).await?;
-    let signed_bytes =
-        Vec::from_hex(raw_tx.trim_start_matches("0x")).map_err(|e| anyhow!("failed to decode raw transaction: {e}"))?;
+    let signed_bytes = fixture
+        .build_allowed_token_approval_tx(sender, recipient, nonce)
+        .await?;
 
     // 2. Submit and get tracking ID
     let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
