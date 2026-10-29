@@ -83,10 +83,12 @@
 //! - **Repeated items:** Blokli sends no event IDs and sends its current snapshot after each reconnect. The stream can
 //!   return the same items again. Handle them safely, for example by updating existing records by key.
 //!
-//! All subscriptions of one client share a single SSE connection. The client combines the registered subscriptions
-//! into one GraphQL document with an aliased root field per subscription and routes every incoming payload back to the
-//! stream that requested it. Consequences worth knowing:
+//! The long-running subscriptions of one client share a single SSE connection. The client combines them into one
+//! GraphQL document with an aliased root field per subscription and routes every incoming payload back to the stream
+//! that requested it. [`subscribe_health`](BlokliSubscriptionClient::subscribe_health) and transaction tracking each
+//! open a connection of their own instead. Consequences worth knowing:
 //!
+//! - Subscriptions require a Tokio runtime: the client reads the shared connection in a Tokio task.
 //! - A subscription registers when its stream is first polled. Subscriptions that are polled together, for example
 //!   with [`futures::join!`](futures::join) or by separate tasks started at the same time, share one connection. A
 //!   subscription created later joins the existing connection by reconnecting with the extended document, which
@@ -94,10 +96,11 @@
 //!   re-established.
 //! - Dropping the last subscription closes the connection. Dropping one of several subscriptions keeps the others on
 //!   the same connection.
-//! - A slow consumer loses events instead of stalling the subscriptions of other streams.
-//! - While a Blokli instance is not ready, the server only accepts a request whose sole subscription field is
-//!   `health`. A client that combines `health` with other subscriptions therefore retries until the instance becomes
-//!   ready and never reports `NOT_READY`; subscribe to health alone when waiting for readiness.
+//! - A subscription that Blokli rejects moves to a connection of its own and retries there, so the others are not
+//!   reconnected each time it retries.
+//! - A stream that is not read fast enough loses updates instead of stalling the other streams. Its health reports
+//!   [`Lagged`](SubscriptionProblem::Lagged), and once the stream has caught up the client reconnects, which replays
+//!   the current state of every subscription on the shared connection.
 //!
 //! ```no_run
 //! use blokli_client::{AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient};

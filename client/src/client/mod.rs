@@ -280,8 +280,8 @@ impl BlokliClient {
     ///
     /// `name` says what the subscription is for; it identifies the subscription in health reports.
     ///
-    /// All subscriptions of one client share a single SSE connection, so this registers a slot on the client's hub
-    /// instead of opening a connection of its own.
+    /// The long-running subscriptions of one client share a single SSE connection, so this registers a slot on the
+    /// client's hub instead of opening a connection of its own.
     fn build_subscription_stream<Q, V>(
         &self,
         op: cynic::StreamingOperation<Q, V>,
@@ -294,7 +294,50 @@ impl BlokliClient {
         BlokliClientError,
     >
     where
-        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + 'static,
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        self.subscribe_on(self.subscriptions.clone(), op, name)
+    }
+
+    /// Opens the subscription `op` on an SSE connection of its own and returns its stream together with its health.
+    ///
+    /// Used for subscriptions that must not share the client's connection: short-lived ones, whose arrival and
+    /// departure would otherwise reconnect every long-running subscription, and `health`, which Blokli only serves
+    /// alone while it is not ready.
+    fn build_dedicated_subscription_stream<Q, V>(
+        &self,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        let hub = SubscriptionHub::new(self.base_url.clone(), self.cfg.clone());
+        self.subscribe_on(hub, op, name)
+    }
+
+    fn subscribe_on<Q, V>(
+        &self,
+        hub: SubscriptionHub,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
         let spec = SubscriptionSpec::new(op)?;
@@ -302,10 +345,13 @@ impl BlokliClient {
         let (health, handle) = HealthTracker::new(name);
 
         Ok((
-            self.subscriptions
-                .subscribe(spec, health, reqwest_client)
+            hub.subscribe(spec, health, reqwest_client)
                 .map(|event| match event {
-                    SlotEvent::Data(payload) => serde_json::from_value::<Q>(payload).map_err(BlokliClientError::from),
+                    // The hub decoded the payload with the decoder of this subscription's spec, so it is a `Q`.
+                    SlotEvent::Data(payload) => payload
+                        .downcast::<Q>()
+                        .map(|value| *value)
+                        .map_err(|_| ErrorKind::ParseError.into()),
                     SlotEvent::Error(error) => Err(error),
                 })
                 .boxed(),

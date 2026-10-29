@@ -93,35 +93,38 @@ impl BlokliTransactionClient for BlokliClient {
     }
 
     async fn track_transaction(&self, tx_id: TxId, client_timeout: Duration) -> Result<Transaction> {
-        self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id), "track_transaction")?
-            .0
-            .try_filter_map(|item| {
-                futures::future::ready(match &item.transaction_updated.status {
-                    TransactionStatus::Confirmed => Ok(Some(item.transaction_updated)),
-                    TransactionStatus::Pending | TransactionStatus::Submitted => Ok(None),
-                    TransactionStatus::Reverted => Err(ErrorKind::TrackingError(TrackingErrorKind::Reverted).into()),
-                    TransactionStatus::SubmissionFailed => {
-                        Err(ErrorKind::TrackingError(TrackingErrorKind::SubmissionFailed).into())
-                    }
-                    TransactionStatus::Timeout => Err(ErrorKind::TrackingError(TrackingErrorKind::Timeout).into()),
-                    TransactionStatus::ValidationFailed => {
-                        Err(ErrorKind::TrackingError(TrackingErrorKind::ValidationFailed).into())
-                    }
-                    // A status added by a newer Blokli. Whether it is final is unknown, so keep
-                    // waiting: a later known status ends tracking, or the client timeout does.
-                    TransactionStatus::Unknown => {
-                        tracing::warn!(
-                            tx_id = item.transaction_updated.id.inner(),
-                            "unknown transaction status from blokli, still waiting"
-                        );
-                        Ok(None)
-                    }
-                })
+        self.build_dedicated_subscription_stream(
+            GraphQlQueries::subscribe_track_transaction(tx_id),
+            "track_transaction",
+        )?
+        .0
+        .try_filter_map(|item| {
+            futures::future::ready(match &item.transaction_updated.status {
+                TransactionStatus::Confirmed => Ok(Some(item.transaction_updated)),
+                TransactionStatus::Pending | TransactionStatus::Submitted => Ok(None),
+                TransactionStatus::Reverted => Err(ErrorKind::TrackingError(TrackingErrorKind::Reverted).into()),
+                TransactionStatus::SubmissionFailed => {
+                    Err(ErrorKind::TrackingError(TrackingErrorKind::SubmissionFailed).into())
+                }
+                TransactionStatus::Timeout => Err(ErrorKind::TrackingError(TrackingErrorKind::Timeout).into()),
+                TransactionStatus::ValidationFailed => {
+                    Err(ErrorKind::TrackingError(TrackingErrorKind::ValidationFailed).into())
+                }
+                // A status added by a newer Blokli. Whether it is final is unknown, so keep
+                // waiting: a later known status ends tracking, or the client timeout does.
+                TransactionStatus::Unknown => {
+                    tracing::warn!(
+                        tx_id = item.transaction_updated.id.inner(),
+                        "unknown transaction status from blokli, still waiting"
+                    );
+                    Ok(None)
+                }
             })
-            .try_next()
-            .timeout(FuturesTimeDuration::from(client_timeout))
-            .await
-            .map_err(|_| ErrorKind::Timeout)??
-            .ok_or(ErrorKind::NoData.into())
+        })
+        .try_next()
+        .timeout(FuturesTimeDuration::from(client_timeout))
+        .await
+        .map_err(|_| ErrorKind::Timeout)??
+        .ok_or(ErrorKind::NoData.into())
     }
 }

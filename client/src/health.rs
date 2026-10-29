@@ -11,8 +11,8 @@
 //!
 //! The handle is a cheap shared snapshot, not a channel. Read it with [`SubscriptionHealthHandle::get`] when the
 //! state is needed, for example on a timer. The state follows the client's connection to Blokli, not the polling of
-//! the subscription stream: all subscriptions of one client share one connection, which the client keeps reading
-//! whether or not a stream is being polled at that moment.
+//! the subscription stream: the client keeps reading the connection whether or not a stream is being polled at that
+//! moment, and reports a stream that falls too far behind as [`Lagged`](SubscriptionProblem::Lagged).
 //!
 //! Retries are not limited: a degraded subscription keeps reconnecting until it recovers or its stream is dropped.
 //!
@@ -162,6 +162,9 @@ pub enum SubscriptionProblem {
     MalformedEvent,
     /// The server answered with GraphQL errors and no data.
     GraphQl,
+    /// The stream was not read fast enough and updates were dropped. Once the caller has caught up, the client
+    /// reconnects, so the server sends its current state again.
+    Lagged,
 }
 
 /// Snapshot of one subscription's health.
