@@ -320,7 +320,7 @@ impl BlokliClient {
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let hub = SubscriptionHub::new(self.base_url.clone(), self.cfg.clone());
+        let hub = SubscriptionHub::dedicated(self.base_url.clone(), self.cfg.clone());
         self.subscribe_on(hub, op, name)
     }
 

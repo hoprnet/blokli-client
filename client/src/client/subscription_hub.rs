@@ -11,18 +11,19 @@
 //! here.
 //!
 //! A subscription that Blokli rejects with errors of its own moves to a connection of its own and retries there at
-//! the slow pace. Retrying it on the shared connection would reconnect, and replay the state of, every other
-//! subscription each time.
+//! the slow pace; one whose payloads do not decode moves too and reconnects there after the malformed-event backoff.
+//! Retrying it on the shared connection would reconnect, and replay the state of, every other subscription each time.
 //!
 //! Health stays per subscription even though the transport is shared. The hub feeds connection-level events, such as
-//! a reconnect or a malformed frame, into the tracker of every subscription on that connection, and data events only
-//! into the subscription that owns the alias. A problem with the connection therefore shows up on all subscriptions
-//! that use it, which is what a caller would see with one connection per subscription too.
+//! a reconnect, a malformed frame, or any decoded event as a sign of life, into the tracker of every subscription on
+//! that connection, and data updates only into the subscription that owns the alias. A problem with the connection
+//! therefore shows up on all subscriptions that use it, which is what a caller would see with one connection per
+//! subscription too.
 
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    fmt, mem,
     pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError, Weak,
@@ -132,12 +133,22 @@ impl fmt::Debug for SubscriptionHub {
 impl SubscriptionHub {
     /// Creates an idle hub. No connection is opened until a subscription is polled.
     pub(crate) fn new(base_url: url::Url, cfg: BlokliClientConfig) -> Self {
+        Self::with_sharing(base_url, cfg, false)
+    }
+
+    /// Creates an idle hub for a single subscription, which therefore connects without waiting for others to join.
+    pub(crate) fn dedicated(base_url: url::Url, cfg: BlokliClientConfig) -> Self {
+        Self::with_sharing(base_url, cfg, true)
+    }
+
+    fn with_sharing(base_url: url::Url, cfg: BlokliClientConfig, dedicated: bool) -> Self {
         let (generation, _) = watch::channel(0);
 
         Self {
             shared: Arc::new(HubShared {
                 base_url,
                 cfg,
+                dedicated,
                 state: Mutex::new(HubState::default()),
                 generation,
             }),
@@ -164,8 +175,11 @@ impl SubscriptionHub {
     }
 
     fn register(&self, pending: PendingSubscription) -> Result<ActiveSlot, BlokliClientError> {
-        tokio::runtime::Handle::try_current()
-            .map_err(|_| ErrorKind::InvalidInput("subscriptions require a Tokio runtime"))?;
+        if tokio::runtime::Handle::try_current().is_err() {
+            let PendingSubscription { mut health, .. } = pending;
+            health.end(SubscriptionEnd::Failed);
+            return Err(ErrorKind::InvalidInput("subscriptions require a Tokio runtime").into());
+        }
 
         let lagging = Arc::new(AtomicBool::new(false));
         let (id, receiver) = {
@@ -308,6 +322,8 @@ impl Drop for SlotGuard {
 struct HubShared {
     base_url: url::Url,
     cfg: BlokliClientConfig,
+    /// The hub serves a single subscription.
+    dedicated: bool,
     state: Mutex<HubState>,
     generation: watch::Sender<u64>,
 }
@@ -327,10 +343,26 @@ struct SlotEntry {
     health: HealthTracker,
     tx: mpsc::Sender<SlotEvent>,
     lagging: Arc<AtomicBool>,
-    /// Liveness token of the supervisor of the slot's own connection, once Blokli rejected the slot.
-    isolated: Option<Weak<()>>,
+    /// Set once the slot moved onto a connection of its own.
+    isolated: Option<Isolation>,
     /// The slot missed events and needs a new connection to receive the server's state again.
     resync: bool,
+}
+
+/// The connection of its own that a slot moved to.
+struct Isolation {
+    /// Liveness token of the supervisor of the connection.
+    supervisor: Weak<()>,
+    cause: IsolationCause,
+}
+
+/// Why a slot moved onto a connection of its own.
+#[derive(Clone, Copy, Debug)]
+enum IsolationCause {
+    /// Blokli refused the slot; it retries at the slow pace.
+    Rejected,
+    /// The slot's payloads did not decode; it reconnects after the malformed-event backoff.
+    Malformed,
 }
 
 impl SlotEntry {
@@ -424,9 +456,11 @@ impl HubShared {
             }
 
             for (id, entry) in state.slots.iter_mut() {
-                if entry.isolated.as_ref().is_some_and(|token| token.upgrade().is_none()) {
+                if let Some(isolation) = entry.isolated.as_mut()
+                    && isolation.supervisor.upgrade().is_none()
+                {
                     let token = Arc::new(());
-                    entry.isolated = Some(Arc::downgrade(&token));
+                    isolation.supervisor = Arc::downgrade(&token);
                     starts.push((Scope::Isolated(*id), token));
                 }
             }
@@ -445,10 +479,11 @@ impl HubShared {
         }
     }
 
-    /// Moves a subscription Blokli rejected onto a connection of its own, so its retries do not reconnect the others.
+    /// Moves a subscription Blokli rejected, or whose payloads do not decode, onto a connection of its own, so its
+    /// retries do not reconnect the others.
     ///
     /// Its alias stays in the shared document until the next rebuild, like the alias of a dropped subscription.
-    fn isolate(self: &Arc<Self>, id: SlotId) {
+    fn isolate(self: &Arc<Self>, id: SlotId, cause: IsolationCause) {
         {
             let mut state = self.lock_state();
             let Some(entry) = state.slots.get_mut(&id) else {
@@ -457,9 +492,14 @@ impl HubShared {
             if entry.isolated.is_some() {
                 return;
             }
-            entry.isolated = Some(Weak::new());
+            entry.isolated = Some(Isolation {
+                supervisor: Weak::new(),
+                cause,
+            });
         }
 
+        // Wakes the shared connection, which closes once no subscription is left on it.
+        self.publish_generation();
         self.ensure_supervisors();
     }
 
@@ -480,7 +520,9 @@ impl HubShared {
             .iter_mut()
             .filter(|(id, entry)| entry.belongs_to(**id, scope))
             .map(|(id, entry)| {
-                entry.resync = false;
+                if mem::take(&mut entry.resync) {
+                    entry.health.caught_up();
+                }
                 (
                     *id,
                     SlotSnapshot {
@@ -503,9 +545,11 @@ impl HubShared {
         }
     }
 
-    /// Ends every subscription of `scope` and releases its stream.
-    fn end_scope(&self, scope: Scope, end: SubscriptionEnd) {
-        let ids: Vec<SlotId> = self.scope_ids(scope).into_iter().collect();
+    /// Ends the subscriptions of `scope` that a stopped connection carried and releases their streams.
+    ///
+    /// Subscriptions that registered meanwhile were never part of that connection; the next supervisor serves them.
+    fn end_connected(&self, scope: Scope, connected: &BTreeSet<SlotId>, end: SubscriptionEnd) {
+        let ids: Vec<SlotId> = self.scope_ids(scope).intersection(connected).copied().collect();
         self.end_slots(&ids, end);
     }
 
@@ -591,9 +635,7 @@ impl HubShared {
                         slot = target.id,
                         "subscription consumer is too slow, dropping events until it catches up"
                     );
-                    self.with_health(scope, &[target.id], |health| {
-                        health.problem(SubscriptionProblem::Lagged, &"the consumer did not keep up")
-                    });
+                    self.with_health(scope, &[target.id], HealthTracker::lagging);
                 }
                 false
             }
@@ -612,10 +654,14 @@ impl HubShared {
                 return None;
             }
 
-            match tokio::time::timeout(SLOT_CHANGE_DEBOUNCE, generation.changed()).await {
-                Ok(Ok(())) => continue,
-                Ok(Err(_)) => return None,
-                Err(_) => {}
+            // Only the shared connection of a client's hub gathers several subscriptions; any other one carries
+            // a single slot and has nothing to wait for.
+            if scope == Scope::Shared && !self.dedicated {
+                match tokio::time::timeout(SLOT_CHANGE_DEBOUNCE, generation.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) => return None,
+                    Err(_) => {}
+                }
             }
 
             return match build_connection(&slots) {
@@ -798,10 +844,17 @@ impl HubShared {
     ) -> Dispatch {
         let ids: Vec<SlotId> = targets.values().map(|target| target.id).collect();
 
-        let response = match serde_json::from_str::<GraphQlResponse<serde_json::Value>>(data) {
-            Ok(response) => response,
+        let routed = match serde_json::from_str::<GraphQlResponse<serde_json::Value>>(data) {
+            Ok(response) => route(response, targets).ok_or_else(|| BlokliClientError::from(ErrorKind::NoData)),
+            Err(error) => Err(BlokliClientError::from(ErrorKind::from(error))),
+        };
+        let Routed {
+            payloads,
+            slot_errors,
+            document_errors,
+        } = match routed {
+            Ok(routed) => routed,
             Err(error) => {
-                let error = BlokliClientError::from(ErrorKind::from(error));
                 tracing::debug!(bytes = data.len(), "reconnecting after a malformed SSE event");
                 self.with_health(scope, &ids, |health| {
                     health.problem(SubscriptionProblem::MalformedEvent, &error)
@@ -811,11 +864,6 @@ impl HubShared {
             }
         };
 
-        let Routed {
-            payloads,
-            slot_errors,
-            document_errors,
-        } = route(response, targets);
         let by_id: BTreeMap<SlotId, &SlotTarget> = targets.values().map(|target| (target.id, target)).collect();
         // Aliases of subscriptions that left this connection stay in its document until the next rebuild; what
         // arrives for them is no longer theirs.
@@ -838,15 +886,25 @@ impl HubShared {
                 }
                 Err(error) => {
                     // Valid JSON in the wrong shape is as broken as a truncated frame: reconnecting makes the server
-                    // replay its state, so the lost update is not silently missed.
-                    malformed = true;
+                    // replay its state, so the lost update is not silently missed. Only this subscription reconnects,
+                    // on a connection of its own, so its siblings neither replay their state nor reset its backoff.
                     let error = BlokliClientError::from(ErrorKind::from(error));
                     tracing::debug!(slot = id, %error, "subscription payload does not match its selection");
                     self.with_health(scope, &[id], |health| {
                         health.problem(SubscriptionProblem::MalformedEvent, &error)
                     });
+                    match scope {
+                        Scope::Shared => self.isolate(id, IsolationCause::Malformed),
+                        Scope::Isolated(_) => malformed = true,
+                    }
                 }
             }
+        }
+
+        if decoded_any {
+            // The server sends keepalives only while the whole connection is idle, so an event for one subscription
+            // is the sign of life for all of them.
+            self.with_health(scope, &ids, HealthTracker::transport_activity);
         }
 
         let mut rejected = false;
@@ -867,7 +925,7 @@ impl HubShared {
             }
 
             match scope {
-                Scope::Shared => self.isolate(id),
+                Scope::Shared => self.isolate(id, IsolationCause::Rejected),
                 Scope::Isolated(_) => rejected = true,
             }
         }
@@ -962,14 +1020,19 @@ async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: w
     let mut malformed_event_delay = None;
 
     if let Scope::Isolated(id) = scope {
-        // The subscription moved here because Blokli rejected it, so it waits the slow interval before retrying.
+        let cause = shared
+            .lock_state()
+            .slots
+            .get(&id)
+            .and_then(|entry| entry.isolated.as_ref().map(|isolation| isolation.cause));
+        // The subscription moved here after a failure, so it waits as it would have before reconnecting.
+        let delay = match cause {
+            Some(IsolationCause::Rejected) => rejected_retry_delay(&shared.cfg),
+            Some(IsolationCause::Malformed) => next_malformed_event_delay(&shared.cfg, &mut malformed_event_delay),
+            None => return,
+        };
         shared
-            .wait_before_reconnect(
-                scope,
-                &mut generation,
-                rejected_retry_delay(&shared.cfg),
-                &BTreeSet::from([id]),
-            )
+            .wait_before_reconnect(scope, &mut generation, delay, &BTreeSet::from([id]))
             .await;
     }
 
@@ -990,7 +1053,7 @@ async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: w
                     .await
             }
             Outcome::Stop(end) => {
-                shared.end_scope(scope, end);
+                shared.end_connected(scope, &connected, end);
                 return;
             }
         }
@@ -1214,48 +1277,60 @@ struct Routed {
 }
 
 /// Splits a decoded response into per-subscription payloads and errors.
-fn route(response: GraphQlResponse<serde_json::Value>, targets: &BTreeMap<String, SlotTarget>) -> Routed {
+///
+/// Returns `None` for a frame that carries neither data nor errors, which is as broken as one that does not parse.
+fn route(response: GraphQlResponse<serde_json::Value>, targets: &BTreeMap<String, SlotTarget>) -> Option<Routed> {
     let GraphQlResponse { data, errors } = response;
 
-    let mut payloads = Vec::new();
-    let mut document_errors = Vec::new();
-    let mut slot_errors: BTreeMap<SlotId, Vec<GraphQlError>> = BTreeMap::new();
-
-    match data {
-        Some(serde_json::Value::Object(payloads_by_alias)) => {
-            for (alias, payload) in payloads_by_alias {
-                let Some(target) = targets.get(&alias) else {
-                    tracing::debug!(alias, "ignoring subscription payload for an unregistered alias");
-                    continue;
-                };
-                if !payload.is_null() {
-                    let mut field = serde_json::Map::with_capacity(1);
-                    field.insert(target.field.clone(), payload);
-                    payloads.push((target.id, serde_json::Value::Object(field)));
-                }
-            }
-        }
-        Some(payload) => document_errors.push(GraphQlError::new(
-            format!("unexpected subscription payload: {payload}"),
-            None,
-            None,
-            None,
-        )),
-        None => {}
+    let payloads_by_alias = match data {
+        Some(serde_json::Value::Object(payloads_by_alias)) => payloads_by_alias,
+        Some(_) => return None,
+        None => serde_json::Map::new(),
+    };
+    let errors = errors.unwrap_or_default();
+    if payloads_by_alias.is_empty() && errors.is_empty() {
+        return None;
     }
 
-    for error in errors.into_iter().flatten() {
+    let mut document_errors = Vec::new();
+    let mut slot_errors: BTreeMap<SlotId, Vec<GraphQlError>> = BTreeMap::new();
+    for error in errors {
         match alias_of(&error).and_then(|alias| targets.get(&alias).map(|target| target.id)) {
             Some(id) => slot_errors.entry(id).or_default().push(error),
             None => document_errors.push(error),
         }
     }
 
-    Routed {
+    let mut payloads = Vec::new();
+    for (alias, payload) in payloads_by_alias {
+        let Some(target) = targets.get(&alias) else {
+            tracing::debug!(alias, "ignoring subscription payload for an unregistered alias");
+            continue;
+        };
+        if payload.is_null() {
+            // A field that failed is null next to its errors. Without errors, the decoder decides whether null is a
+            // valid payload.
+            if slot_errors.contains_key(&target.id) {
+                continue;
+            }
+        } else if let Some(errors) = slot_errors.remove(&target.id) {
+            // Data wins over errors, as it does for one-shot operations.
+            tracing::error!(
+                slot = target.id,
+                ?errors,
+                "subscription payload received with field errors"
+            );
+        }
+        let mut field = serde_json::Map::with_capacity(1);
+        field.insert(target.field.clone(), payload);
+        payloads.push((target.id, serde_json::Value::Object(field)));
+    }
+
+    Some(Routed {
         payloads,
         slot_errors: slot_errors.into_iter().collect(),
         document_errors,
-    }
+    })
 }
 
 fn alias_of(error: &GraphQlError) -> Option<String> {
@@ -1277,26 +1352,30 @@ fn errors_to_client_error(errors: Vec<GraphQlError>) -> BlokliClientError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         sync::{Arc, atomic::AtomicBool},
         time::{Duration, Instant},
     };
 
-    use futures::StreamExt;
+    use futures::{StreamExt, executor::block_on};
     use serde_json::json;
-    use tokio::{sync::mpsc, time::sleep, time::timeout};
+    use tokio::{
+        sync::mpsc,
+        time::{sleep, timeout},
+    };
 
     use super::{
-        SlotId, SlotSnapshot, SlotTarget, SubscriptionSpec, build_connection, decode, matching_paren, rename_variables,
-        route, split_document,
+        Scope, SlotEntry, SlotId, SlotSnapshot, SlotTarget, SubscriptionHub, SubscriptionSpec, build_connection,
+        decode, matching_paren, rename_variables, route, split_document,
     };
     use crate::{
-        SubscriptionProblem, SubscriptionStatus,
+        SubscriptionEnd, SubscriptionProblem, SubscriptionStatus,
         api::{AccountSelector, BlokliSubscriptionClient, ChannelFilter, ChannelSelector},
         client::{
             BlokliClient, BlokliClientConfig, GraphQlQueries,
-            sse_test_server::{Connection, SseTestServer, Step, event},
+            sse_test_server::{Connection, SseTestServer, Step, event, keepalive},
         },
+        health::HealthTracker,
     };
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -1442,7 +1521,7 @@ mod tests {
         }))
         .expect("response should decode");
 
-        let routed = route(response, &targets);
+        let routed = route(response, &targets).expect("frame is routable");
 
         assert_eq!(routed.payloads.len(), 1);
         assert_eq!(routed.payloads[0].0, 1);
@@ -1459,7 +1538,7 @@ mod tests {
         }))
         .expect("response should decode");
 
-        let routed = route(response, &targets);
+        let routed = route(response, &targets).expect("frame is routable");
 
         assert_eq!(routed.slot_errors.len(), 1);
         assert_eq!(routed.slot_errors[0].0, 1);
@@ -1474,7 +1553,7 @@ mod tests {
         }))
         .expect("response should decode");
 
-        let routed = route(response, &targets);
+        let routed = route(response, &targets).expect("frame is routable");
 
         assert_eq!(routed.document_errors.len(), 1);
         assert!(routed.payloads.is_empty());
@@ -1489,7 +1568,57 @@ mod tests {
         }))
         .expect("response should decode");
 
-        assert!(route(response, &targets).payloads.is_empty());
+        assert!(
+            route(response, &targets)
+                .expect("frame is routable")
+                .payloads
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn route_treats_frames_without_data_or_errors_as_malformed() {
+        let targets = targets(&[0]);
+
+        // Frames with neither field, such as `{}` or `{"data":null}`, already fail to parse.
+        for frame in [
+            json!({ "data": {} }),
+            json!({ "errors": [] }),
+            json!({ "data": "bad" }),
+            json!({ "data": [] }),
+        ] {
+            let response = serde_json::from_value(frame.clone()).expect("response should decode");
+            assert!(route(response, &targets).is_none(), "{frame} must count as malformed");
+        }
+    }
+
+    #[test]
+    fn route_lets_data_win_over_field_errors_of_the_same_subscription() {
+        let targets = targets(&[0, 1]);
+        let response = serde_json::from_value(json!({
+            "data": { "s0": { "keyid": 9 }, "s1": null },
+            "errors": [
+                { "message": "partial failure", "path": ["s0", "keyid"] },
+                { "message": "slot failed", "path": ["s1"] }
+            ]
+        }))
+        .expect("response should decode");
+
+        let routed = route(response, &targets).expect("frame is routable");
+
+        assert_eq!(routed.payloads, vec![(0, json!({ "accountUpdated": { "keyid": 9 } }))]);
+        let failed: Vec<SlotId> = routed.slot_errors.iter().map(|(id, _)| *id).collect();
+        assert_eq!(failed, vec![1]);
+    }
+
+    #[test]
+    fn route_hands_a_null_payload_without_errors_to_the_decoder() {
+        let targets = targets(&[0]);
+        let response = serde_json::from_value(json!({ "data": { "s0": null } })).expect("response should decode");
+
+        let routed = route(response, &targets).expect("frame is routable");
+
+        assert_eq!(routed.payloads, vec![(0, json!({ "accountUpdated": null }))]);
     }
 
     #[tokio::test]
@@ -1725,6 +1854,8 @@ mod tests {
     async fn a_slow_consumer_is_reported_and_resynchronised_once_it_catches_up() -> anyhow::Result<()> {
         let mut flood = vec![event(&channel_event("s0", "0x00"))];
         flood.extend((0..1100).map(|_| event(&channel_event("s0", "0x01"))));
+        // Traffic on the connection says nothing about the consumer, which is still behind.
+        flood.push(keepalive());
         flood.push(Step::Hang);
         let server = SseTestServer::start(vec![
             Connection::ok(flood),
@@ -1737,6 +1868,7 @@ mod tests {
         let first = timeout(WAIT, channels.next()).await?;
         assert!(first.is_some());
         wait_for(|| health.get().last_problem == Some(SubscriptionProblem::Lagged)).await;
+        sleep(Duration::from_millis(200)).await;
         assert_eq!(health.get().status, SubscriptionStatus::Degraded);
         assert_eq!(server.connections(), 1, "the connection must not wait for the consumer");
 
@@ -1878,5 +2010,204 @@ mod tests {
         assert_eq!(server.connections(), 2);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn isolating_the_only_shared_subscription_closes_the_shared_connection() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![Connection::ok(vec![
+            event(r#"{"data":null,"errors":[{"message":"bad account","path":["s0"]}]}"#),
+            Step::Hang,
+        ])])
+        .await?;
+        // The isolated retry would only come after 60 s.
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_secs(60),
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+
+        let mut accounts = client.subscribe_accounts(AccountSelector::Any)?;
+        let rejection = timeout(WAIT, accounts.next()).await?;
+        assert!(rejection.is_some_and(|rejection| rejection.is_err()));
+
+        wait_for(|| server.open() == 0).await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_busy_sibling_keeps_a_quiet_subscription_on_the_same_connection_from_stalling() -> anyhow::Result<()> {
+        let mut steps = Vec::new();
+        for _ in 0..15 {
+            steps.push(event(&channel_event("s0", "0x01")));
+            steps.push(Step::Wait(Duration::from_millis(100)));
+        }
+        steps.push(Step::Hang);
+        let server = SseTestServer::start(vec![Connection::ok(steps)]).await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                subscription_stall_threshold: Some(Duration::from_millis(500)),
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let mut channels = client.subscribe_channels(channel_selector())?;
+        let (mut accounts, accounts_handle) = client.subscribe_accounts_with_health(AccountSelector::Any)?;
+
+        let received = timeout(WAIT, async {
+            let busy = async {
+                for _ in 0..15 {
+                    channels.next().await.expect("channel event")?;
+                }
+                anyhow::Ok(())
+            };
+            tokio::select! {
+                biased;
+                done = busy => done,
+                account = accounts.next() => anyhow::bail!("unexpected account item: {account:?}"),
+            }
+        })
+        .await?;
+        received?;
+
+        assert_eq!(server.connections(), 1);
+        assert_ne!(accounts_handle.get().status, SubscriptionStatus::Stalled);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_payload_of_the_wrong_shape_moves_only_its_subscription_to_a_connection_of_its_own() -> anyhow::Result<()>
+    {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![
+                event(&channel_event("s0", "0x01")),
+                event(r#"{"data":{"s1":{"unexpected":true}}}"#),
+                event(&channel_event("s0", "0x02")),
+                Step::Hang,
+            ]),
+            Connection::ok(vec![event(&account_event("s1", 7)), Step::Hang]),
+        ])
+        .await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                subscription_stream_restart_delay: Some(Duration::from_millis(50)),
+                ..Default::default()
+            },
+        );
+        let (mut channels, channels_handle) = client.subscribe_channels_with_health(channel_selector())?;
+        let (mut accounts, accounts_handle) = client.subscribe_accounts_with_health(AccountSelector::Any)?;
+
+        let (channel_ids, account) = timeout(WAIT, async {
+            let channels = async {
+                let mut ids = Vec::new();
+                for _ in 0..2 {
+                    ids.push(channels.next().await.expect("channel event")?.concrete_channel_id);
+                }
+                anyhow::Ok(ids)
+            };
+            tokio::join!(channels, accounts.next())
+        })
+        .await?;
+
+        assert_eq!(channel_ids?, ["0x01", "0x02"]);
+        assert_eq!(account.expect("account event").expect("account should decode").keyid, 7);
+        assert_eq!(channels_handle.get().connections, 1, "the sibling must not reconnect");
+        assert!(channels_handle.get().is_healthy());
+        assert_eq!(
+            accounts_handle.get().last_problem,
+            Some(SubscriptionProblem::MalformedEvent)
+        );
+        let requests = server.requests();
+        assert!(
+            !requests[1].contains("channelUpdated"),
+            "unexpected request: {}",
+            requests[1]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_frame_without_object_data_is_malformed_rather_than_rejected() -> anyhow::Result<()> {
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![event(r#"{"data":"bad"}"#), Step::Hang]),
+            Connection::ok(vec![event(&channel_event("s0", "0x01")), Step::Hang]),
+        ])
+        .await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_secs(60),
+                subscription_stream_restart_delay: Some(Duration::from_millis(50)),
+                ..Default::default()
+            },
+        );
+        let (mut channels, health) = client.subscribe_channels_with_health(channel_selector())?;
+
+        let item = timeout(WAIT, channels.next()).await?;
+
+        assert_eq!(
+            item.expect("channel event")
+                .expect("the broken frame must not be yielded")
+                .concrete_channel_id,
+            "0x01"
+        );
+        assert_eq!(health.get().last_problem, Some(SubscriptionProblem::MalformedEvent));
+
+        Ok(())
+    }
+
+    #[test]
+    fn polling_outside_a_tokio_runtime_fails_the_subscription() {
+        let client = BlokliClient::new("http://127.0.0.1:1".parse().expect("valid URL"), config());
+        let (mut channels, health) = client
+            .subscribe_channels_with_health(channel_selector())
+            .expect("subscription should be created");
+
+        let item = block_on(channels.next());
+
+        assert!(item.is_some_and(|item| item.is_err()));
+        assert_eq!(health.get().status, SubscriptionStatus::Ended(SubscriptionEnd::Failed));
+    }
+
+    #[test]
+    fn ending_a_connection_spares_subscriptions_it_did_not_carry() {
+        let hub = SubscriptionHub::new("http://127.0.0.1:1".parse().expect("valid URL"), config());
+        let mut handles = Vec::new();
+        {
+            let mut state = hub.shared.lock_state();
+            for id in 0..2 {
+                let (health, handle) = HealthTracker::new("test");
+                let (tx, _rx) = mpsc::channel(1);
+                state.slots.insert(
+                    id,
+                    SlotEntry {
+                        spec: channel_spec(),
+                        health,
+                        tx,
+                        lagging: Arc::default(),
+                        isolated: None,
+                        resync: false,
+                    },
+                );
+                handles.push(handle);
+            }
+        }
+
+        hub.shared
+            .end_connected(Scope::Shared, &BTreeSet::from([0]), SubscriptionEnd::Completed);
+
+        assert_eq!(
+            handles[0].get().status,
+            SubscriptionStatus::Ended(SubscriptionEnd::Completed)
+        );
+        assert_eq!(handles[1].get().status, SubscriptionStatus::Connecting);
+        assert!(hub.shared.lock_state().slots.contains_key(&1));
     }
 }

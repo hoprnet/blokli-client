@@ -89,11 +89,10 @@
 //! open a connection of their own instead. Consequences worth knowing:
 //!
 //! - Subscriptions require a Tokio runtime: the client reads the shared connection in a Tokio task.
-//! - A subscription registers when its stream is first polled. Subscriptions that are polled together, for example
-//!   with [`futures::join!`](futures::join) or by separate tasks started at the same time, share one connection. A
-//!   subscription created later joins the existing connection by reconnecting with the extended document, which
-//!   replays the initial state of subscriptions that emit one and can miss events while the connection is
-//!   re-established.
+//! - A subscription registers when its stream is first polled. Subscriptions that are polled together, for example with
+//!   [`futures::join!`](futures::join) or by separate tasks started at the same time, share one connection. A
+//!   subscription created later joins the existing connection by reconnecting with the extended document, which replays
+//!   the initial state of subscriptions that emit one and can miss events while the connection is re-established.
 //! - Dropping the last subscription closes the connection. Dropping one of several subscriptions keeps the others on
 //!   the same connection.
 //! - A subscription that Blokli rejects moves to a connection of its own and retries there, so the others are not

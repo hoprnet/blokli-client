@@ -260,6 +260,8 @@ pub(crate) struct HealthTracker {
     created: Instant,
     /// Start of the current outage. For a subscription that never connected, its creation.
     outage_since: Instant,
+    /// The consumer lost events and has not received the server's state again yet.
+    lagging: bool,
 }
 
 impl HealthTracker {
@@ -278,6 +280,7 @@ impl HealthTracker {
                 state,
                 created,
                 outage_since: created,
+                lagging: false,
             },
             handle,
         )
@@ -299,10 +302,13 @@ impl HealthTracker {
 
     fn record_activity(&mut self, ends_rejection: bool) {
         let outage_since = self.outage_since;
+        let lagging = self.lagging;
         let change = self.update(|health, now| {
             health.last_transport_activity = Some(now);
             let outage = now.saturating_duration_since(outage_since);
             let next = match health.status {
+                // A working connection does not bring back the events the consumer lost.
+                _ if lagging => return None,
                 SubscriptionStatus::Connecting => SubscriptionStatus::Healthy,
                 SubscriptionStatus::Degraded | SubscriptionStatus::Stalled => SubscriptionStatus::Recovered { outage },
                 SubscriptionStatus::Rejected if ends_rejection => SubscriptionStatus::Recovered { outage },
@@ -364,6 +370,19 @@ impl HealthTracker {
                 "subscription still failing"
             );
         }
+    }
+
+    /// The consumer did not keep up and lost events. The subscription stays degraded, whatever the connection does,
+    /// until [`caught_up`](Self::caught_up).
+    pub(crate) fn lagging(&mut self) {
+        self.lagging = true;
+        self.problem(SubscriptionProblem::Lagged, &"the consumer did not keep up");
+    }
+
+    /// The consumer drained its queue and a new connection replays the server's state; activity on it recovers the
+    /// subscription.
+    pub(crate) fn caught_up(&mut self) {
+        self.lagging = false;
     }
 
     /// The server refused the subscription and it is retried after `retry_in`. Returns whether this starts a new
