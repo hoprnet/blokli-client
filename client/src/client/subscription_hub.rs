@@ -11,7 +11,8 @@
 //! here.
 //!
 //! A subscription that Blokli rejects with errors of its own moves to a connection of its own and retries there at
-//! the slow pace; one whose payloads do not decode moves too and reconnects there after the malformed-event backoff.
+//! the slow pace; one whose payloads do not decode moves too and reconnects there after the malformed-event backoff,
+//! and one whose consumer lost events moves once it has caught up, to receive the server's state again there.
 //! Retrying it on the shared connection would reconnect, and replay the state of, every other subscription each time.
 //!
 //! Health stays per subscription even though the transport is shared. The hub feeds connection-level events, such as
@@ -224,11 +225,24 @@ impl SubscriptionHub {
     }
 
     /// Asks for a new connection so that the server replays the state a lagging slot missed.
+    ///
+    /// A slot on the shared connection moves to a connection of its own for that, so the replay neither reaches its
+    /// siblings nor makes them lag in turn.
     fn request_resync(&self, id: SlotId) {
-        if let Some(entry) = self.shared.lock_state().slots.get_mut(&id) {
+        let shared = {
+            let mut state = self.shared.lock_state();
+            let Some(entry) = state.slots.get_mut(&id) else {
+                return;
+            };
             entry.resync = true;
+            entry.isolated.is_none()
+        };
+
+        if shared {
+            self.shared.isolate(id, IsolationCause::Lagged);
+        } else {
+            self.shared.publish_generation();
         }
-        self.shared.publish_generation();
     }
 }
 
@@ -368,6 +382,8 @@ enum IsolationCause {
     Rejected,
     /// The slot's payloads did not decode; it reconnects after the malformed-event backoff.
     Malformed,
+    /// The slot's consumer lost events and has caught up; it connects at once to receive the server's state again.
+    Lagged,
 }
 
 impl SlotEntry {
@@ -384,7 +400,7 @@ impl SlotEntry {
 enum Scope {
     /// The connection shared by every subscription that Blokli has not rejected.
     Shared,
-    /// The connection of one subscription that Blokli rejected.
+    /// The connection of one subscription that moved off the shared connection.
     Isolated(SlotId),
 }
 
@@ -484,8 +500,8 @@ impl HubShared {
         }
     }
 
-    /// Moves a subscription Blokli rejected, or whose payloads do not decode, onto a connection of its own, so its
-    /// retries do not reconnect the others.
+    /// Moves a subscription Blokli rejected, whose payloads do not decode, or whose consumer lagged, onto a connection
+    /// of its own, so its retries and resynchronisations do not reconnect the others.
     ///
     /// Its alias stays in the shared document until the next rebuild, like the alias of a dropped subscription.
     fn isolate(self: &Arc<Self>, id: SlotId, cause: IsolationCause) {
@@ -1032,10 +1048,12 @@ async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: w
             .slots
             .get(&id)
             .and_then(|entry| entry.isolated.as_ref().map(|isolation| isolation.cause));
-        // The subscription moved here after a failure, so it waits as it would have before reconnecting.
+        // The subscription moved here after a failure or a lag, so it waits as it would have before reconnecting.
         let delay = match cause {
             Some(IsolationCause::Rejected) => rejected_retry_delay(&shared.cfg),
             Some(IsolationCause::Malformed) => next_malformed_event_delay(&shared.cfg, &mut malformed_event_delay),
+            // The consumer can only lag again after it has read a full queue, which bounds how often this repeats.
+            Some(IsolationCause::Lagged) => Duration::ZERO,
             None => return,
         };
         shared
@@ -1896,6 +1914,10 @@ mod tests {
         .await?;
         let client = BlokliClient::new(server.url(), config());
         let (mut channels, health) = client.subscribe_channels_with_health(channel_selector())?;
+        let mut accounts = client.subscribe_accounts(AccountSelector::KeyId(7))?;
+        // Registers both in this order, so the flood addresses the channels and a quiet sibling shares the connection.
+        assert!(channels.next().now_or_never().is_none());
+        assert!(accounts.next().now_or_never().is_none());
 
         let first = timeout(WAIT, channels.next()).await?;
         assert!(first.is_some());
@@ -1917,6 +1939,19 @@ mod tests {
         assert!(replayed, "the state must be replayed after the consumer caught up");
         assert_eq!(server.connections(), 2);
         assert!(matches!(health.get().status, SubscriptionStatus::Recovered { .. }));
+
+        let requests = server.requests();
+        assert!(
+            requests[0].contains("accountUpdated"),
+            "unexpected request: {}",
+            requests[0]
+        );
+        assert!(
+            !requests[1].contains("accountUpdated"),
+            "the resync must not reconnect the sibling: {}",
+            requests[1]
+        );
+        assert_eq!(server.open(), 2, "the sibling must stay on the shared connection");
 
         Ok(())
     }

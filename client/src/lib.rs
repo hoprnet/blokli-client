@@ -98,8 +98,8 @@
 //! - A subscription that Blokli rejects moves to a connection of its own and retries there, so the others are not
 //!   reconnected each time it retries.
 //! - A stream that is not read fast enough loses updates instead of stalling the other streams. Its health reports
-//!   [`Lagged`](SubscriptionProblem::Lagged), and once the stream has caught up the client reconnects, which replays
-//!   the current state of every subscription on the shared connection.
+//!   [`Lagged`](SubscriptionProblem::Lagged), and once the stream has caught up it moves to a connection of its own,
+//!   which replays its current state without reconnecting the other subscriptions.
 //!
 //! ```no_run
 //! use blokli_client::{AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient};
