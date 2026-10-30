@@ -204,6 +204,7 @@ async fn subscribe_health_streams_state_updates() -> Result<()> {
         let body = events.iter().map(ReadinessEvent::format_event).collect::<String>();
         let response = format_sse_response(&body);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response.as_bytes()).await?;
         conn.shutdown().await?;
         Ok::<_, anyhow::Error>(())
@@ -587,6 +588,7 @@ async fn spawn_reconnecting_server(
 
         for response in responses {
             let (mut conn, _) = listener.accept().await?;
+            read_http_request(&mut conn).await?;
             conn.write_all(response.as_bytes()).await?;
             conn.shutdown().await?;
         }
@@ -609,30 +611,13 @@ async fn spawn_dns_override_streaming_server(
     let server = tokio::spawn(async move {
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
-        let request = read_http_request_head(&mut conn).await?;
+        let request = read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(request)
     });
 
     Ok((base_url, server))
-}
-
-async fn read_http_request_head(conn: &mut tokio::net::TcpStream) -> Result<String> {
-    let mut buf = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 1024];
-        let n = conn.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-
-    Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase())
 }
 
 async fn spawn_delayed_streaming_server(
@@ -653,6 +638,7 @@ async fn spawn_delayed_streaming_server(
         .to_string();
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(initial_delay).await;
         conn.write_all(body.as_bytes()).await?;
@@ -680,11 +666,13 @@ async fn spawn_timed_out_then_reconnecting_server(
         .to_string();
 
         let (mut first_conn, _) = listener.accept().await?;
+        read_http_request(&mut first_conn).await?;
         first_conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         first_conn.shutdown().await?;
 
         let (mut second_conn, _) = listener.accept().await?;
+        read_http_request(&mut second_conn).await?;
         let body = format_ticket_params_events(&[event]);
         second_conn
             .write_all(format!("{response_headers}{body}").as_bytes())
@@ -703,12 +691,54 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
 
     let server = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(())
     });
 
     Ok((base_url, server))
+}
+
+/// Reads a whole HTTP request, head and `content-length` body, and returns it lowercased.
+///
+/// Mock servers must call this before responding: closing a connection with request bytes still unread makes the
+/// kernel reset it, which can discard the response before the client reads it.
+async fn read_http_request(conn: &mut tokio::net::TcpStream) -> Result<String> {
+    let mut buf = Vec::new();
+    let head_end = loop {
+        if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let mut chunk = [0_u8; 4096];
+        let n = conn.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+
+    let content_length = String::from_utf8_lossy(&buf[..head_end])
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+
+    while buf.len() < head_end + content_length {
+        let mut chunk = [0_u8; 4096];
+        let n = conn.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase())
 }
 
 fn format_graph_event(channel_id: &str, status: &str) -> String {

@@ -14,8 +14,14 @@ use blokli_client::{
     },
 };
 use curvy_bindings::{
-    constants::WITHDRAWAL_MAX_INPUTS,
-    curvy_aggregator_alpha_v2::CurvyAggregatorAlphaV2::{CurvyAggregatorAlphaV2Instance, submitWithdrawalRequestCall},
+    constants::{
+        CIRCUIT_FAMILY_CORE, CIRCUIT_KIND_PENDING_NOTES_COMMITMENT, CIRCUIT_KIND_WITHDRAWAL, CIRCUIT_VERSION,
+        PENDING_NOTES_COMMITMENT_BATCH_SIZE, WITHDRAWAL_MAX_INPUTS,
+    },
+    curvy_aggregator_alpha_v2::{
+        CurvyAggregatorAlphaV2::{CurvyAggregatorAlphaV2Instance, submitWithdrawalRequestCall},
+        ICurvyAggregatorAlpha::CircuitRef,
+    },
     portal_factory::{CurvyTypes, PortalFactory::PortalFactoryInstance},
 };
 use futures::StreamExt;
@@ -93,7 +99,13 @@ struct IntegrationFixtureInner {
 }
 
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Notes per test commitment; the pending-notes circuit takes up to [`PENDING_NOTES_COMMITMENT_BATCH_SIZE`].
 const CURVY_COMMITMENT_BATCH_SIZE: usize = 5;
+/// The integration image releases Curvy's `Core` circuits as version [`CIRCUIT_VERSION`].
+const CURVY_TEST_CIRCUIT: CircuitRef = CircuitRef {
+    family: CIRCUIT_FAMILY_CORE,
+    version: CIRCUIT_VERSION,
+};
 /// Curvy's local development configuration registers native ETH as token ID 1.
 const CURVY_TEST_NATIVE_TOKEN_ID: u64 = 1;
 const CURVY_TEST_AMOUNT: u128 = 1_000_000_000_000_000_000;
@@ -172,22 +184,29 @@ where
     pub async fn commit_deposit_batch(&self, rpc: &RpcClient, note_ids: Vec<U256>) -> Result<()> {
         ensure!(
             note_ids.len() == CURVY_COMMITMENT_BATCH_SIZE,
-            "commitPendingNotes requires exactly {CURVY_COMMITMENT_BATCH_SIZE} note IDs, received {}",
+            "the deposit batch has {CURVY_COMMITMENT_BATCH_SIZE} note IDs, received {}",
             note_ids.len()
         );
-        let batch_size = U256::from(CURVY_COMMITMENT_BATCH_SIZE);
         let verifier = self
             .aggregator
-            .getPendingNotesCommitmentVerifier(batch_size)
+            .getVerifier(
+                CURVY_TEST_CIRCUIT.family,
+                CURVY_TEST_CIRCUIT.version,
+                CIRCUIT_KIND_PENDING_NOTES_COMMITMENT,
+                PENDING_NOTES_COMMITMENT_BATCH_SIZE,
+                U256::ZERO,
+            )
             .call()
             .await?;
         install_accept_all_verifier(rpc, verifier).await?;
 
         self.aggregator
             .commitPendingNotes(
-                batch_size,
+                PENDING_NOTES_COMMITMENT_BATCH_SIZE,
+                CURVY_TEST_CIRCUIT,
                 note_ids,
                 U256::from(301),
+                U256::ZERO,
                 [U256::ZERO; 2],
                 [[U256::ZERO; 2]; 2],
                 [U256::ZERO; 2],
@@ -204,9 +223,9 @@ where
 
     /// Builds a test-only withdrawal request after replacing the configured verifier with an accept-all runtime.
     ///
-    /// The public signals follow Curvy's withdrawal circuit layout: amount, input nullifiers, the referenced
-    /// committed-note root, recipient, and token. Production callers must generate these values and a valid proof from
-    /// the owned notes instead of replacing verifier bytecode.
+    /// The words follow Curvy's withdrawal circuit layout: amount, input nullifiers, the referenced committed-note
+    /// root, recipient, and token. Production callers must generate these values and a valid proof from the owned
+    /// notes instead of replacing verifier bytecode.
     pub async fn prepare_withdrawal_transaction(
         &self,
         rpc: &RpcClient,
@@ -214,7 +233,13 @@ where
     ) -> Result<(TransactionRequest, [U256; 2])> {
         let verifier = self
             .aggregator
-            .getWithdrawalVerifier(WITHDRAWAL_MAX_INPUTS)
+            .getVerifier(
+                CURVY_TEST_CIRCUIT.family,
+                CURVY_TEST_CIRCUIT.version,
+                CIRCUIT_KIND_WITHDRAWAL,
+                WITHDRAWAL_MAX_INPUTS,
+                U256::ZERO,
+            )
             .call()
             .await?;
         install_accept_all_verifier(rpc, verifier).await?;
@@ -223,7 +248,7 @@ where
         let token = U256::from(CURVY_TEST_NATIVE_TOKEN_ID);
         let amount = U256::from(CURVY_TEST_AMOUNT);
         let notes_root = self.aggregator.currentNotesTreeRoot().call().await?;
-        let public_signals = vec![
+        let words = vec![
             amount,
             nullifiers[0],
             nullifiers[1],
@@ -233,10 +258,12 @@ where
         ];
         let call = submitWithdrawalRequestCall {
             maxInputs: WITHDRAWAL_MAX_INPUTS,
+            circuit: CURVY_TEST_CIRCUIT,
+            words,
+            commitment: U256::ZERO,
             proof_a: [U256::ZERO; 2],
             proof_b: [[U256::ZERO; 2]; 2],
             proof_c: [U256::ZERO; 2],
-            publicSignals: public_signals,
         };
         let transaction = TransactionRequest::default()
             .to(*self.aggregator.address())
