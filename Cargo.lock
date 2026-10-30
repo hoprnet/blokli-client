@@ -2100,7 +2100,7 @@ dependencies = [
  "futures",
  "futures-time",
  "hex",
- "hopr-types 5.0.0",
+ "hopr-types",
  "http",
  "indexmap 2.14.2",
  "insta",
@@ -2129,7 +2129,7 @@ dependencies = [
  "comfy-table",
  "futures",
  "hex",
- "hopr-types 5.0.0",
+ "hopr-types",
  "insta",
  "serde",
  "serde_json",
@@ -2158,7 +2158,7 @@ dependencies = [
  "hex",
  "hopli",
  "hopr-bindings",
- "hopr-types 5.0.0",
+ "hopr-types",
  "insta",
  "libc",
  "rand 0.10.3",
@@ -2413,7 +2413,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3116,7 +3116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -3492,7 +3492,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4046,7 +4046,7 @@ dependencies = [
 [[package]]
 name = "hopli"
 version = "0.20.2"
-source = "git+https://github.com/hoprnet/hopli?branch=main#590adcfc01272277d2a328766db112c3e50cc0eb"
+source = "git+https://github.com/hoprnet/hopli?branch=main#865848be43c87447a91e5b362785cd8b2695b275"
 dependencies = [
  "alloy-transport-http 2.5.0",
  "anyhow",
@@ -4054,7 +4054,7 @@ dependencies = [
  "hex",
  "hex-literal",
  "hopr-bindings",
- "hopr-types 4.1.0",
+ "hopr-types",
  "lazy_static",
  "rpassword",
  "serde",
@@ -4087,9 +4087,9 @@ dependencies = [
 
 [[package]]
 name = "hopr-types"
-version = "4.1.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9edbc7eef689f0dde57fb481404f15b671f0877dd75ff1e88c125f19a09efaf7"
+checksum = "d4e349732219ccec165d89c6c0c49905a0016240c0af6eb4b32452a9d3545363"
 dependencies = [
  "aes",
  "anyhow",
@@ -4143,62 +4143,6 @@ dependencies = [
  "tracing",
  "typenum",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "hopr-types"
-version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4e349732219ccec165d89c6c0c49905a0016240c0af6eb4b32452a9d3545363"
-dependencies = [
- "aes",
- "anyhow",
- "aquamarine",
- "ark-bn254 0.6.0",
- "ark-ec 0.6.0",
- "ark-ff 0.6.0",
- "ark-serialize 0.6.0",
- "arrayvec",
- "async-trait",
- "babyjubjub-ec",
- "bigdecimal",
- "blake3",
- "chacha20",
- "chrono",
- "cipher",
- "const-hex",
- "ctr",
- "curve25519-dalek 5.0.0",
- "digest 0.11.3",
- "ed25519-dalek 3.0.0",
- "elliptic-curve 0.14.3",
- "float-cmp",
- "hash2curve",
- "hex-literal",
- "hybrid-array",
- "k256 0.14.0",
- "lazy_static",
- "libp2p-identity",
- "multiaddr",
- "num_enum",
- "poly1305",
- "primitive-types 0.14.0",
- "rand 0.10.3",
- "rayon",
- "regex",
- "rlp 0.6.1",
- "secp256k1 0.31.1",
- "serde",
- "serde_with",
- "sha2 0.11.1",
- "sha3 0.12.0",
- "smart-default",
- "strum",
- "subtle",
- "thiserror 2.0.21",
- "tracing",
- "typenum",
  "zeroize",
 ]
 
@@ -5779,7 +5723,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6222,7 +6166,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6279,7 +6223,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7063,7 +7007,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7731,7 +7675,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
