@@ -65,7 +65,7 @@ pub mod types {
         accounts::Account,
         balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
-        graph::OpenedChannelsGraphEntry,
+        graph::{ChannelStateCursor, ChannelStatePosition, OpenedChannelsGraphEntry},
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
         safe::{ModuleAddress, Safe},
         services::{
@@ -102,7 +102,7 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
-        graph::SubscribeGraph,
+        graph::{GraphVariables, SubscribeGraph},
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
             ModuleAddressVariables, QueryModuleAddress, QuerySafeBy, SafeByVariables, SafeSelectorInput,

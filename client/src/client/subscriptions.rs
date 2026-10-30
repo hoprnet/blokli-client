@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use cynic::SubscriptionBuilder;
 use futures::{Stream, TryStreamExt};
 
-use super::{BlokliClient, GraphQlQueries};
+use super::{BlokliClient, GraphQlQueries, ResumeQuery};
 #[cfg(feature = "curvy")]
 use crate::api::{
     internal::{
@@ -15,13 +17,13 @@ use crate::{
         AccountSelector, BlokliSubscriptionClient, ChannelSelector, Result, ServiceSelector, ServiceTypeId,
         TicketSelector, TxId,
         internal::{
-            AccountVariables, ChannelsVariables, ServiceTypeVariables, ServiceVariables, SubscribeAccounts,
-            SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment,
+            AccountVariables, ChannelsVariables, GraphVariables, ServiceTypeVariables, ServiceVariables,
+            SubscribeAccounts, SubscribeChannels, SubscribeGraph, SubscribeHealth, SubscribeSafeDeployment,
             SubscribeServiceRegistryConfig, SubscribeServiceTypes, SubscribeServices, SubscribeTicketParams,
             SubscribeTicketRedeemed, TicketRedeemedVariables,
         },
         types::{
-            Account, Channel, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe,
+            Account, Channel, ChannelStateCursor, OpenedChannelsGraphEntry, ReadinessState, RedeemTicketDetails, Safe,
             ServiceRegistryConfig, ServiceTypeUpdate, ServiceUpdate, TicketParameters, Transaction,
         },
     },
@@ -44,8 +46,16 @@ impl GraphQlQueries {
     }
 
     /// `SubscribeGraph` subscription GraphQL query.
-    pub fn subscribe_graph() -> cynic::StreamingOperation<SubscribeGraph, ()> {
-        SubscribeGraph::build(())
+    pub fn subscribe_graph() -> cynic::StreamingOperation<SubscribeGraph, GraphVariables> {
+        Self::subscribe_graph_after(None)
+    }
+
+    /// `SubscribeGraph` subscription GraphQL query that resumes after `after`, or starts with the snapshot of open
+    /// channels when `None`.
+    pub fn subscribe_graph_after(
+        after: Option<ChannelStateCursor>,
+    ) -> cynic::StreamingOperation<SubscribeGraph, GraphVariables> {
+        SubscribeGraph::build(GraphVariables { after })
     }
 
     /// `SubscribeTicketParams` subscription GraphQL query.
@@ -166,7 +176,14 @@ impl BlokliSubscriptionClient for BlokliClient {
         impl Stream<Item = Result<OpenedChannelsGraphEntry>> + Send,
         SubscriptionHealthHandle,
     )> {
-        let (stream, health) = self.build_subscription_stream(GraphQlQueries::subscribe_graph(), "graph")?;
+        // The graph subscription resumes after the last entry with a cursor, so a reconnect loses no channel change,
+        // closures included.
+        let resume: ResumeQuery<SubscribeGraph> = Arc::new(|item: &SubscribeGraph| {
+            let cursor = item.opened_channel_graph_updated.cursor.as_ref()?;
+            serde_json::to_string(&GraphQlQueries::subscribe_graph_after(Some(cursor.into()))).ok()
+        });
+        let (stream, health) =
+            self.build_resumable_subscription_stream(GraphQlQueries::subscribe_graph(), "graph", Some(resume))?;
         Ok((
             stream.try_filter_map(|item| futures::future::ok(Some(item.opened_channel_graph_updated))),
             health,

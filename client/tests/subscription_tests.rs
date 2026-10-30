@@ -1,6 +1,6 @@
 use std::{net::IpAddr, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
@@ -11,7 +11,7 @@ use blokli_client::{
 use futures::StreamExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 use url::Url;
 
@@ -620,6 +620,34 @@ async fn spawn_dns_override_streaming_server(
     Ok((base_url, server))
 }
 
+/// Consume the complete POST before replying so closing the socket cannot discard unread request bytes.
+async fn read_http_request(conn: &mut TcpStream) -> Result<String> {
+    let mut buf = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let head_end = loop {
+        let n = conn.read(&mut chunk).await?;
+        ensure!(n > 0, "connection closed before the request head ended");
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(position) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+    let body_len = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .map(|value| value.trim().parse::<usize>())
+        .transpose()?
+        .unwrap_or(0);
+    while buf.len() < head_end + body_len {
+        let n = conn.read(&mut chunk).await?;
+        ensure!(n > 0, "connection closed before the request body ended");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    Ok(head)
+}
+
 async fn spawn_delayed_streaming_server(
     events: Vec<TicketParams>,
     initial_delay: Duration,
@@ -700,51 +728,11 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
     Ok((base_url, server))
 }
 
-/// Reads a whole HTTP request, head and `content-length` body, and returns it lowercased.
-///
-/// Mock servers must call this before responding: closing a connection with request bytes still unread makes the
-/// kernel reset it, which can discard the response before the client reads it.
-async fn read_http_request(conn: &mut tokio::net::TcpStream) -> Result<String> {
-    let mut buf = Vec::new();
-    let head_end = loop {
-        if let Some(pos) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
-            break pos + 4;
-        }
-        let mut chunk = [0_u8; 4096];
-        let n = conn.read(&mut chunk).await?;
-        if n == 0 {
-            return Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase());
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    };
-
-    let content_length = String::from_utf8_lossy(&buf[..head_end])
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())
-                .flatten()
-        })
-        .unwrap_or(0);
-
-    while buf.len() < head_end + content_length {
-        let mut chunk = [0_u8; 4096];
-        let n = conn.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-
-    Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase())
-}
-
 fn format_graph_event(channel_id: &str, status: &str) -> String {
     let payload = serde_json::json!({
         "data": {
             "openedChannelGraphUpdated": {
+                "cursor": null,
                 "channel": {
                     "balance": "0 wxHOPR",
                     "closureTime": null,
