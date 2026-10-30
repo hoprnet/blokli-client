@@ -203,7 +203,8 @@ impl BlokliSubscriptionClient for BlokliClient {
         impl Stream<Item = Result<ReadinessState>> + Send,
         SubscriptionHealthHandle,
     )> {
-        let (stream, health) = self.build_subscription_stream(GraphQlQueries::subscribe_health(), "health")?;
+        let (stream, health) =
+            self.build_dedicated_subscription_stream(GraphQlQueries::subscribe_health(), "health")?;
         Ok((
             stream.try_filter_map(|item| futures::future::ok(Some(item.health))),
             health,
@@ -304,8 +305,10 @@ impl BlokliSubscriptionClient for BlokliClient {
         &self,
         tx_id: TxId,
     ) -> Result<(impl Stream<Item = Result<Transaction>> + Send, SubscriptionHealthHandle)> {
-        let (stream, health) =
-            self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id), "track_transaction")?;
+        let (stream, health) = self.build_dedicated_subscription_stream(
+            GraphQlQueries::subscribe_track_transaction(tx_id),
+            "track_transaction",
+        )?;
         Ok((
             stream.try_filter_map(|item| futures::future::ok(Some(item.transaction_updated))),
             health,
@@ -457,7 +460,7 @@ mod stream_tests {
         api::{BlokliSubscriptionClient, types::ReadinessState},
     };
 
-    const READY: &str = r#"{"data":{"health":"READY"}}"#;
+    const READY: &str = r#"{"data":{"s0":"READY"}}"#;
     /// Cut off mid-object, as a truncated frame would be.
     const TRUNCATED: &str = r#"{"data":{"heal"#;
 
@@ -581,7 +584,9 @@ mod stream_tests {
     #[tokio::test]
     async fn an_outage_degrades_the_subscription_and_a_reconnect_recovers_it() -> anyhow::Result<()> {
         let server = SseTestServer::start(vec![
-            Connection::ok(vec![event(READY)]),
+            // Held open briefly, because the connection keeps reading while the caller is not polling and the outage
+            // must not start before the first update is checked.
+            Connection::ok(vec![event(READY), Step::Wait(Duration::from_millis(300))]),
             Connection::error(503),
             Connection::error(503),
             Connection::ok(vec![event(READY), Step::Hang]),

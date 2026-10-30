@@ -963,3 +963,57 @@ async fn subscribe_service_types_reports_a_type_claim(#[future(awt)] fixture: In
 
     Ok(())
 }
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// Verifies that Blokli serves the combined document of several subscriptions on one connection: two account
+/// subscriptions with different selectors, polled together on one client, both receive their initial state.
+async fn subscriptions_of_one_client_share_a_connection(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [first, second] = fixture.sample_accounts::<2>();
+
+    tokio::try_join!(
+        fixture.deploy_safe_and_announce(first, parsed_safe_balance()),
+        fixture.deploy_safe_and_announce(second, parsed_safe_balance()),
+    )?;
+
+    for account in [first, second] {
+        let poll_client = fixture.client().clone();
+        let selector = AccountSelector::Address(*account.to_alloy_address().as_ref());
+        poll_until(
+            "account indexed for shared connection test",
+            Duration::from_secs(30),
+            Duration::from_millis(500),
+            || {
+                let client = poll_client.clone();
+                let selector = selector.clone();
+                async move {
+                    let accounts = client.query_accounts(selector).await?;
+                    Ok(if accounts.is_empty() { None } else { Some(()) })
+                }
+            },
+        )
+        .await?;
+    }
+
+    let client = fixture.client().clone();
+    let mut first_stream = client.subscribe_accounts(AccountSelector::Address(*first.to_alloy_address().as_ref()))?;
+    let mut second_stream = client.subscribe_accounts(AccountSelector::Address(*second.to_alloy_address().as_ref()))?;
+
+    let (first_account, second_account) = async { tokio::join!(first_stream.next(), second_stream.next()) }
+        .timeout(subscription_timeout())
+        .await?;
+
+    let first_account = first_account.ok_or_else(|| anyhow!("first subscription ended without an update"))??;
+    let second_account = second_account.ok_or_else(|| anyhow!("second subscription ended without an update"))??;
+    assert_eq!(
+        first_account.chain_key.to_lowercase(),
+        first.address.to_string().to_lowercase()
+    );
+    assert_eq!(
+        second_account.chain_key.to_lowercase(),
+        second.address.to_string().to_lowercase()
+    );
+
+    Ok(())
+}

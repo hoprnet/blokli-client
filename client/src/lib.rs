@@ -83,6 +83,24 @@
 //! - **Repeated items:** Blokli sends no event IDs and sends its current snapshot after each reconnect. The stream can
 //!   return the same items again. Handle them safely, for example by updating existing records by key.
 //!
+//! The long-running subscriptions of one client share a single SSE connection. The client combines them into one
+//! GraphQL document with an aliased root field per subscription and routes every incoming payload back to the stream
+//! that requested it. [`subscribe_health`](BlokliSubscriptionClient::subscribe_health) and transaction tracking each
+//! open a connection of their own instead. Consequences worth knowing:
+//!
+//! - Subscriptions require a Tokio runtime: the client reads the shared connection in a Tokio task.
+//! - A subscription registers when its stream is first polled. Subscriptions that are polled together, for example with
+//!   [`futures::join!`](futures::join) or by separate tasks started at the same time, share one connection. A
+//!   subscription created later joins the existing connection by reconnecting with the extended document, which replays
+//!   the initial state of subscriptions that emit one and can miss events while the connection is re-established.
+//! - Dropping the last subscription closes the connection. Dropping one of several subscriptions keeps the others on
+//!   the same connection.
+//! - A subscription that Blokli rejects moves to a connection of its own and retries there, so the others are not
+//!   reconnected each time it retries.
+//! - A stream that is not read fast enough loses updates instead of stalling the other streams. Its health reports
+//!   [`Lagged`](SubscriptionProblem::Lagged), and once the stream has caught up it moves to a connection of its own,
+//!   which replays its current state without reconnecting the other subscriptions.
+//!
 //! ```no_run
 //! use blokli_client::{AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient};
 //! use futures::TryStreamExt;
