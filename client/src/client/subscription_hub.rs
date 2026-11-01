@@ -14,6 +14,9 @@
 //! the slow pace; one whose payloads do not decode moves too and reconnects there after the malformed-event backoff,
 //! and one whose consumer lost events moves once it has caught up, to receive the server's state again there.
 //! Retrying it on the shared connection would reconnect, and replay the state of, every other subscription each time.
+//! A connection that carries a single subscription waits for its consumer instead of dropping events, so a slot that
+//! moved does not lag again. It stays on its own connection: moving it back would reconnect the shared connection and
+//! replay the state of every subscription on it, and the connections never outnumber the subscriptions.
 //!
 //! Health stays per subscription even though the transport is shared. The hub feeds connection-level events, such as
 //! a reconnect, a malformed frame, or any decoded event as a sign of life, into the tracker of every subscription on
@@ -54,10 +57,10 @@ const SLOT_CHANGE_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Longest time a stream of slot changes can postpone opening a connection.
 const MAX_SLOT_CHANGE_WAIT: Duration = Duration::from_millis(250);
 
-/// Per-subscription queue depth. A slot that falls this far behind loses events instead of stalling the connection,
-/// and is resynchronised once it has caught up. It has to hold the initial state of a subscription, such as one
-/// event per open channel, or a consumer slower than the network loses that state on every resynchronisation.
-/// The queue allocates as it fills, so an unused capacity costs no memory.
+/// Per-subscription queue depth. A slot on the shared connection that falls this far behind loses events instead of
+/// stalling its siblings, and is resynchronised on a connection of its own once it has caught up. It holds the
+/// initial state of a typical subscription, such as one event per open channel, so a consumer that reads a little
+/// slower than the network does not lose it. The queue allocates as it fills, so an unused capacity costs no memory.
 const SLOT_CHANNEL_CAPACITY: usize = 16_384;
 
 /// Number of deregistered aliases tolerated in a live document before the connection is rebuilt.
@@ -645,9 +648,17 @@ impl HubShared {
 
     /// Queues one event for a subscription and reports whether it was queued.
     ///
-    /// A consumer that falls behind loses events instead of stalling the connection. Its health shows the gap, and
-    /// once it has drained its queue the connection is rebuilt, which makes the server replay the missed state.
-    fn deliver(&self, scope: Scope, target: &SlotTarget, event: SlotEvent) -> bool {
+    /// On the shared connection, a consumer that falls behind loses events instead of stalling its siblings. Its
+    /// health shows the gap, and once it has drained its queue it moves to a connection of its own, which makes the
+    /// server replay the missed state. A connection that carries a single subscription has no siblings to stall, so it
+    /// waits for the consumer instead: a replay larger than the queue, such as a long Curvy history, then makes
+    /// progress instead of being dropped and restarted from the beginning on every resynchronisation.
+    async fn deliver(&self, scope: Scope, target: &SlotTarget, event: SlotEvent) -> bool {
+        if self.dedicated || matches!(scope, Scope::Isolated(_)) {
+            // Fails only once the stream is gone, which also ends the wait.
+            return target.tx.send(event).await.is_ok();
+        }
+
         match target.tx.try_send(event) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -745,7 +756,7 @@ impl HubShared {
             Err(error) => {
                 tracing::error!(%error, "failed to open the SSE connection");
                 for target in targets.values() {
-                    self.deliver(scope, target, SlotEvent::Error(error.clone()));
+                    self.deliver(scope, target, SlotEvent::Error(error.clone())).await;
                 }
                 return Outcome::Stop(SubscriptionEnd::Failed);
             }
@@ -778,7 +789,7 @@ impl HubShared {
                             bytes = event.data.len(),
                             "SSE event"
                         );
-                        match self.dispatch(scope, &targets, &event.data, malformed_event_delay) {
+                        match self.dispatch(scope, &targets, &event.data, malformed_event_delay).await {
                             Dispatch::Handled => {}
                             Dispatch::Malformed(delay) => return Outcome::Reconnect(delay),
                             Dispatch::Rejected => return Outcome::Reconnect(rejected_retry_delay(&self.cfg)),
@@ -811,7 +822,7 @@ impl HubShared {
                                 let error = BlokliClientError::from(ErrorKind::Subscription(Box::new(error)));
                                 for target in targets.values() {
                                     if first.contains(&target.id) {
-                                        self.deliver(scope, target, SlotEvent::Error(error.clone()));
+                                        self.deliver(scope, target, SlotEvent::Error(error.clone())).await;
                                     }
                                 }
                             }
@@ -858,7 +869,7 @@ impl HubShared {
     }
 
     /// Routes one SSE payload to the subscriptions that own the aliases it contains.
-    fn dispatch(
+    async fn dispatch(
         self: &Arc<Self>,
         scope: Scope,
         targets: &BTreeMap<String, SlotTarget>,
@@ -895,6 +906,8 @@ impl HubShared {
         let had_payloads = !payloads.is_empty();
         let mut decoded_any = false;
         let mut malformed = false;
+        // Subscriptions whose part of this frame failed; the frame is no sign of life for them.
+        let mut failed = BTreeSet::new();
 
         for (id, payload) in payloads {
             let Some(target) = by_id.get(&id).filter(|_| live.contains(&id)) else {
@@ -903,7 +916,7 @@ impl HubShared {
             match (target.decode)(payload) {
                 Ok(value) => {
                     decoded_any = true;
-                    if self.deliver(scope, target, SlotEvent::Data(value)) {
+                    if self.deliver(scope, target, SlotEvent::Data(value)).await {
                         self.with_health(scope, &[id], HealthTracker::data_update);
                     }
                 }
@@ -913,6 +926,7 @@ impl HubShared {
                     // on a connection of its own, so its siblings neither replay their state nor reset its backoff.
                     let error = BlokliClientError::from(ErrorKind::from(error));
                     tracing::debug!(slot = id, %error, "subscription payload does not match its selection");
+                    failed.insert(id);
                     self.with_health(scope, &[id], |health| {
                         health.problem(SubscriptionProblem::MalformedEvent, &error)
                     });
@@ -924,17 +938,12 @@ impl HubShared {
             }
         }
 
-        if decoded_any {
-            // The server sends keepalives only while the whole connection is idle, so an event for one subscription
-            // is the sign of life for all of them.
-            self.with_health(scope, &ids, HealthTracker::transport_activity);
-        }
-
         let mut rejected = false;
         for (id, errors) in slot_errors {
             let Some(target) = by_id.get(&id).filter(|_| live.contains(&id)) else {
                 continue;
             };
+            failed.insert(id);
             let error = errors_to_client_error(errors);
             let first = self.reject(
                 scope,
@@ -944,13 +953,21 @@ impl HubShared {
                 rejected_retry_delay(&self.cfg),
             );
             if !first.is_empty() {
-                self.deliver(scope, target, SlotEvent::Error(error));
+                self.deliver(scope, target, SlotEvent::Error(error)).await;
             }
 
             match scope {
                 Scope::Shared => self.isolate(id, IsolationCause::Rejected),
                 Scope::Isolated(_) => rejected = true,
             }
+        }
+
+        if had_payloads || document_errors.is_empty() {
+            // The server sends keepalives only while the whole connection is idle, so any frame it accepted is the sign
+            // of life for every subscription on the connection, including a frame that only carries the payload of a
+            // stale alias.
+            let alive: Vec<SlotId> = ids.iter().copied().filter(|id| !failed.contains(id)).collect();
+            self.with_health(scope, &alive, HealthTracker::transport_activity);
         }
 
         if !document_errors.is_empty() {
@@ -972,7 +989,7 @@ impl HubShared {
 
                 for id in first {
                     if let Some(target) = by_id.get(&id) {
-                        self.deliver(scope, target, SlotEvent::Error(error.clone()));
+                        self.deliver(scope, target, SlotEvent::Error(error.clone())).await;
                     }
                 }
 
@@ -1052,7 +1069,7 @@ async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: w
         let delay = match cause {
             Some(IsolationCause::Rejected) => rejected_retry_delay(&shared.cfg),
             Some(IsolationCause::Malformed) => next_malformed_event_delay(&shared.cfg, &mut malformed_event_delay),
-            // The consumer can only lag again after it has read a full queue, which bounds how often this repeats.
+            // A connection of its own waits for the consumer, so the slot cannot lag again and this happens once.
             Some(IsolationCause::Lagged) => Duration::ZERO,
             None => return,
         };
@@ -1907,11 +1924,13 @@ mod tests {
         // Traffic on the connection says nothing about the consumer, which is still behind.
         flood.push(keepalive());
         flood.push(Step::Hang);
-        let server = SseTestServer::start(vec![
-            Connection::ok(flood),
-            Connection::ok(vec![event(&channel_event("s0", "0xff")), Step::Hang]),
-        ])
-        .await?;
+        // A replay larger than the queue must arrive in full on the slot's own connection instead of lagging again.
+        let mut replay: Vec<Step> = (0..SLOT_CHANNEL_CAPACITY + 100)
+            .map(|_| event(&channel_event("s0", "0x02")))
+            .collect();
+        replay.push(event(&channel_event("s0", "0xff")));
+        replay.push(Step::Hang);
+        let server = SseTestServer::start(vec![Connection::ok(flood), Connection::ok(replay)]).await?;
         let client = BlokliClient::new(server.url(), config());
         let (mut channels, health) = client.subscribe_channels_with_health(channel_selector())?;
         let mut accounts = client.subscribe_accounts(AccountSelector::KeyId(7))?;
@@ -1927,16 +1946,29 @@ mod tests {
         assert_eq!(server.connections(), 1, "the connection must not wait for the consumer");
 
         let replayed = timeout(WAIT, async {
+            let mut replayed = 0;
             while let Some(channel) = channels.next().await {
-                if channel?.concrete_channel_id == "0xff" {
-                    return anyhow::Ok(true);
+                match channel?.concrete_channel_id.as_str() {
+                    "0x02" => {
+                        replayed += 1;
+                        if replayed == 1 {
+                            // Falls behind the replay, which has to wait for the consumer.
+                            sleep(Duration::from_millis(500)).await;
+                        }
+                    }
+                    "0xff" => return anyhow::Ok(replayed),
+                    _ => {}
                 }
             }
-            Ok(false)
+            Ok(replayed)
         })
         .await??;
 
-        assert!(replayed, "the state must be replayed after the consumer caught up");
+        assert_eq!(
+            replayed,
+            SLOT_CHANNEL_CAPACITY + 100,
+            "the state must be replayed in full after the consumer caught up"
+        );
         assert_eq!(server.connections(), 2);
         assert!(matches!(health.get().status, SubscriptionStatus::Recovered { .. }));
 
@@ -2141,6 +2173,40 @@ mod tests {
         .await?;
         received?;
 
+        assert_eq!(server.connections(), 1);
+        assert_ne!(accounts_handle.get().status, SubscriptionStatus::Stalled);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn events_for_a_dropped_subscription_keep_its_siblings_from_stalling() -> anyhow::Result<()> {
+        let mut steps = vec![Step::Wait(Duration::from_millis(300))];
+        for _ in 0..15 {
+            steps.push(event(&channel_event("s0", "0x01")));
+            steps.push(Step::Wait(Duration::from_millis(100)));
+        }
+        steps.push(Step::Hang);
+        let server = SseTestServer::start(vec![Connection::ok(steps)]).await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                subscription_stall_threshold: Some(Duration::from_millis(500)),
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let mut channels = client.subscribe_channels(channel_selector())?;
+        let (mut accounts, accounts_handle) = client.subscribe_accounts_with_health(AccountSelector::Any)?;
+        assert!(channels.next().now_or_never().is_none());
+        assert!(accounts.next().now_or_never().is_none());
+        wait_for(|| server.connections() == 1).await;
+        // The dropped subscription's alias stays in the live document, so the server keeps sending its events.
+        drop(channels);
+
+        let item = timeout(Duration::from_millis(1_700), accounts.next()).await;
+
+        assert!(item.is_err(), "unexpected account item: {item:?}");
         assert_eq!(server.connections(), 1);
         assert_ne!(accounts_handle.get().status, SubscriptionStatus::Stalled);
 

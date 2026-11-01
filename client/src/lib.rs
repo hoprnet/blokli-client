@@ -100,6 +100,8 @@
 //! - A stream that is not read fast enough loses updates instead of stalling the other streams. Its health reports
 //!   [`Lagged`](SubscriptionProblem::Lagged), and once the stream has caught up it moves to a connection of its own,
 //!   which replays its current state without reconnecting the other subscriptions.
+//! - A connection of its own waits for its stream to be read instead of dropping updates, so a replay larger than the
+//!   stream's buffer still arrives in full. Subscriptions that moved to a connection of their own stay there.
 //!
 //! ```no_run
 //! use blokli_client::{AccountSelector, BlokliClient, BlokliClientConfig, BlokliSubscriptionClient};
