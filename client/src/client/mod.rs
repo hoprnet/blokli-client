@@ -795,21 +795,124 @@ pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::R
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use std::{net::IpAddr, time::Duration};
 
+    use anyhow::Result;
     use cynic::GraphQlResponse;
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use launchdarkly_sdk_transport::HttpTransport;
     use mockito::{Matcher, Server};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use tokio::time::timeout;
 
     use super::{
         BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport, SCHEMA_VERSION, response_to_data,
     };
     use crate::{
-        api::{BlokliQueryClient, BlokliTransactionClient},
+        api::{BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus},
         errors::ErrorKind,
     };
+
+    fn graph_event(status: &str, cursor: Value) -> String {
+        let account = json!({
+            "chainKey": "0x1111111111111111111111111111111111111111",
+            "keyid": 1,
+            "multiAddresses": [],
+            "packetKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "safeAddress": null,
+        });
+        let payload = json!({
+            "data": {"openedChannelGraphUpdated": {
+                "cursor": cursor,
+                "channel": {
+                    "balance": "0 wxHOPR",
+                    "closureTime": null,
+                    "concreteChannelId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "destination": 1,
+                    "epoch": 1,
+                    "source": 1,
+                    "status": status,
+                    "ticketIndex": "0",
+                },
+                "destination": account,
+                "source": account,
+            }}
+        });
+        format!("event: next\ndata: {payload}\n\n")
+    }
+
+    #[tokio::test]
+    async fn graph_reconnects_with_the_last_cursor_and_delivers_missed_closures() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let initial_query = Matcher::PartialJson(json!({"variables": {"after": null}}));
+        let unavailable = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query.clone())
+            .with_status(503)
+            .expect(2)
+            .create_async()
+            .await;
+        let cursor = json!({"block": "10", "transactionIndex": "2", "logIndex": "3"});
+        let snapshot = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                [
+                    graph_event("OPEN", json!(null)),
+                    graph_event("OPEN", cursor.clone()),
+                    // A cursor-less entry must not erase the last known resume position.
+                    graph_event("OPEN", json!(null)),
+                ]
+                .concat(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let next_cursor = json!({"block": "11", "transactionIndex": "0", "logIndex": "1"});
+        let resumed = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"after": cursor}})))
+            .with_header("content-type", "text/event-stream")
+            .with_body(graph_event("CLOSED", next_cursor))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = BlokliClient::new(
+            server.url().parse()?,
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+        );
+        let mut stream = client.subscribe_graph()?;
+        for _ in 0..3 {
+            let entry = timeout(Duration::from_secs(5), stream.next())
+                .await?
+                .expect("snapshot entry")?;
+            assert_eq!(entry.channel.status, ChannelStatus::Open);
+        }
+        let closure = timeout(Duration::from_secs(5), stream.next())
+            .await?
+            .expect("missed closure")?;
+        assert_eq!(closure.channel.status, ChannelStatus::Closed);
+        let position = closure.cursor.expect("resumed entry has a cursor");
+        insta::assert_json_snapshot!(json!({
+            "block": position.block.0,
+            "transaction_index": position.transaction_index.0,
+            "log_index": position.log_index.0,
+        }), @r###"
+        {
+          "block": "11",
+          "transaction_index": "0",
+          "log_index": "1"
+        }
+        "###);
+        unavailable.assert_async().await;
+        snapshot.assert_async().await;
+        resumed.assert_async().await;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reqwest_transport_returns_streaming_response_body() {
