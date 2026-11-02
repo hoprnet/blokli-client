@@ -22,7 +22,6 @@ use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use launchdarkly_sdk_transport::{ByteStream, HttpTransport, ResponseFuture, TransportError};
 use reqwest::redirect::Policy as RedirectPolicy;
 use subscription_hub::{SlotEvent, SubscriptionHub, SubscriptionSpec};
-
 #[cfg(feature = "testing")]
 pub use testing::{
     BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, NopStateMutator,
