@@ -44,7 +44,8 @@ use tokio::sync::{mpsc, watch};
 
 use super::{
     BlokliClientConfig, DEFAULT_MALFORMED_EVENT_DELAY, MIN_RECONNECTION_DELAY, REDIRECT_LIMIT, ReqwestTransport,
-    SCHEMA_VERSION, derive_graphql_url, describe, is_rejection, problem_of, rejected_retry_delay, response_to_data,
+    ResumeQuery, SCHEMA_VERSION, derive_graphql_url, describe, is_rejection, problem_of, rejected_retry_delay,
+    response_to_data,
 };
 use crate::{
     errors::{BlokliClientError, ErrorKind},
@@ -75,6 +76,8 @@ pub(crate) type SlotId = u64;
 /// Decodes the payload of one subscription into the type its stream yields.
 type Decoder = fn(serde_json::Value) -> Result<Box<dyn Any + Send>, serde_json::Error>;
 
+type Resume = Arc<dyn Fn(&(dyn Any + Send)) -> Option<SubscriptionSpec> + Send + Sync>;
+
 fn decode<Q: DeserializeOwned + Send + 'static>(
     payload: serde_json::Value,
 ) -> Result<Box<dyn Any + Send>, serde_json::Error> {
@@ -82,11 +85,22 @@ fn decode<Q: DeserializeOwned + Send + 'static>(
 }
 
 /// One subscription rendered into a single-field GraphQL document.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct SubscriptionSpec {
     document: String,
     variables: serde_json::Value,
     decode: Decoder,
+    resume: Option<Resume>,
+}
+
+impl fmt::Debug for SubscriptionSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubscriptionSpec")
+            .field("document", &self.document)
+            .field("variables", &self.variables)
+            .field("resumable", &self.resume.is_some())
+            .finish()
+    }
 }
 
 impl SubscriptionSpec {
@@ -111,7 +125,15 @@ impl SubscriptionSpec {
             document,
             variables,
             decode: decode::<Q>,
+            resume: None,
         })
+    }
+
+    pub(crate) fn with_resume<Q: Send + 'static>(mut self, resume: ResumeQuery<Q>) -> Self {
+        self.resume = Some(Arc::new(move |payload| {
+            payload.downcast_ref::<Q>().and_then(|value| resume(value))
+        }));
+        self
     }
 }
 
@@ -227,6 +249,17 @@ impl SubscriptionHub {
         self.shared.publish_generation();
     }
 
+    /// Advances only after delivery to the caller, never past entries still queued for it.
+    fn resume_after(&self, id: SlotId, payload: &(dyn Any + Send)) {
+        let mut state = self.shared.lock_state();
+        if let Some(entry) = state.slots.get_mut(&id)
+            && let Some(next) = entry.spec.resume.as_ref().and_then(|resume| resume(payload))
+        {
+            entry.spec.document = next.document;
+            entry.spec.variables = next.variables;
+        }
+    }
+
     /// Asks for a new connection so that the server replays the state a lagging slot missed.
     ///
     /// A slot on the shared connection moves to a connection of its own for that, so the replay neither reaches its
@@ -305,6 +338,9 @@ impl Stream for SubscriptionSlot {
 
         match active.receiver.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
+                if let SlotEvent::Data(payload) = &event {
+                    this.hub.resume_after(active.guard.id, payload.as_ref());
+                }
                 // Once a slot that lost events has drained its queue, reconnect so the server replays what it missed.
                 // Waiting until then keeps the replay from being dropped as well.
                 if active.receiver.is_empty() && active.lagging.swap(false, Ordering::AcqRel) {
@@ -419,6 +455,7 @@ struct SlotSnapshot {
 struct Connection {
     body: String,
     targets: BTreeMap<String, SlotTarget>,
+    resumable: bool,
 }
 
 #[derive(Clone)]
@@ -747,8 +784,13 @@ impl HubShared {
         generation: &mut watch::Receiver<u64>,
         connection: Connection,
         malformed_event_delay: &mut Option<Duration>,
+        reconnect_delay: &mut Option<Duration>,
     ) -> Outcome {
-        let Connection { body, targets } = connection;
+        let Connection {
+            body,
+            targets,
+            resumable,
+        } = connection;
         let ids: Vec<SlotId> = targets.values().map(|target| target.id).collect();
 
         let mut stream = match self.open_stream(body) {
@@ -790,12 +832,13 @@ impl HubShared {
                             "SSE event"
                         );
                         match self.dispatch(scope, &targets, &event.data, malformed_event_delay).await {
-                            Dispatch::Handled => {}
+                            Dispatch::Handled => { *reconnect_delay = None; }
                             Dispatch::Malformed(delay) => return Outcome::Reconnect(delay),
                             Dispatch::Rejected => return Outcome::Reconnect(rejected_retry_delay(&self.cfg)),
                         }
                     }
                     Some(Ok(SSE::Comment(_))) => {
+                        *reconnect_delay = None;
                         tracing::trace!("SSE keepalive");
                         self.with_health(scope, &ids, |health| health.transport_activity());
                     }
@@ -830,6 +873,16 @@ impl HubShared {
                         }
 
                         self.with_health(scope, &ids, |health| health.problem(problem, &describe(&error)));
+                        if resumable {
+                            // Rebuild the combined document with each slot's last delivered cursor. The SSE
+                            // client's automatic retry would resend the original document instead.
+                            let max = self.cfg.stream_reconnect_timeout.max(MIN_RECONNECTION_DELAY);
+                            let delay = reconnect_delay.map_or(max.min(Duration::from_secs(2)), |last| {
+                                last.saturating_mul(2).min(max)
+                            });
+                            *reconnect_delay = Some(delay);
+                            return Outcome::Reconnect(delay);
+                        }
                     }
                     None => {
                         return match self.cfg.subscription_stream_restart_delay {
@@ -1058,6 +1111,7 @@ impl HubShared {
 
 async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: watch::Receiver<u64>) {
     let mut malformed_event_delay = None;
+    let mut reconnect_delay = None;
 
     if let Scope::Isolated(id) = scope {
         let cause = shared
@@ -1085,7 +1139,13 @@ async fn run_supervisor(shared: &Arc<HubShared>, scope: Scope, mut generation: w
         let connected: BTreeSet<SlotId> = connection.targets.values().map(|target| target.id).collect();
 
         match shared
-            .drive(scope, &mut generation, connection, &mut malformed_event_delay)
+            .drive(
+                scope,
+                &mut generation,
+                connection,
+                &mut malformed_event_delay,
+                &mut reconnect_delay,
+            )
             .await
         {
             Outcome::Rebuild => continue,
@@ -1167,7 +1227,11 @@ fn build_connection(slots: &BTreeMap<SlotId, SlotSnapshot>) -> Result<Connection
     })
     .to_string();
 
-    Ok(Connection { body, targets })
+    Ok(Connection {
+        body,
+        targets,
+        resumable: slots.values().any(|entry| entry.spec.resume.is_some()),
+    })
 }
 
 /// Splits a single-field subscription document into its variable definitions and its root field.

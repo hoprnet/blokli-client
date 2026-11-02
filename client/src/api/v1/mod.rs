@@ -65,7 +65,7 @@ pub mod types {
         accounts::Account,
         balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
-        graph::OpenedChannelsGraphEntry,
+        graph::{ChannelStateCursor, ChannelStatePosition, OpenedChannelsGraphEntry},
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
         safe::{ModuleAddress, Safe},
         services::{
@@ -102,7 +102,7 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
-        graph::SubscribeGraph,
+        graph::{GraphVariables, SubscribeGraph},
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
             ModuleAddressVariables, QueryModuleAddress, QuerySafeBy, SafeByVariables, SafeSelectorInput,
@@ -597,6 +597,8 @@ pub trait BlokliQueryClient {
 /// reported on every subscription of that connection; a subscription that Blokli rejects on its own moves to a
 /// connection of its own. [`subscribe_health`](Self::subscribe_health) and
 /// [`subscribe_track_transaction`](Self::subscribe_track_transaction) always use a connection of their own.
+/// The graph subscription resumes from its last delivered cursor when the shared connection is rebuilt, including
+/// when another subscription joins it, so closures during a disconnect are included in the resumed updates.
 pub trait BlokliSubscriptionClient {
     /// Streams channel updates matching the given [`ChannelSelector`].
     ///

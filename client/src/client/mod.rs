@@ -41,6 +41,9 @@ const DEFAULT_MALFORMED_EVENT_DELAY: Duration = Duration::from_secs(1);
 /// Schema version sent with every request via `X-Blokli-Schema-Version`.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Builds the next request from an entry delivered by a resumable subscription.
+pub(crate) type ResumeQuery<Q> = Arc<dyn Fn(&Q) -> Option<SubscriptionSpec> + Send + Sync>;
+
 /// DNS resolution override for the Blokli base URL host.
 ///
 /// This pins the configured Blokli URL hostname to a fixed socket address in reqwest without rewriting the request
@@ -340,7 +343,50 @@ impl BlokliClient {
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let spec = SubscriptionSpec::new(op)?;
+        self.subscribe_on_with_resume(hub, op, name, None)
+    }
+
+    /// Registers a resumable subscription on the client's shared connection.
+    fn build_resumable_subscription_stream<Q, V>(
+        &self,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+        resume: Option<ResumeQuery<Q>>,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        self.subscribe_on_with_resume(self.subscriptions.clone(), op, name, resume)
+    }
+
+    fn subscribe_on_with_resume<Q, V>(
+        &self,
+        hub: SubscriptionHub,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+        resume: Option<ResumeQuery<Q>>,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        let mut spec = SubscriptionSpec::new(op)?;
+        if let Some(resume) = resume {
+            spec = spec.with_resume(resume);
+        }
         let reqwest_client = self.subscription_client()?;
         let (health, handle) = HealthTracker::new(name);
 
@@ -498,21 +544,187 @@ pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::R
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use std::{net::IpAddr, time::Duration};
 
+    use anyhow::Result;
     use cynic::GraphQlResponse;
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use launchdarkly_sdk_transport::HttpTransport;
     use mockito::{Matcher, Server};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use tokio::time::timeout;
 
     use super::{
         BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport, SCHEMA_VERSION, response_to_data,
+        sse_test_server::{Connection, SseTestServer, Step, event},
     };
     use crate::{
-        api::{BlokliQueryClient, BlokliTransactionClient},
+        api::{
+            AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus,
+        },
         errors::ErrorKind,
     };
+
+    fn graph_event(status: &str, cursor: Value) -> String {
+        let account = json!({
+            "chainKey": "0x1111111111111111111111111111111111111111",
+            "keyid": 1,
+            "multiAddresses": [],
+            "packetKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "safeAddress": null,
+        });
+        let payload = json!({
+            "data": {"s0": {
+                "cursor": cursor,
+                "channel": {
+                    "balance": "0 wxHOPR",
+                    "closureTime": null,
+                    "concreteChannelId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "destination": 1,
+                    "epoch": 1,
+                    "source": 1,
+                    "status": status,
+                    "ticketIndex": "0",
+                },
+                "destination": account,
+                "source": account,
+            }}
+        });
+        format!("event: next\ndata: {payload}\n\n")
+    }
+
+    #[tokio::test]
+    async fn graph_reconnects_with_the_last_cursor_and_delivers_missed_closures() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let initial_query = Matcher::PartialJson(json!({"variables": {"s0_after": null}}));
+        let unavailable = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query.clone())
+            .with_status(503)
+            .expect(2)
+            .create_async()
+            .await;
+        let cursor = json!({"block": "10", "transactionIndex": "2", "logIndex": "3"});
+        let snapshot = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                [
+                    graph_event("OPEN", json!(null)),
+                    graph_event("OPEN", cursor.clone()),
+                    // A cursor-less entry must not erase the last known resume position.
+                    graph_event("OPEN", json!(null)),
+                ]
+                .concat(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let next_cursor = json!({"block": "11", "transactionIndex": "0", "logIndex": "1"});
+        let resumed = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"s0_after": cursor}})))
+            .with_header("content-type", "text/event-stream")
+            .with_body(graph_event("CLOSED", next_cursor))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = BlokliClient::new(
+            server.url().parse()?,
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+        );
+        let mut stream = client.subscribe_graph()?;
+        for _ in 0..3 {
+            let entry = timeout(Duration::from_secs(5), stream.next())
+                .await?
+                .expect("snapshot entry")?;
+            assert_eq!(entry.channel.status, ChannelStatus::Open);
+        }
+        let closure = timeout(Duration::from_secs(5), stream.next())
+            .await?
+            .expect("missed closure")?;
+        assert_eq!(closure.channel.status, ChannelStatus::Closed);
+        let position = closure.cursor.expect("resumed entry has a cursor");
+        insta::assert_json_snapshot!(json!({
+            "block": position.block.0,
+            "transaction_index": position.transaction_index.0,
+            "log_index": position.log_index.0,
+        }), @r###"
+        {
+          "block": "11",
+          "transaction_index": "0",
+          "log_index": "1"
+        }
+        "###);
+        unavailable.assert_async().await;
+        snapshot.assert_async().await;
+        resumed.assert_async().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn graph_shares_connections_and_resumes_after_delivered_not_queued_entries() -> Result<()> {
+        let cursor = |block: &str| json!({"block": block, "transactionIndex": "0", "logIndex": "1"});
+        let account = json!({"data": {"s1": {
+            "chainKey": "0x1111111111111111111111111111111111111111",
+            "keyid": 7,
+            "multiAddresses": [],
+            "packetKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "safeAddress": null,
+        }}});
+        let ticket_params = json!({"data": {"s2": {
+            "ticketPrice": "0.001 wxHOPR", "minTicketWinningProbability": 0.5,
+        }}});
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![
+                Step::Send(graph_event("OPEN", cursor("10"))),
+                Step::Send(graph_event("OPEN", cursor("20"))),
+                event(&account.to_string()),
+                Step::Hang,
+            ]),
+            Connection::ok(vec![
+                event(&ticket_params.to_string()),
+                Step::Send(graph_event("CLOSED", cursor("30"))),
+                Step::Hang,
+            ]),
+        ])
+        .await?;
+        let client = BlokliClient::new(server.url(), BlokliClientConfig::default());
+        let mut graph = client.subscribe_graph()?;
+        let mut accounts = client.subscribe_accounts(AccountSelector::Any)?;
+        let (first, account) = timeout(Duration::from_secs(5), async {
+            tokio::join!(graph.next(), accounts.next())
+        })
+        .await?;
+        assert_eq!(first.expect("graph entry")?.cursor.expect("cursor").block.0, "10");
+        assert_eq!(account.expect("account entry")?.keyid, 7);
+        assert_eq!(server.connections(), 1, "graph and accounts must share a connection");
+
+        // The cursor at block 20 is queued, but the caller has not received it. Adding a third subscription
+        // rebuilds the shared document and must resume the graph after block 10, so queued data is not skipped.
+        let mut tickets = client.subscribe_ticket_params()?;
+        timeout(Duration::from_secs(5), tickets.next())
+            .await?
+            .expect("ticket parameters")?;
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        let (_, body) = requests[1].split_once("\r\n\r\n").expect("HTTP request body");
+        let request: Value = serde_json::from_str(body)?;
+        assert_eq!(request["variables"]["s0_after"], cursor("10"));
+        assert!(request["query"].as_str().expect("query").contains("s1: accountUpdated"));
+        let queued = timeout(Duration::from_secs(5), graph.next())
+            .await?
+            .expect("queued graph entry")?;
+        assert_eq!(queued.cursor.expect("queued cursor").block.0, "20");
+        let closure = timeout(Duration::from_secs(5), graph.next()).await?.expect("closure")?;
+        assert_eq!(closure.channel.status, ChannelStatus::Closed);
+        assert_eq!(closure.cursor.expect("closure cursor").block.0, "30");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reqwest_transport_returns_streaming_response_body() {
