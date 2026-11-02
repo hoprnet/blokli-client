@@ -3,7 +3,7 @@ use std::sync::Arc;
 use cynic::SubscriptionBuilder;
 use futures::{Stream, TryStreamExt};
 
-use super::{BlokliClient, GraphQlQueries, ResumeQuery};
+use super::{BlokliClient, GraphQlQueries, ResumeQuery, subscription_hub::SubscriptionSpec};
 #[cfg(feature = "curvy")]
 use crate::api::{
     internal::{
@@ -180,7 +180,7 @@ impl BlokliSubscriptionClient for BlokliClient {
         // closures included.
         let resume: ResumeQuery<SubscribeGraph> = Arc::new(|item: &SubscribeGraph| {
             let cursor = item.opened_channel_graph_updated.cursor.as_ref()?;
-            serde_json::to_string(&GraphQlQueries::subscribe_graph_after(Some(cursor.into()))).ok()
+            SubscriptionSpec::new(GraphQlQueries::subscribe_graph_after(Some(cursor.into()))).ok()
         });
         let (stream, health) =
             self.build_resumable_subscription_stream(GraphQlQueries::subscribe_graph(), "graph", Some(resume))?;
@@ -220,7 +220,8 @@ impl BlokliSubscriptionClient for BlokliClient {
         impl Stream<Item = Result<ReadinessState>> + Send,
         SubscriptionHealthHandle,
     )> {
-        let (stream, health) = self.build_subscription_stream(GraphQlQueries::subscribe_health(), "health")?;
+        let (stream, health) =
+            self.build_dedicated_subscription_stream(GraphQlQueries::subscribe_health(), "health")?;
         Ok((
             stream.try_filter_map(|item| futures::future::ok(Some(item.health))),
             health,
@@ -321,8 +322,10 @@ impl BlokliSubscriptionClient for BlokliClient {
         &self,
         tx_id: TxId,
     ) -> Result<(impl Stream<Item = Result<Transaction>> + Send, SubscriptionHealthHandle)> {
-        let (stream, health) =
-            self.build_subscription_stream(GraphQlQueries::subscribe_track_transaction(tx_id), "track_transaction")?;
+        let (stream, health) = self.build_dedicated_subscription_stream(
+            GraphQlQueries::subscribe_track_transaction(tx_id),
+            "track_transaction",
+        )?;
         Ok((
             stream.try_filter_map(|item| futures::future::ok(Some(item.transaction_updated))),
             health,
@@ -474,7 +477,7 @@ mod stream_tests {
         api::{BlokliSubscriptionClient, types::ReadinessState},
     };
 
-    const READY: &str = r#"{"data":{"health":"READY"}}"#;
+    const READY: &str = r#"{"data":{"s0":"READY"}}"#;
     /// Cut off mid-object, as a truncated frame would be.
     const TRUNCATED: &str = r#"{"data":{"heal"#;
 
@@ -598,7 +601,9 @@ mod stream_tests {
     #[tokio::test]
     async fn an_outage_degrades_the_subscription_and_a_reconnect_recovers_it() -> anyhow::Result<()> {
         let server = SseTestServer::start(vec![
-            Connection::ok(vec![event(READY)]),
+            // Held open briefly, because the connection keeps reading while the caller is not polling and the outage
+            // must not start before the first update is checked.
+            Connection::ok(vec![event(READY), Step::Wait(Duration::from_millis(300))]),
             Connection::error(503),
             Connection::error(503),
             Connection::ok(vec![event(READY), Step::Hang]),
