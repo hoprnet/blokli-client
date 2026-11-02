@@ -589,6 +589,14 @@ pub trait BlokliQueryClient {
 /// [`stream_reconnect_timeout`](crate::BlokliClientConfig::stream_reconnect_timeout). Errors that cannot be retried
 /// at all are yielded and end the stream. The `*_with_health` variants also return a [`SubscriptionHealthHandle`]
 /// that reports the state of that one subscription.
+///
+/// The long-running subscriptions of one client share a single SSE connection, so the server sees one subscription
+/// request per client instead of one per subscription. Subscriptions that are polled together share the connection
+/// from the start; a subscription created later extends the document and reconnects, which replays the initial state
+/// of subscriptions that emit one. Errors that concern the whole document, such as a request the server rejects, are
+/// reported on every subscription of that connection; a subscription that Blokli rejects on its own moves to a
+/// connection of its own. [`subscribe_health`](Self::subscribe_health) and
+/// [`subscribe_track_transaction`](Self::subscribe_track_transaction) always use a connection of their own.
 pub trait BlokliSubscriptionClient {
     /// Streams channel updates matching the given [`ChannelSelector`].
     ///

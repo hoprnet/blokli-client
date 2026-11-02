@@ -5,9 +5,8 @@
 //! client reconnects.
 
 use std::{
-    future::pending,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -28,7 +27,7 @@ pub(crate) enum Step {
     Send(String),
     /// Waits before the next step.
     Wait(Duration),
-    /// Keeps the connection open without sending anything until the test ends.
+    /// Keeps the connection open without sending anything until the client closes it.
     Hang,
 }
 
@@ -64,6 +63,8 @@ pub(crate) fn keepalive() -> Step {
 pub(crate) struct SseTestServer {
     url: url::Url,
     connections: Arc<AtomicUsize>,
+    open: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<String>>>,
     task: JoinHandle<()>,
 }
 
@@ -73,17 +74,31 @@ impl SseTestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}/", listener.local_addr()?).parse()?;
         let connections = Arc::new(AtomicUsize::new(0));
+        let open = Arc::new(AtomicUsize::new(0));
+        let requests: Arc<Mutex<Vec<String>>> = Arc::default();
         let accepted = connections.clone();
+        let opened = open.clone();
+        let recorded = requests.clone();
         let task = spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 let index = accepted.fetch_add(1, Ordering::SeqCst);
                 let connection = script[index.min(script.len() - 1)].clone();
+                opened.fetch_add(1, Ordering::SeqCst);
+                let opened = opened.clone();
+                let recorded = recorded.clone();
                 spawn(async move {
-                    let _ = serve(socket, connection).await;
+                    let _ = serve(socket, connection, recorded).await;
+                    opened.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         });
-        Ok(Self { url, connections, task })
+        Ok(Self {
+            url,
+            connections,
+            open,
+            requests,
+            task,
+        })
     }
 
     /// Base URL to give to [`BlokliClient`](crate::BlokliClient).
@@ -95,6 +110,16 @@ impl SseTestServer {
     pub(crate) fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
     }
+
+    /// Number of connections that are still open.
+    pub(crate) fn open(&self) -> usize {
+        self.open.load(Ordering::SeqCst)
+    }
+
+    /// Raw requests received so far, one per accepted connection, in order.
+    pub(crate) fn requests(&self) -> Vec<String> {
+        self.requests.lock().expect("request log").clone()
+    }
 }
 
 impl Drop for SseTestServer {
@@ -103,8 +128,9 @@ impl Drop for SseTestServer {
     }
 }
 
-async fn serve(mut socket: TcpStream, connection: Connection) -> anyhow::Result<()> {
-    read_request(&mut socket).await?;
+async fn serve(mut socket: TcpStream, connection: Connection, requests: Arc<Mutex<Vec<String>>>) -> anyhow::Result<()> {
+    let request = read_request(&mut socket).await?;
+    requests.lock().expect("request log").push(request);
     let head = format!(
         "HTTP/1.1 {} Test\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
         connection.status
@@ -118,7 +144,12 @@ async fn serve(mut socket: TcpStream, connection: Connection) -> anyhow::Result<
                 socket.flush().await?;
             }
             Step::Wait(duration) => sleep(duration).await,
-            Step::Hang => pending::<()>().await,
+            Step::Hang => {
+                // Stay open without sending anything until the client closes the connection.
+                let mut buffer = [0u8; 64];
+                while matches!(socket.read(&mut buffer).await, Ok(size) if size > 0) {}
+                return Ok(());
+            }
         }
     }
     socket.shutdown().await?;
@@ -126,7 +157,7 @@ async fn serve(mut socket: TcpStream, connection: Connection) -> anyhow::Result<
 }
 
 /// Reads the request head and its body, so the client has finished sending before the response starts.
-async fn read_request(socket: &mut TcpStream) -> anyhow::Result<()> {
+async fn read_request(socket: &mut TcpStream) -> anyhow::Result<String> {
     let mut request = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -148,5 +179,5 @@ async fn read_request(socket: &mut TcpStream) -> anyhow::Result<()> {
         anyhow::ensure!(read > 0, "connection closed before the request body ended");
         request.extend_from_slice(&chunk[..read]);
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&request).into_owned())
 }
