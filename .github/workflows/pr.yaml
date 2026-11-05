@@ -133,7 +133,7 @@ jobs:
     with:
       source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
       cachix_cache_name: blokli-client
-      lint_command: "nix build -L .#clippy"
+      lint_command: "nix run -L .#check"
       audit_command: "nix run -L .#audit"
       deps: true
       # Format and pre-commit cover every file type and always run.
@@ -204,6 +204,24 @@ jobs:
       enabled: ${{ needs.changes.outputs.rust == 'true' && (matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label)) }}
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+  # Stage 1: public API against the last crates.io release. PR only, since the
+  # merge queue and release runs have nothing to compare against.
+  semver-checks:
+    name: Semver
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check semver
+        uses: hoprnet/hopr-workflows/actions/nix-action@ff4c0b7afc400ee6cf217841dc576f8a1289bcc0 # nix-action-v1.2.1
+        with:
+          source_branch: ${{ github.event.pull_request.head.sha }}
+          cachix_cache_name: blokli-client
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          command: "nix run -L .#semver-checks -- -p blokli-client"
   # Single aggregate merge gate: green only if every other job in this run
   # succeeded. Mark THIS one as the required check in the branch ruleset, so
   # adding, renaming, or removing a job never needs a ruleset change.
@@ -219,6 +237,7 @@ jobs:
       - checks
       - tests
       - build-library
+      - semver-checks
     runs-on: depot-ubuntu-24.04-2
     permissions: {}
     steps:
@@ -226,10 +245,11 @@ jobs:
         uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-          # validate-pr-title and label run on pull_request only. `tests` and
+          # validate-pr-title and label run on pull_request only. semver-checks
+          # also skips for changes outside Rust/build/Nix paths. `tests` and
           # `build-library` are input-gated on `changes.outputs.rust`; when
           # every inner job of the reusable workflow skips, the caller job
           # reports skipped as well. Their skip is allowed only for a non-Rust
           # change; a Rust change still has to run both. A failed job reds the
           # gate either way.
-          allowed-skips: ${{ needs.changes.outputs.rust == 'true' && 'validate-pr-title, label' || 'validate-pr-title, label, tests, build-library' }}
+          allowed-skips: ${{ needs.changes.outputs.rust == 'true' && 'validate-pr-title, label, semver-checks' || 'validate-pr-title, label, semver-checks, tests, build-library' }}

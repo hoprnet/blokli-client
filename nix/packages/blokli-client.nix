@@ -111,6 +111,32 @@ in
 
   clippy = clippyDerivation;
 
+  doc = builders.local.callPackage nixLib.mkRustLibrary (
+    localArgs
+    // {
+      runDoc = true;
+      cargoExtraArgs = "--all-features";
+    }
+  );
+
+  # cargo-deny bans, licenses and sources; advisories run in `nix run .#audit`
+  deny = builders.local.callPackage nixLib.mkRustLibrary (localArgs // { runDeny = true; });
+
+  # nextest does not run doctests
+  test-doc =
+    (builders.local.callPackage nixLib.mkRustLibrary (
+      localArgs
+      // {
+        runTests = true;
+        cargoExtraArgs = "--all-features";
+      }
+    )).overrideAttrs
+      (_: {
+        checkPhase = ''
+          cargo test --doc -p blokli-client --all-features
+        '';
+      });
+
   integration-tests = integrationTests;
 
   coverage = builders.localCoverage.callPackage nixLib.mkRustPackage (
