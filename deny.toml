@@ -5,7 +5,7 @@
 all-features = true
 # Unpublished test harness; its dev-only dependencies (hopli from git, the
 # alloy tree) are not shipped with the published crates.
-exclude = ["blokli-integration-tests"]
+exclude      = ["blokli-integration-tests"]
 
 [licenses]
 # The published crates are GPL-3.0-only, so GPL-3.0 dependencies are compatible.
@@ -16,8 +16,10 @@ allow = [
   "BSD-2-Clause",
   "BSD-3-Clause",
   "CC0-1.0",
+  "CDLA-Permissive-2.0",
   "GPL-3.0",
   "GPL-3.0-only",
+  "ISC",
   "LGPL-2.1-or-later",
   "MIT",
   "MIT-0",
