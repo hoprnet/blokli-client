@@ -144,9 +144,10 @@ jobs:
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
   # ── Shared tests (unit + integration) ───────────────────────────────────────
+  # Stage 2: runs only after the stage 1 checks are green.
   tests:
     name: Test
-    needs: changes
+    needs: [changes, checks]
     uses: hoprnet/hopr-workflows/.github/workflows/tests.yaml@3ee95c480962bb3c1fc0061887da9ba735f537c7 # workflow-tests-v6.1.1
     permissions:
       contents: read
@@ -164,9 +165,14 @@ jobs:
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
   # ── Build: library ─────────────────────────────────────────────────────────
+  # Stage 3: runs only after checks and tests are green. `tests` reports
+  # skipped when its path filter is false or on a fork draft PR, and a plain
+  # `needs` would skip this job with it. `!failure()` still stops the build on
+  # any failed or cancelled upstream job.
   build-library:
     name: Library ${{ matrix.architecture }}
-    needs: changes
+    needs: [changes, checks, tests]
+    if: ${{ !cancelled() && !failure() }}
     strategy:
       fail-fast: false
       matrix:
