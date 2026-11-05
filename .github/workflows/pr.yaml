@@ -186,7 +186,7 @@ jobs:
           - architecture: aarch64-darwin
             runner: depot-macos-15
             required_label: "binary:aarch64-darwin"
-    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3.1.2
+    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@bfdfd56e110ee356595faac1424b74906ed50ac9 # build-library-v3.3.2
     permissions:
       contents: read
       id-token: write
@@ -196,6 +196,8 @@ jobs:
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: blokli-client
       build_file: client/Cargo.toml
+      # Cached crane build; the callee then runs `cargo release` with `--no-verify`.
+      build_command: "nix build -L .#lib-blokli-client-${{ matrix.architecture }}"
       # No `package_name`, so the publish dry-run covers the whole workspace
       # (`cargo release publish --workspace`), matching the release workflow.
       runner: ${{ matrix.runner }}
