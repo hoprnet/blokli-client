@@ -17,7 +17,7 @@
   #
   # Core Nix ecosystem dependencies:
   # - flake-parts: Modular flake framework for better organization
-  # - nixpkgs: The main Nix package repository (using release 25.05 for stability)
+  # - nixpkgs: The main Nix package repository (release-26.05, taken from nix-lib)
   # - nix-lib: HOPR Nix library with reusable Rust build functions
   #
   # Development tools and quality assurance:
@@ -26,7 +26,8 @@
   # - flake-root: Utilities for finding flake root directory
   #
   # Input optimization strategy:
-  # All inputs follow nixpkgs where possible to reduce closure size and improve caching.
+  # nixpkgs, nixpkgs-unstable, rust-overlay and crane follow nix-lib, so every hoprnet flake on
+  # the same nix-lib release shares one set of revisions; the other inputs follow nixpkgs.
   # This is achieved through the "follows" directive below.
   inputs = {
     # Core Nix ecosystem dependencies
@@ -315,7 +316,8 @@
               pkgs.solc
               cargo-insta
               cargo-machete
-              cargo-release
+              # From unstable: cargo-release 1.1.7 needs rustc 1.97, release-26.05 ships 1.95.
+              pkgsUnstable.cargo-release
               cargo-shear
               yq
               uv
@@ -345,7 +347,7 @@
               treefmtPrograms = pkgs.lib.attrValues config.treefmt.build.programs;
               extraPackages = with pkgs; [
                 cargo-machete
-                cargo-release
+                pkgsUnstable.cargo-release
                 cargo-shear
                 zizmor
               ];
