@@ -1,7 +1,10 @@
 use std::{str::FromStr, time::Duration};
 
-use anyhow::{Context, Result};
-use blokli_client::api::{BlokliQueryClient, BlokliTransactionClient, types::TransactionStatus};
+use anyhow::{Context, Result, bail};
+use blokli_client::api::{
+    BlokliQueryClient, BlokliTransactionClient, TransactionTrackingOutcome,
+    types::{Transaction, TransactionStatus},
+};
 use blokli_integration_tests::{
     constants::parsed_safe_balance,
     fixtures::{IntegrationFixture, integration_fixture as fixture, poll_until},
@@ -19,6 +22,16 @@ use rstest::*;
 use serial_test::serial;
 
 const TX_VALUE: u128 = 1_000_000; // 0.000000000001 ETH
+
+fn confirmed_transaction(outcome: TransactionTrackingOutcome) -> Result<Transaction> {
+    match outcome {
+        TransactionTrackingOutcome::Confirmed(transaction) => Ok(transaction),
+        TransactionTrackingOutcome::StatusUnknown { tx_id } => {
+            bail!("transaction {tx_id} did not reach a terminal status before the test deadline")
+        }
+    }
+}
+
 enum ClientType {
     Rpc,
     Blokli,
@@ -157,10 +170,12 @@ async fn submit_and_track_transaction(#[future(awt)] fixture: IntegrationFixture
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 
-    let res = fixture
-        .client()
-        .track_transaction(txid.clone(), Duration::from_secs(30))
-        .await?;
+    let res = confirmed_transaction(
+        fixture
+            .client()
+            .track_transaction(txid.clone(), Duration::from_secs(30))
+            .await?,
+    )?;
     assert_eq!(res.status, TransactionStatus::Confirmed);
 
     let final_balance = fixture.rpc().get_balance(&recipient.address).await?;
@@ -246,10 +261,12 @@ async fn test_safe_module_transaction_execution_success(#[future(awt)] fixture: 
 
     let txid = fixture.submit_and_track_tx(&payload_bytes).await?;
 
-    let res = fixture
-        .client()
-        .track_transaction(txid, Duration::from_secs(60))
-        .await?;
+    let res = confirmed_transaction(
+        fixture
+            .client()
+            .track_transaction(txid, Duration::from_secs(60))
+            .await?,
+    )?;
     insta::assert_yaml_snapshot!(res, {
         ".id" => "[uuid]",
         ".submitted_at" => "[timestamp]",
@@ -284,10 +301,12 @@ async fn test_safe_module_transaction_execution_failure(#[future(awt)] fixture: 
 
     let txid = fixture.submit_and_track_tx(&payload_bytes).await?;
 
-    let res = fixture
-        .client()
-        .track_transaction(txid, Duration::from_secs(60))
-        .await?;
+    let res = confirmed_transaction(
+        fixture
+            .client()
+            .track_transaction(txid, Duration::from_secs(60))
+            .await?,
+    )?;
     insta::assert_yaml_snapshot!(res, {
         ".id" => "[uuid]",
         ".submitted_at" => "[timestamp]",
@@ -314,10 +333,12 @@ async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: Integ
 
     let txid = fixture.submit_and_track_tx(&signed_bytes).await?;
 
-    let res = fixture
-        .client()
-        .track_transaction(txid, Duration::from_secs(30))
-        .await?;
+    let res = confirmed_transaction(
+        fixture
+            .client()
+            .track_transaction(txid, Duration::from_secs(30))
+            .await?,
+    )?;
     insta::assert_yaml_snapshot!(res, {
         ".id" => "[uuid]",
         ".submitted_at" => "[timestamp]",
