@@ -1,0 +1,17 @@
+---
+source: client/src/client/subscription_hub.rs
+expression: document
+---
+{
+  "query": "subscription BlokliSubscriptions($s0_keyid: Int, $s0_packetKey: String, $s0_chainKey: String, $s1_concreteChannelId: String, $s1_destinationKeyId: Int, $s1_sourceKeyId: Int, $s1_status: ChannelStatus) {\n  s0: accountUpdated(keyid: $s0_keyid, packetKey: $s0_packetKey, chainKey: $s0_chainKey) {\n    chainKey\n    keyid\n    multiAddresses\n    packetKey\n    safeAddress\n  }\n\n  s1: channelUpdated(concreteChannelId: $s1_concreteChannelId, destinationKeyId: $s1_destinationKeyId, sourceKeyId: $s1_sourceKeyId, status: $s1_status) {\n    balance\n    closureTime\n    concreteChannelId\n    destination\n    epoch\n    source\n    status\n    ticketIndex\n  }\n}",
+  "variables": {
+    "s0_keyid": 7,
+    "s0_packetKey": null,
+    "s0_chainKey": null,
+    "s1_concreteChannelId": null,
+    "s1_destinationKeyId": null,
+    "s1_sourceKeyId": 3,
+    "s1_safeAddress": null,
+    "s1_status": null
+  }
+}

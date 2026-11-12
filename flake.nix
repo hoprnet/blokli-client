@@ -17,7 +17,7 @@
   #
   # Core Nix ecosystem dependencies:
   # - flake-parts: Modular flake framework for better organization
-  # - nixpkgs: The main Nix package repository (using release 25.05 for stability)
+  # - nixpkgs: The main Nix package repository (release-26.05, taken from nix-lib)
   # - nix-lib: HOPR Nix library with reusable Rust build functions
   #
   # Development tools and quality assurance:
@@ -26,36 +26,43 @@
   # - flake-root: Utilities for finding flake root directory
   #
   # Input optimization strategy:
-  # All inputs follow nixpkgs where possible to reduce closure size and improve caching.
+  # nixpkgs, nixpkgs-unstable, rust-overlay and crane follow nix-lib, so every hoprnet flake on
+  # the same nix-lib release shares one set of revisions; the other inputs follow nixpkgs.
   # This is achieved through the "follows" directive below.
   inputs = {
     # Core Nix ecosystem dependencies
     flake-parts.url = "github:hercules-ci/flake-parts";
-    nixpkgs.url = "github:NixOS/nixpkgs/release-26.05";
-    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # HOPR Nix Library (provides flake-utils and reusable build functions)
-    nix-lib.url = "github:hoprnet/nix-lib/v1.3.0";
+    nix-lib.url = "github:hoprnet/nix-lib/v2.1.7";
+    # nix-lib anchors the heavy pins (nixpkgs, nixpkgs-unstable, rust-overlay, crane) so every
+    # hoprnet flake on the same nix-lib release shares them. To bump them, point nix-lib.url at
+    # the new release tag, then run `nix flake update nix-lib`.
+    nixpkgs.follows = "nix-lib/nixpkgs";
+    nixpkgs-unstable.follows = "nix-lib/nixpkgs-unstable";
 
     # Rust build system
-    crane.url = "github:ipetkov/crane";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.follows = "nix-lib/crane";
+    rust-overlay.follows = "nix-lib/rust-overlay";
 
     # Development tools and quality assurance
     pre-commit.url = "github:cachix/git-hooks.nix";
     flake-root.url = "github:srid/flake-root";
+    treefmt-nix.url = "github:numtide/treefmt-nix";
     foundry.url = "github:shazow/foundry.nix";
     solc.url = "github:hellwolf/solc.nix";
 
     # Input dependency optimization
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     pre-commit.inputs.nixpkgs.follows = "nixpkgs";
-    nix-lib.inputs.nixpkgs.follows = "nixpkgs";
-    nix-lib.inputs.crane.follows = "crane";
-    nix-lib.inputs.rust-overlay.follows = "rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    nix-lib.inputs.treefmt-nix.follows = "treefmt-nix";
+    nix-lib.inputs.flake-parts.follows = "flake-parts";
+    treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
     foundry.inputs.nixpkgs.follows = "nixpkgs";
     solc.inputs.nixpkgs.follows = "nixpkgs";
+    # One flake-utils for the whole flake (foundry and solc otherwise lock their own 2022/2024 copies).
+    foundry.inputs.flake-utils.follows = "nix-lib/flake-utils";
+    solc.inputs.flake-utils.follows = "nix-lib/flake-utils";
   };
 
   outputs =
@@ -95,10 +102,22 @@
           # Filesystem utilities for source filtering
           fs = lib.fileset;
 
+          # Since the 2026-09-05 nightly, `forge` and `cast` link against
+          # libudev.so.1 (hardware-wallet support). foundry.nix does not declare
+          # that dependency, so autoPatchelfHook fails the build on Linux.
+          # Darwin is unaffected, hence the isLinux guard.
+          foundryUdevOverlay = final: prev: {
+            foundry-bin = prev.foundry-bin.overrideAttrs (old: {
+              buildInputs =
+                (old.buildInputs or [ ]) ++ prev.lib.optional prev.stdenv.hostPlatform.isLinux prev.udev;
+            });
+          };
+
           # Nixpkgs with rust-overlay, foundry overlay, and solc overlay
           overlays = [
             rust-overlay.overlays.default
             foundry.overlay
+            foundryUdevOverlay
             solc.overlay
           ];
           pkgs = import nixpkgs {
@@ -214,6 +233,7 @@
           utilityApps = {
             update-github-labels = nixLib.mkUpdateGithubLabelsApp;
             audit = nixLib.mkAuditApp { };
+            semver-checks = nixLib.mkSemverChecksApp { rustToolchain = stableToolchain; };
             check = nixLib.mkCheckApp { inherit system; };
             test = {
               type = "app";
@@ -296,7 +316,8 @@
               pkgs.solc
               cargo-insta
               cargo-machete
-              cargo-release
+              # From unstable: cargo-release 1.1.7 needs rustc 1.97, release-26.05 ships 1.95.
+              pkgsUnstable.cargo-release
               cargo-shear
               yq
               uv
@@ -326,7 +347,7 @@
               treefmtPrograms = pkgs.lib.attrValues config.treefmt.build.programs;
               extraPackages = with pkgs; [
                 cargo-machete
-                cargo-release
+                pkgsUnstable.cargo-release
                 cargo-shear
                 zizmor
               ];

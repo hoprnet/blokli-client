@@ -17,9 +17,8 @@ on:
       - ready_for_review
 permissions:
   contents: read
-  id-token: write # zizmor: ignore[excessive-permissions]
 concurrency:
-  group: ${{ github.event.pull_request.head.ref || github.ref_name }}-pr
+  group: ${{ github.event.pull_request.number || github.ref }}-pr
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
@@ -46,13 +45,17 @@ jobs:
             refactor
             perf
             test
+            ci
+            revert
           requireScope: false
           ignoreLabels: |
             bot
             ignore-semantic-pull-request
   label:
     name: Add labels
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Fork PRs get a read-only token and cannot write labels; stay green so the gate passes.
+    continue-on-error: true
     runs-on: depot-ubuntu-24.04-2
     permissions:
       contents: read
@@ -68,7 +71,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/labeler@77a4082b841706ac431479b7e2bb11216ffef250 # main on 20.02.2025
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:
           sync-labels: true
       - name: Add "external" label for forked PRs
@@ -81,39 +84,96 @@ jobs:
           if [[ "$HEAD_REPO" != "$BASE_REPO" ]]; then
             gh pr edit "$PR_NUMBER" --add-label "external"
           fi
+  # ── Path filter ──────────────────────────────────────────────────────────────
+  # Gate jobs through inputs on the reusable workflows, not with a caller-level
+  # `if:`: an input-skipped inner job still reports its required check name as
+  # skipped (green), a skipped caller job does not. Merge-queue runs always
+  # run everything.
+  changes:
+    name: Detect changes
+    runs-on: depot-ubuntu-24.04-2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ github.event_name != 'pull_request' || steps.filter.outputs.rust == 'true' }}
+      lockfile: ${{ github.event_name != 'pull_request' || steps.filter.outputs.lockfile == 'true' }}
+    steps:
+      - name: Filter changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - "client/**"
+              - "inspector/**"
+              - "tests/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "rust-toolchain.toml"
+              - "rustfmt.toml"
+              - ".cargo/**"
+              - ".config/**"
+              - "flake.nix"
+              - "flake.lock"
+              - "nix/**"
+              - "justfile"
+              - "codecov.yml"
+              - ".github/workflows/**"
+            lockfile:
+              - "Cargo.toml"
+              - "**/Cargo.toml"
+              - "Cargo.lock"
+              - ".cargo/audit.toml"
   # ── Shared checks (lint, pre-commit, audit) ─────────────────────────────────
   checks:
     name: Check
-    uses: hoprnet/hopr-workflows/.github/workflows/checks.yaml@3ee95c480962bb3c1fc0061887da9ba735f537c7 # workflow-checks-v2.1.1
+    needs: changes
+    uses: hoprnet/hopr-workflows/.github/workflows/checks.yaml@43c833e72dffe4f2f3be60193733e5657f8aa0d7 # workflow-checks-v3.0.0
     with:
-      source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+      repo_sha: ${{ github.event.pull_request.head.sha || github.sha }}
       cachix_cache_name: blokli-client
-      lint_command: "nix build -L .#clippy"
+      lint_command: "nix run -L .#check"
       audit_command: "nix run -L .#audit"
       deps: true
+      # Format and pre-commit cover every file type and always run.
+      lint: ${{ needs.changes.outputs.rust == 'true' }}
+      audit: ${{ needs.changes.outputs.lockfile == 'true' }}
       runner_small: depot-ubuntu-24.04-2
       runner_large: depot-ubuntu-24.04-4
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
   # ── Shared tests (unit + integration) ───────────────────────────────────────
+  # Stage 2: runs only after the stage 1 checks are green.
   tests:
     name: Test
-    uses: hoprnet/hopr-workflows/.github/workflows/tests.yaml@3ee95c480962bb3c1fc0061887da9ba735f537c7 # workflow-tests-v6.1.1
+    needs: [changes, checks]
+    uses: hoprnet/hopr-workflows/.github/workflows/tests.yaml@43c833e72dffe4f2f3be60193733e5657f8aa0d7 # workflow-tests-v7.0.0
+    permissions:
+      contents: read
+      id-token: write # Codecov OIDC upload in the coverage job
     with:
-      source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+      repo_sha: ${{ github.event.pull_request.head.sha || github.sha }}
       cachix_cache_name: blokli-client
       enable_unit_tests: false
-      enable_unit_coverage: true
+      enable_unit_coverage: ${{ needs.changes.outputs.rust == 'true' }}
       unit_coverage_command: "nix build -L .#coverage -o coverage.lcov"
-      enable_integration_tests: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      enable_integration_tests: ${{ needs.changes.outputs.rust == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
       integration_test_command: "nix run -L .#test-integration"
       runner_integration: depot-ubuntu-24.04-4
       test_timeout: 30
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
   # ── Build: library ─────────────────────────────────────────────────────────
+  # Stage 3: runs only after checks and tests are green. `tests` reports
+  # skipped when its path filter is false or on a fork draft PR, and a plain
+  # `needs` would skip this job with it. `!failure()` still stops the build on
+  # any failed or cancelled upstream job.
   build-library:
     name: Library ${{ matrix.architecture }}
+    needs: [changes, checks, tests]
+    if: ${{ !cancelled() && !failure() }}
     strategy:
       fail-fast: false
       matrix:
@@ -127,12 +187,12 @@ jobs:
           - architecture: aarch64-darwin
             runner: depot-macos-15
             required_label: "binary:aarch64-darwin"
-    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@45221eb1aadfc5c46751306c5c7d6d291c8a24b3 # build-library-v3.1.2
+    uses: hoprnet/hopr-workflows/.github/workflows/build-library.yaml@43c833e72dffe4f2f3be60193733e5657f8aa0d7 # build-library-v4.0.0
     permissions:
       contents: read
       id-token: write
     with:
-      source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+      repo_sha: ${{ github.event.pull_request.head.sha || github.sha }}
       version_type: commit
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: blokli-client
@@ -140,6 +200,55 @@ jobs:
       # No `package_name`, so the publish dry-run covers the whole workspace
       # (`cargo release publish --workspace`), matching the release workflow.
       runner: ${{ matrix.runner }}
-      enabled: ${{ matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label) }}
+      enabled: ${{ needs.changes.outputs.rust == 'true' && (matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label)) }}
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+  # Stage 1: public API against the last crates.io release. PR only, since the
+  # merge queue and release runs have nothing to compare against.
+  semver-checks:
+    name: Semver
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.rust == 'true'
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check semver
+        uses: hoprnet/hopr-workflows/actions/nix-action@43c833e72dffe4f2f3be60193733e5657f8aa0d7 # nix-action-v2.0.0
+        with:
+          repo_sha: ${{ github.event.pull_request.head.sha }}
+          cachix_cache_name: blokli-client
+          cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          command: "nix run -L .#semver-checks -- -p blokli-client"
+  # Single aggregate merge gate: green only if every other job in this run
+  # succeeded. Mark THIS one as the required check in the branch ruleset, so
+  # adding, renaming, or removing a job never needs a ruleset change.
+  # `if: always()` runs it even when a dependency fails; alls-green then reds
+  # the gate on any non-success (a failed job, or a skip that is not allowed).
+  merge-gate:
+    name: Merge gate
+    if: always()
+    needs:
+      - validate-pr-title
+      - label
+      - changes
+      - checks
+      - tests
+      - build-library
+      - semver-checks
+    runs-on: depot-ubuntu-24.04-2
+    permissions: {}
+    steps:
+      - name: Require all jobs to pass
+        uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
+        with:
+          jobs: ${{ toJSON(needs) }}
+          # validate-pr-title and label run on pull_request only. semver-checks
+          # also skips for changes outside Rust/build/Nix paths. `tests` and
+          # `build-library` are input-gated on `changes.outputs.rust`; when
+          # every inner job of the reusable workflow skips, the caller job
+          # reports skipped as well. Their skip is allowed only for a non-Rust
+          # change; a Rust change still has to run both. A failed job reds the
+          # gate either way.
+          allowed-skips: ${{ needs.changes.outputs.rust == 'true' && 'validate-pr-title, label, semver-checks' || 'validate-pr-title, label, semver-checks, tests, build-library' }}

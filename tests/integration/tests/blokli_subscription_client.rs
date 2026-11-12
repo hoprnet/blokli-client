@@ -27,6 +27,7 @@ use hopr_types::{
 use rstest::*;
 use serde_json::json;
 use serial_test::serial;
+use uuid::Uuid;
 
 #[rstest]
 #[test_log::test(tokio::test)]
@@ -315,6 +316,12 @@ async fn subscribe_graph_channel_update_on_closure(#[future(awt)] fixture: Integ
         expected_channel_id.to_lowercase()
     );
 
+    // Preserve the pending-close assertion above, then remove this randomly selected channel
+    // before another test can sample the same pair.
+    fixture
+        .finalize_outgoing_channel_closure(src, dst, &src_safe.module_address)
+        .await?;
+
     Ok(())
 }
 
@@ -435,11 +442,16 @@ async fn subscribe_safe_deployments(#[future(awt)] fixture: IntegrationFixture) 
 #[test_log::test(tokio::test)]
 #[serial]
 async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
-    // Open a long-lived SSE subscription without emitting events. A transaction
-    // subscription is unsuitable here because unknown transaction IDs now fail
-    // immediately with NOT_FOUND.
+    // Open an SSE subscription that stays valid but idle: filtering on a channel ID that cannot
+    // exist means phase 1 emits nothing and no updates ever follow, so the only traffic on the
+    // stream is the server's keepalive. Subscribing to a non-existent entity instead (e.g. a random
+    // transaction ID) makes the server emit a NOT_FOUND error and close the stream, which would
+    // leave the client reconnecting forever without ever seeing a keepalive.
     let query = json!({
-        "query": "subscription { safeDeployed { address } }"
+        "query": format!(
+            "subscription {{ channelUpdated(concreteChannelId: \"{}\") {{ concreteChannelId status }} }}",
+            format!("0x{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+        )
     });
     let request_body = serde_json::to_string(&query).expect("Failed to serialize request");
     let url = fixture
@@ -469,9 +481,11 @@ async fn subscribe_keepalive_comments(#[future(awt)] fixture: IntegrationFixture
     let comment = stream
         .filter_map(|item| {
             futures::future::ready(match item {
-                Ok(SSE::Comment(comment)) => Some(Ok(comment)),
+                Ok(SSE::Comment(comment)) => Some(Ok::<_, anyhow::Error>(comment)),
                 Ok(_) => None,
-                Err(err) => Some(Err(anyhow!("SSE error: {err}"))),
+                // eventsource-client reconnects after transient transport failures such as EOF.
+                // Keep waiting for the idle-stream keepalive instead of failing before that retry.
+                Err(_) => None,
             })
         })
         .next()
@@ -771,6 +785,10 @@ async fn subscribe_ticket_redeemed(#[future(awt)] fixture: IntegrationFixture) -
     assert_eq!(event.index.0, ticket_index.to_string(), "ticket index must match");
     assert_eq!(event.result, RedemptionResult::Redeemed, "ticket must be accepted");
 
+    fixture
+        .close_outgoing_channel(src, dst, &src_safe.module_address)
+        .await?;
+
     Ok(())
 }
 
@@ -942,6 +960,82 @@ async fn subscribe_service_types_reports_a_type_claim(#[future(awt)] fixture: In
             .eq_ignore_ascii_case(owner.address.to_string().trim_start_matches("0x"))),
         "registration always sets an owner"
     );
+
+    Ok(())
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// Verifies that the subscriptions of one client share a connection that Blokli serves with a combined document.
+///
+/// A subscription that joins later extends the shared document, so the shared connection reconnects and replays the
+/// state of the subscription already on it. With a connection per subscription, the first one would not reconnect.
+async fn subscriptions_of_one_client_share_a_connection(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [first, second] = fixture.sample_accounts::<2>();
+
+    tokio::try_join!(
+        fixture.deploy_safe_and_announce(first, parsed_safe_balance()),
+        fixture.deploy_safe_and_announce(second, parsed_safe_balance()),
+    )?;
+
+    for account in [first, second] {
+        let poll_client = fixture.client().clone();
+        let selector = AccountSelector::Address(*account.to_alloy_address().as_ref());
+        poll_until(
+            "account indexed for shared connection test",
+            Duration::from_secs(30),
+            Duration::from_millis(500),
+            || {
+                let client = poll_client.clone();
+                let selector = selector.clone();
+                async move {
+                    let accounts = client.query_accounts(selector).await?;
+                    Ok(if accounts.is_empty() { None } else { Some(()) })
+                }
+            },
+        )
+        .await?;
+    }
+
+    let client = fixture.client().clone();
+    let (mut first_stream, first_health) =
+        client.subscribe_accounts_with_health(AccountSelector::Address(*first.to_alloy_address().as_ref()))?;
+
+    let first_account = first_stream
+        .next()
+        .timeout(subscription_timeout())
+        .await?
+        .ok_or_else(|| anyhow!("first subscription ended without an update"))??;
+    assert_eq!(
+        first_account.chain_key.to_lowercase(),
+        first.address.to_string().to_lowercase()
+    );
+    assert_eq!(first_health.get().connections, 1);
+
+    let (mut second_stream, second_health) =
+        client.subscribe_accounts_with_health(AccountSelector::Address(*second.to_alloy_address().as_ref()))?;
+
+    let (first_replay, second_account) = async { tokio::join!(first_stream.next(), second_stream.next()) }
+        .timeout(subscription_timeout())
+        .await?;
+
+    let first_replay = first_replay.ok_or_else(|| anyhow!("first subscription ended without a replay"))??;
+    let second_account = second_account.ok_or_else(|| anyhow!("second subscription ended without an update"))??;
+    assert_eq!(
+        first_replay.chain_key.to_lowercase(),
+        first.address.to_string().to_lowercase()
+    );
+    assert_eq!(
+        second_account.chain_key.to_lowercase(),
+        second.address.to_string().to_lowercase()
+    );
+    assert_eq!(
+        first_health.get().connections,
+        2,
+        "the second subscription must join the first one's connection"
+    );
+    assert_eq!(second_health.get().connections, 1);
 
     Ok(())
 }

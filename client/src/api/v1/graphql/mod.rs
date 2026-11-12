@@ -29,6 +29,7 @@ pub(crate) mod schema {}
 /// GraphQL `HOPR` symbol refers to the wrapped HOPR token (wxHOPR).
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::upper_case_acronyms)]
+#[non_exhaustive]
 pub enum Token {
     /// Wrapped HOPR token (wxHOPR); the GraphQL `HOPR` symbol.
     #[cynic(rename = "HOPR")]
@@ -39,10 +40,16 @@ pub enum Token {
     /// Native chain token (xDai).
     #[cynic(rename = "NATIVE")]
     Native,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Channel lifecycle state reported by Blokli.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChannelStatus {
     /// Channel is open and can carry traffic.
     #[cynic(rename = "OPEN")]
@@ -53,10 +60,16 @@ pub enum ChannelStatus {
     /// Channel is closed.
     #[cynic(rename = "CLOSED")]
     Closed,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Readiness state for a Blokli instance.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReadinessState {
     /// Blokli reports that it is ready to serve requests.
     #[cynic(rename = "READY")]
@@ -64,6 +77,11 @@ pub enum ReadinessState {
     /// Blokli reports that it is not ready.
     #[cynic(rename = "NOT_READY")]
     NotReady,
+    /// A value unknown to this client version, sent by a newer Blokli.
+    ///
+    /// It decodes instead of failing the whole response. It cannot be sent to Blokli.
+    #[cynic(fallback)]
+    Unknown,
 }
 
 /// Date-time value as returned by the GraphQL API.
@@ -180,5 +198,53 @@ impl From<InvalidAddressError> for crate::errors::BlokliClientError {
             message: value.message,
         }
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+
+    use super::{
+        ChannelStatus, ReadinessState, Token,
+        services::{ServiceTypeUpdateKind, ServiceUpdateKind},
+        tickets::RedemptionResult,
+        txs::TransactionStatus,
+    };
+
+    /// Decode `value` as a GraphQL enum value of `T`.
+    fn decode<T: for<'de> Deserialize<'de>>(value: &str) -> T {
+        serde_json::from_value(serde_json::Value::String(value.to_string())).expect("enum value should decode")
+    }
+
+    fn encode<T: Serialize>(value: T) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(value)
+    }
+
+    #[test]
+    fn server_enums_decode_values_unknown_to_this_client() {
+        assert_eq!(decode::<Token>("SOMETHING_NEW"), Token::Unknown);
+        assert_eq!(decode::<ChannelStatus>("SOMETHING_NEW"), ChannelStatus::Unknown);
+        assert_eq!(decode::<ReadinessState>("SOMETHING_NEW"), ReadinessState::Unknown);
+        assert_eq!(decode::<TransactionStatus>("SOMETHING_NEW"), TransactionStatus::Unknown);
+        assert_eq!(decode::<RedemptionResult>("SOMETHING_NEW"), RedemptionResult::Unknown);
+        assert_eq!(decode::<ServiceUpdateKind>("SOMETHING_NEW"), ServiceUpdateKind::Unknown);
+        assert_eq!(
+            decode::<ServiceTypeUpdateKind>("SOMETHING_NEW"),
+            ServiceTypeUpdateKind::Unknown
+        );
+    }
+
+    #[test]
+    fn server_enums_still_decode_known_values() {
+        assert_eq!(decode::<ChannelStatus>("PENDINGTOCLOSE"), ChannelStatus::PendingToClose);
+        assert_eq!(decode::<TransactionStatus>("TIMEOUT"), TransactionStatus::Timeout);
+        assert_eq!(decode::<Token>("HOPR"), Token::WxHOPR);
+    }
+
+    #[test]
+    fn unknown_values_cannot_be_sent_to_blokli() {
+        assert!(encode(Token::Unknown).is_err());
+        assert_eq!(encode(Token::Native).ok(), Some(serde_json::json!("NATIVE")));
     }
 }
