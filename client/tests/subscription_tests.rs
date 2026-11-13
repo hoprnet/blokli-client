@@ -1,17 +1,17 @@
 use std::{net::IpAddr, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use blokli_client::{
     BlokliClient, BlokliClientConfig, BlokliDnsOverride,
     api::{
-        BlokliSubscriptionClient, ServiceSelector,
-        types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind},
+        BlokliSubscriptionClient, BlokliTransactionClient, ServiceSelector,
+        types::{ChannelStatus, ReadinessState, ServiceTypeUpdateKind, ServiceUpdateKind, TransactionStatus},
     },
 };
 use futures::StreamExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 use url::Url;
 
@@ -34,9 +34,10 @@ impl ReadinessEvent {
     fn format_event(&self) -> String {
         let payload = serde_json::json!({
             "data": {
-                "health": match self.0 {
+                "s0": match self.0 {
                     ReadinessState::Ready => "READY",
                     ReadinessState::NotReady => "NOT_READY",
+                    other => panic!("tests never emit {other:?}"),
                 }
             }
         });
@@ -48,7 +49,7 @@ impl TicketParams {
     fn format_event(&self) -> String {
         let payload = serde_json::json!({
             "data": {
-                "ticketParametersUpdated": {
+                "s0": {
                     "minTicketWinningProbability": self.min_ticket_winning_probability,
                     "ticketPrice": self.ticket_price,
                 }
@@ -88,6 +89,7 @@ async fn subscribe_ticket_params_recreates_stream_without_loss_or_duplication() 
             subscription_read_timeout: Some(Duration::from_secs(2)),
             subscription_tcp_keepalive: Duration::from_secs(15),
             subscription_stream_restart_delay: Some(Duration::from_millis(100)),
+            subscription_stall_threshold: None,
         },
     );
 
@@ -135,6 +137,7 @@ async fn subscribe_ticket_params_stays_open_beyond_non_streaming_timeout() -> Re
             subscription_read_timeout: Some(Duration::from_secs(2)),
             subscription_tcp_keepalive: Duration::from_secs(15),
             subscription_stream_restart_delay: Some(Duration::from_millis(100)),
+            subscription_stall_threshold: None,
         },
     );
 
@@ -169,6 +172,7 @@ async fn subscribe_ticket_params_reconnects_after_read_timeout() -> Result<()> {
             subscription_read_timeout: Some(Duration::from_millis(100)),
             subscription_tcp_keepalive: Duration::from_secs(15),
             subscription_stream_restart_delay: Some(Duration::from_millis(100)),
+            subscription_stall_threshold: None,
         },
     );
 
@@ -200,6 +204,7 @@ async fn subscribe_health_streams_state_updates() -> Result<()> {
         let body = events.iter().map(ReadinessEvent::format_event).collect::<String>();
         let response = format_sse_response(&body);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response.as_bytes()).await?;
         conn.shutdown().await?;
         Ok::<_, anyhow::Error>(())
@@ -248,6 +253,7 @@ async fn subscribe_ticket_params_uses_dns_override() -> Result<()> {
             subscription_read_timeout: Some(Duration::from_secs(2)),
             subscription_tcp_keepalive: Duration::from_secs(15),
             subscription_stream_restart_delay: Some(Duration::from_millis(100)),
+            subscription_stall_threshold: None,
         },
     );
 
@@ -281,6 +287,7 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
             subscription_read_timeout: Some(Duration::from_secs(2)),
             subscription_tcp_keepalive: Duration::from_secs(15),
             subscription_stream_restart_delay: Some(Duration::from_millis(100)),
+            subscription_stall_threshold: None,
         },
     );
 
@@ -302,7 +309,7 @@ async fn subscribe_graph_forwards_closed_channel_entries() -> Result<()> {
 #[tokio::test]
 async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result<()> {
     let body = format_curvy_event(
-        "curvyPendingNote",
+        "s0",
         serde_json::json!({
             "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
             "ephemeralKey": ["11", "12"],
@@ -339,6 +346,45 @@ async fn subscribe_curvy_pending_notes_preserves_sdk_scanning_fields() -> Result
     assert_eq!(note.amount.0, "1000");
     assert!(!note.is_plaintext);
     assert_eq!(note.position.event_item_index.0, "3");
+
+    server.await??;
+    Ok(())
+}
+
+/// A newer Blokli may report a channel status this client does not know: it must decode rather than end the
+/// subscription with an error.
+#[tokio::test]
+async fn subscribe_graph_decodes_an_unknown_channel_status() -> Result<()> {
+    let channel_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let (base_url, server) = spawn_single_streaming_server(format_graph_event(channel_id, "SOMETHING_NEW")).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let mut stream = client.subscribe_graph()?;
+    let entry = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subscription ended before delivering graph event"))??;
+
+    assert_eq!(entry.channel.status, ChannelStatus::Unknown);
+
+    server.await??;
+    Ok(())
+}
+
+/// A status added by a newer Blokli must neither fail decoding nor end tracking: the client keeps waiting for a
+/// status it knows.
+#[tokio::test]
+async fn track_transaction_waits_through_an_unknown_status() -> Result<()> {
+    let body = ["SUBMITTED", "SOMETHING_NEW", "CONFIRMED"]
+        .map(format_transaction_event)
+        .concat();
+    let (base_url, server) = spawn_single_streaming_server(body).await?;
+    let client = BlokliClient::new(base_url, BlokliClientConfig::default());
+
+    let transaction = client
+        .track_transaction("tx-1".to_string(), Duration::from_secs(2))
+        .await?;
+
+    assert_eq!(transaction.status, TransactionStatus::Confirmed);
 
     server.await??;
     Ok(())
@@ -400,7 +446,7 @@ async fn subscribe_services_forwards_a_deregistration_without_an_entry() -> Resu
 #[tokio::test]
 async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Result<()> {
     let body = format_curvy_event(
-        "curvyCommittedNote",
+        "s0",
         serde_json::json!({
             "noteId": "0x000000000000000000000000000000000000000000000000000000000000002a",
             "batchIndex": "0x0000000000000000000000000000000000000000000000000000000000000009",
@@ -441,7 +487,7 @@ async fn subscribe_curvy_committed_notes_preserves_correlation_fields() -> Resul
 async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()> {
     let payload = serde_json::json!({
         "data": {
-            "serviceTypeUpdated": {
+            "s0": {
                 "kind": "REGISTRY_POINTER_CHANGED",
                 "serviceType": null,
                 "config": null,
@@ -479,7 +525,7 @@ async fn subscribe_service_types_forwards_a_registry_wide_change() -> Result<()>
 async fn subscribe_service_registry_config_forwards_complete_state() -> Result<()> {
     let payload = serde_json::json!({
         "data": {
-            "serviceRegistryConfigUpdated": {
+            "s0": {
                 "typeRegistrationFee": "1 wxHOPR",
                 "nodeSafeRegistry": "0x5555555555555555555555555555555555555555",
             },
@@ -503,11 +549,26 @@ async fn subscribe_service_registry_config_forwards_complete_state() -> Result<(
 fn format_service_event(kind: &str, entry: Option<serde_json::Value>) -> String {
     let payload = serde_json::json!({
         "data": {
-            "serviceUpdated": {
+            "s0": {
                 "kind": kind,
                 "serviceType": "gvpn:exit",
                 "node": "0x1111111111111111111111111111111111111111",
                 "entry": entry,
+            },
+        },
+    });
+    format!("event: next\ndata: {payload}\n\n")
+}
+
+fn format_transaction_event(status: &str) -> String {
+    let payload = serde_json::json!({
+        "data": {
+            "s0": {
+                "id": "tx-1",
+                "status": status,
+                "submittedAt": "2026-10-07T00:00:00Z",
+                "transactionHash": format!("0x{}", "ab".repeat(32)),
+                "safeExecution": null,
             },
         },
     });
@@ -527,6 +588,7 @@ async fn spawn_reconnecting_server(
 
         for response in responses {
             let (mut conn, _) = listener.accept().await?;
+            read_http_request(&mut conn).await?;
             conn.write_all(response.as_bytes()).await?;
             conn.shutdown().await?;
         }
@@ -549,7 +611,7 @@ async fn spawn_dns_override_streaming_server(
     let server = tokio::spawn(async move {
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
-        let request = read_http_request_head(&mut conn).await?;
+        let request = read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(request)
@@ -558,21 +620,32 @@ async fn spawn_dns_override_streaming_server(
     Ok((base_url, server))
 }
 
-async fn read_http_request_head(conn: &mut tokio::net::TcpStream) -> Result<String> {
+/// Consume the complete POST before replying so closing the socket cannot discard unread request bytes.
+async fn read_http_request(conn: &mut TcpStream) -> Result<String> {
     let mut buf = Vec::new();
-    loop {
-        let mut chunk = [0_u8; 1024];
+    let mut chunk = [0_u8; 4096];
+    let head_end = loop {
         let n = conn.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
+        ensure!(n > 0, "connection closed before the request head ended");
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
+        if let Some(position) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
         }
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+    let body_len = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .map(|value| value.trim().parse::<usize>())
+        .transpose()?
+        .unwrap_or(0);
+    while buf.len() < head_end + body_len {
+        let n = conn.read(&mut chunk).await?;
+        ensure!(n > 0, "connection closed before the request body ended");
+        buf.extend_from_slice(&chunk[..n]);
     }
 
-    Ok(String::from_utf8_lossy(&buf).to_ascii_lowercase())
+    Ok(head)
 }
 
 async fn spawn_delayed_streaming_server(
@@ -593,6 +666,7 @@ async fn spawn_delayed_streaming_server(
         .to_string();
         let body = format_ticket_params_events(&events);
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(initial_delay).await;
         conn.write_all(body.as_bytes()).await?;
@@ -620,11 +694,13 @@ async fn spawn_timed_out_then_reconnecting_server(
         .to_string();
 
         let (mut first_conn, _) = listener.accept().await?;
+        read_http_request(&mut first_conn).await?;
         first_conn.write_all(response_headers.as_bytes()).await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         first_conn.shutdown().await?;
 
         let (mut second_conn, _) = listener.accept().await?;
+        read_http_request(&mut second_conn).await?;
         let body = format_ticket_params_events(&[event]);
         second_conn
             .write_all(format!("{response_headers}{body}").as_bytes())
@@ -643,6 +719,7 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
 
     let server = tokio::spawn(async move {
         let (mut conn, _) = listener.accept().await?;
+        read_http_request(&mut conn).await?;
         conn.write_all(format_sse_response(&body).as_bytes()).await?;
         conn.shutdown().await?;
         Ok(())
@@ -654,7 +731,8 @@ async fn spawn_single_streaming_server(body: String) -> Result<(Url, tokio::task
 fn format_graph_event(channel_id: &str, status: &str) -> String {
     let payload = serde_json::json!({
         "data": {
-            "openedChannelGraphUpdated": {
+            "s0": {
+                "cursor": null,
                 "channel": {
                     "balance": "0 wxHOPR",
                     "closureTime": null,
@@ -686,10 +764,10 @@ fn format_graph_event(channel_id: &str, status: &str) -> String {
 }
 
 #[cfg(feature = "curvy")]
-fn format_curvy_event(field: &str, note: serde_json::Value) -> String {
+fn format_curvy_event(alias: &str, note: serde_json::Value) -> String {
     let payload = serde_json::json!({
         "data": {
-            (field): note,
+            (alias): note,
         },
     });
     format!("event: next\ndata: {payload}\n\n")

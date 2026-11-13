@@ -19,6 +19,7 @@ use hopr_types::{
     primitive::prelude::{Address, ToHex},
 };
 use queries::QueryTarget;
+use serde_norway::to_string;
 use tokio::io::AsyncReadExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -51,7 +52,7 @@ impl Formats {
     pub fn serialize<T: serde::Serialize>(&self, value: T) -> anyhow::Result<String> {
         match self {
             Formats::Json => Ok(serde_json::to_string_pretty(&value)?),
-            Formats::Yaml => Ok(serde_yaml::to_string(&value)?),
+            Formats::Yaml => Ok(to_string(&value)?),
             Formats::Table => table::serialize(value),
         }
     }

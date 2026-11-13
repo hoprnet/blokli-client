@@ -48,6 +48,8 @@
 
 use std::{fmt::Formatter, time::Duration};
 
+use crate::health::SubscriptionHealthHandle;
+
 pub(crate) mod graphql;
 pub mod types {
     #[cfg(feature = "curvy")]
@@ -63,7 +65,7 @@ pub mod types {
         accounts::Account,
         balances::{HoprBalance, NativeBalance, RedeemedStats, SafeHoprAllowance},
         channels::{Channel, ChannelStats, ChannelsList, SafesBalance},
-        graph::OpenedChannelsGraphEntry,
+        graph::{ChannelStateCursor, ChannelStatePosition, OpenedChannelsGraphEntry},
         info::{ChainInfo, Compatibility, ContractAddressMap, TicketParameters},
         safe::{ModuleAddress, Safe},
         services::{
@@ -100,7 +102,7 @@ pub(crate) mod internal {
             ChannelStatsVariables, ChannelsVariables, QueryChannelCount, QueryChannelStats, QueryChannels,
             QuerySafesBalance, SafesBalanceVariables, SubscribeChannels,
         },
-        graph::SubscribeGraph,
+        graph::{GraphVariables, SubscribeGraph},
         info::{QueryChainInfo, QueryCompatibility, QueryHealth, QueryVersion, SubscribeHealth, SubscribeTicketParams},
         safe::{
             ModuleAddressVariables, QueryModuleAddress, QuerySafeBy, SafeByVariables, SafeSelectorInput,
@@ -581,8 +583,22 @@ pub trait BlokliQueryClient {
 ///
 /// Subscription methods return streams of `Result<T, BlokliClientError>`. The client uses the configured reconnect,
 /// read-timeout, TCP keepalive, and restart-delay options from [`BlokliClientConfig`](crate::BlokliClientConfig).
-/// Transport issues may be retried internally; malformed GraphQL payloads and terminal stream errors are yielded as
-/// stream items so callers can decide whether to continue, log, or abort.
+/// Transport issues and malformed events are retried internally without a limit and are not yielded. When Blokli
+/// rejects a subscription (an HTTP 4xx answer other than 408, 425 or 429, or GraphQL errors without data), the
+/// error is yielded once and the subscription keeps retrying at the slow pace of
+/// [`stream_reconnect_timeout`](crate::BlokliClientConfig::stream_reconnect_timeout). Errors that cannot be retried
+/// at all are yielded and end the stream. The `*_with_health` variants also return a [`SubscriptionHealthHandle`]
+/// that reports the state of that one subscription.
+///
+/// The long-running subscriptions of one client share a single SSE connection, so the server sees one subscription
+/// request per client instead of one per subscription. Subscriptions that are polled together share the connection
+/// from the start; a subscription created later extends the document and reconnects, which replays the initial state
+/// of subscriptions that emit one. Errors that concern the whole document, such as a request the server rejects, are
+/// reported on every subscription of that connection; a subscription that Blokli rejects on its own moves to a
+/// connection of its own. [`subscribe_health`](Self::subscribe_health) and
+/// [`subscribe_track_transaction`](Self::subscribe_track_transaction) always use a connection of their own.
+/// The graph subscription resumes from its last delivered cursor when the shared connection is rebuilt, including
+/// when another subscription joins it, so closures during a disconnect are included in the resumed updates.
 pub trait BlokliSubscriptionClient {
     /// Streams channel updates matching the given [`ChannelSelector`].
     ///
@@ -652,8 +668,8 @@ pub trait BlokliSubscriptionClient {
     /// Subscribes to on-chain ticket redemption events matching the given [`TicketSelector`].
     ///
     /// Returns an infinite stream of `Result<`[`types::RedeemTicketDetails`]`>`. Each item represents
-    /// one redemption event that passed the selector filter. The stream terminates when the
-    /// underlying SSE connection closes; errors (network, parse) are yielded as `Err` items.
+    /// one redemption event that passed the selector filter. Reconnects and errors are handled as
+    /// described on [`BlokliSubscriptionClient`].
     ///
     /// Use [`TicketSelector::Any`] to receive every redemption, or narrow by channel, issuer, or
     /// recipient address.
@@ -707,6 +723,234 @@ pub trait BlokliSubscriptionClient {
         &self,
         from_block: Option<u64>,
     ) -> Result<impl futures::Stream<Item = Result<types::CurvyCommittedNullifier>> + Send>;
+
+    // Variants that also report subscription health. Implementations that do not track health keep these
+    // defaults, which report every subscription as untracked.
+
+    /// Like [`subscribe_channels`](Self::subscribe_channels), and also returns the health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_channels_with_health(
+        &self,
+        selector: ChannelSelector,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::Channel>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_channels(selector)?,
+            SubscriptionHealthHandle::untracked("channels"),
+        ))
+    }
+
+    /// Like [`subscribe_accounts`](Self::subscribe_accounts), and also returns the health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_accounts_with_health(
+        &self,
+        selector: AccountSelector,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::Account>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_accounts(selector)?,
+            SubscriptionHealthHandle::untracked("accounts"),
+        ))
+    }
+
+    /// Like [`subscribe_graph`](Self::subscribe_graph), and also returns the health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_graph_with_health(
+        &self,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::OpenedChannelsGraphEntry>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((self.subscribe_graph()?, SubscriptionHealthHandle::untracked("graph")))
+    }
+
+    /// Like [`subscribe_ticket_params`](Self::subscribe_ticket_params), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_ticket_params_with_health(
+        &self,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::TicketParameters>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_ticket_params()?,
+            SubscriptionHealthHandle::untracked("ticket_params"),
+        ))
+    }
+
+    /// Like [`subscribe_health`](Self::subscribe_health), and also returns the health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_health_with_health(
+        &self,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::ReadinessState>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((self.subscribe_health()?, SubscriptionHealthHandle::untracked("health")))
+    }
+
+    /// Like [`subscribe_safe_deployments`](Self::subscribe_safe_deployments), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_safe_deployments_with_health(
+        &self,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::Safe>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_safe_deployments()?,
+            SubscriptionHealthHandle::untracked("safe_deployments"),
+        ))
+    }
+
+    /// Like [`subscribe_services`](Self::subscribe_services), and also returns the health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_services_with_health(
+        &self,
+        selector: ServiceSelector,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::ServiceUpdate>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_services(selector)?,
+            SubscriptionHealthHandle::untracked("services"),
+        ))
+    }
+
+    /// Like [`subscribe_service_types`](Self::subscribe_service_types), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_service_types_with_health(
+        &self,
+        service_type: Option<ServiceTypeId>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::ServiceTypeUpdate>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_service_types(service_type)?,
+            SubscriptionHealthHandle::untracked("service_types"),
+        ))
+    }
+
+    /// Like [`subscribe_service_registry_config`](Self::subscribe_service_registry_config), and also returns the health
+    /// of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_service_registry_config_with_health(
+        &self,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::ServiceRegistryConfig>> + Send + 'static,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_service_registry_config()?,
+            SubscriptionHealthHandle::untracked("service_registry_config"),
+        ))
+    }
+
+    /// Like [`subscribe_track_transaction`](Self::subscribe_track_transaction), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_track_transaction_with_health(
+        &self,
+        tx_id: TxId,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::Transaction>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_track_transaction(tx_id)?,
+            SubscriptionHealthHandle::untracked("track_transaction"),
+        ))
+    }
+
+    /// Like [`subscribe_ticket_redeemed`](Self::subscribe_ticket_redeemed), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_ticket_redeemed_with_health(
+        &self,
+        selector: TicketSelector,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::RedeemTicketDetails>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_ticket_redeemed(selector)?,
+            SubscriptionHealthHandle::untracked("ticket_redeemed"),
+        ))
+    }
+
+    #[cfg(feature = "curvy")]
+    /// Like [`subscribe_curvy_pending_notes`](Self::subscribe_curvy_pending_notes), and also returns the health of the
+    /// subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_curvy_pending_notes_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::CurvyPendingNote>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_curvy_pending_notes(from_block)?,
+            SubscriptionHealthHandle::untracked("curvy_pending_notes"),
+        ))
+    }
+
+    #[cfg(feature = "curvy")]
+    /// Like [`subscribe_curvy_committed_notes`](Self::subscribe_curvy_committed_notes), and also returns the health of
+    /// the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_curvy_committed_notes_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::CurvyCommittedNote>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_curvy_committed_notes(from_block)?,
+            SubscriptionHealthHandle::untracked("curvy_committed_notes"),
+        ))
+    }
+
+    #[cfg(feature = "curvy")]
+    /// Like [`subscribe_curvy_committed_nullifiers`](Self::subscribe_curvy_committed_nullifiers), and also returns the
+    /// health of the subscription.
+    ///
+    /// See [`health`](crate::health) for what the health reports.
+    fn subscribe_curvy_committed_nullifiers_with_health(
+        &self,
+        from_block: Option<u64>,
+    ) -> Result<(
+        impl futures::Stream<Item = Result<types::CurvyCommittedNullifier>> + Send,
+        SubscriptionHealthHandle,
+    )> {
+        Ok((
+            self.subscribe_curvy_committed_nullifiers(from_block)?,
+            SubscriptionHealthHandle::untracked("curvy_committed_nullifiers"),
+        ))
+    }
 }
 
 /// Signed transaction submission and tracking through Blokli.

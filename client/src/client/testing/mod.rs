@@ -1130,6 +1130,8 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
                 channel,
                 destination,
                 source,
+                // The in-memory client never disconnects, so it has nothing to resume from.
+                cursor: None,
             })
         }))
         .chain(
@@ -1141,6 +1143,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliSubscriptionClient for Blokl
                         channel,
                         destination,
                         source,
+                        cursor: None,
                     })
                 }),
         ))

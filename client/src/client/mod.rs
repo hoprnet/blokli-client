@@ -1,4 +1,7 @@
 mod queries;
+#[cfg(test)]
+mod sse_test_server;
+mod subscription_hub;
 mod subscriptions;
 #[cfg(feature = "testing")]
 mod testing;
@@ -7,15 +10,18 @@ mod transactions;
 use std::{
     fmt::Debug,
     future::Future,
+    io,
     net::{IpAddr, SocketAddr},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use cynic::GraphQlResponse;
-use eventsource_client::{Client, ReconnectOptionsBuilder, SSE};
+use eventsource_client::Error as SseError;
 use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use launchdarkly_sdk_transport::{ByteStream, HttpTransport, ResponseFuture, TransportError};
 use reqwest::redirect::Policy as RedirectPolicy;
+use subscription_hub::{SlotEvent, SubscriptionHub, SubscriptionSpec};
 #[cfg(feature = "testing")]
 pub use testing::{
     BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, NopStateMutator,
@@ -25,12 +31,18 @@ pub use testing::{
 use crate::{
     api::VERSION,
     errors::{BlokliClientError, ErrorKind},
+    health::{HealthTracker, SubscriptionHealthHandle, SubscriptionProblem},
 };
 
 const MIN_RECONNECTION_DELAY: Duration = Duration::from_millis(1);
+/// First wait before reconnecting after a malformed event, used when no stream restart delay is configured.
+const DEFAULT_MALFORMED_EVENT_DELAY: Duration = Duration::from_secs(1);
 
 /// Schema version sent with every request via `X-Blokli-Schema-Version`.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Builds the next request from an entry delivered by a resumable subscription.
+pub(crate) type ResumeQuery<Q> = Arc<dyn Fn(&Q) -> Option<SubscriptionSpec> + Send + Sync>;
 
 /// DNS resolution override for the Blokli base URL host.
 ///
@@ -74,73 +86,24 @@ pub struct BlokliClientConfig {
     /// If `None`, completed streams are not recreated and the returned subscription stream terminates.
     #[default(Some(Duration::from_secs(1)))]
     pub subscription_stream_restart_delay: Option<Duration>,
+    /// How long a subscription may go without any traffic before its health reports it as
+    /// [`Stalled`](crate::SubscriptionStatus::Stalled). `None` turns stall detection off.
+    ///
+    /// Traffic includes the keepalive comments Blokli sends while nothing changes (every 15 s by default), so a quiet
+    /// subscription does not stall. The check uses elapsed time, not the number of failures, and runs while the
+    /// stream is being polled even if no error arrives.
+    ///
+    /// If the server's keepalives are turned off, a quiet subscription has no traffic between reconnects. With a
+    /// [read timeout](Self::subscription_read_timeout) it reconnects every time the timeout passes, which counts as
+    /// traffic but replays the server's snapshot each time. Without a read timeout it is reported as stalled after
+    /// this threshold, so turn stall detection off in that setup.
+    #[default(Some(Duration::from_secs(90)))]
+    pub subscription_stall_threshold: Option<Duration>,
     /// Optional DNS override for the Blokli base URL host.
     ///
     /// When `None`, the client uses system DNS. When set, both GraphQL requests and SSE subscription connections use
     /// the override.
     pub dns_override: Option<BlokliDnsOverride>,
-}
-
-/// Internal state for managing GraphQL subscription streams.
-struct SubscriptionStreamState {
-    graphql_url: url::Url,
-    query: String,
-    cfg: BlokliClientConfig,
-    reqwest_client: reqwest::Client,
-    stream: Option<eventsource_client::BoxStream<eventsource_client::Result<SSE>>>,
-}
-
-impl SubscriptionStreamState {
-    fn new(
-        graphql_url: url::Url,
-        query: String,
-        config: BlokliClientConfig,
-        reqwest_client: reqwest::Client,
-    ) -> Result<Self, BlokliClientError> {
-        let mut instance = Self {
-            graphql_url,
-            query,
-            cfg: config,
-            reqwest_client,
-            stream: None,
-        };
-
-        instance.start_stream()?;
-
-        Ok(instance)
-    }
-
-    fn start_stream(&mut self) -> Result<(), BlokliClientError> {
-        let sse_err = |e| ErrorKind::Subscription(Box::new(e));
-        let initial_reconnect_delay = self
-            .cfg
-            .stream_reconnect_timeout
-            .min(Duration::from_secs(2))
-            .max(MIN_RECONNECTION_DELAY);
-        let client = eventsource_client::ClientBuilder::for_url(self.graphql_url.as_str())
-            .map_err(sse_err)?
-            .header("Accept", "text/event-stream")
-            .map_err(sse_err)?
-            .header("Content-Type", "application/json")
-            .map_err(sse_err)?
-            .header("X-Blokli-Schema-Version", &SCHEMA_VERSION.to_string())
-            .map_err(sse_err)?
-            .method("POST".into())
-            .body(self.query.clone())
-            .redirect_limit(REDIRECT_LIMIT as u32)
-            .reconnect(
-                ReconnectOptionsBuilder::new(true)
-                    .retry_initial(true)
-                    .delay(initial_reconnect_delay)
-                    .backoff_factor(2)
-                    .delay_max(self.cfg.stream_reconnect_timeout)
-                    .build(),
-            )
-            .build_with_transport(ReqwestTransport::new(self.reqwest_client.clone()));
-
-        self.stream = Some(client.stream());
-        Ok(())
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -154,19 +117,27 @@ impl ReqwestTransport {
     }
 }
 
+/// Wraps a reqwest error for eventsource-client without the request URL.
+///
+/// eventsource-client logs transport errors itself on every retry, and reqwest names the URL in its errors. The URL
+/// can carry credentials, so it is removed here, before anything can log it.
+fn transport_error(error: reqwest::Error) -> TransportError {
+    TransportError::new(error.without_url())
+}
+
 impl HttpTransport for ReqwestTransport {
     fn request(&self, request: http::Request<Option<bytes::Bytes>>) -> ResponseFuture {
         let client = self.client.clone();
         Box::pin(async move {
             let (parts, body) = request.into_parts();
             let request = http::Request::from_parts(parts, body.map(reqwest::Body::from).unwrap_or_default());
-            let request = reqwest::Request::try_from(request).map_err(TransportError::new)?;
-            let response = client.execute(request).await.map_err(TransportError::new)?;
+            let request = reqwest::Request::try_from(request).map_err(transport_error)?;
+            let response = client.execute(request).await.map_err(transport_error)?;
 
             let status = response.status();
             let version = response.version();
             let headers = response.headers().clone();
-            let body: ByteStream = Box::pin(response.bytes_stream().map_err(TransportError::new));
+            let body: ByteStream = Box::pin(response.bytes_stream().map_err(transport_error));
 
             let mut response_builder = http::Response::builder().status(status).version(version);
             if let Some(response_headers) = response_builder.headers_mut() {
@@ -188,6 +159,11 @@ impl HttpTransport for ReqwestTransport {
 pub struct BlokliClient {
     base_url: url::Url,
     cfg: BlokliClientConfig,
+    // Shared by all clones so requests reuse pooled connections instead of paying a TLS handshake each
+    query_client: Arc<OnceLock<reqwest::Client>>,
+    subscription_client: Arc<OnceLock<reqwest::Client>>,
+    // Shared by all clones so one client holds one SSE connection for all of its subscriptions
+    subscriptions: SubscriptionHub,
 }
 
 const REDIRECT_LIMIT: usize = 3;
@@ -198,7 +174,23 @@ pub struct GraphQlQueries;
 impl BlokliClient {
     /// Creates a new instance given Blokli base URL and configuration.
     pub fn new(base_url: url::Url, cfg: BlokliClientConfig) -> Self {
-        Self { base_url, cfg }
+        let subscriptions = SubscriptionHub::new(base_url.clone(), cfg.clone());
+
+        Self {
+            base_url,
+            cfg,
+            query_client: Arc::default(),
+            subscription_client: Arc::default(),
+            subscriptions,
+        }
+    }
+
+    /// Like [`Self::new`], but builds both HTTP clients up front so configuration errors surface here.
+    pub fn try_new(base_url: url::Url, cfg: BlokliClientConfig) -> Result<Self, BlokliClientError> {
+        let client = Self::new(base_url, cfg);
+        client.query_client()?;
+        client.subscription_client()?;
+        Ok(client)
     }
 
     /// Returns the client's base Blokli URL.
@@ -212,11 +204,7 @@ impl BlokliClient {
     }
 
     fn graphql_url(&self) -> Result<url::Url, BlokliClientError> {
-        let mut base = self.base_url.clone();
-        if !base.path().ends_with('/') {
-            base.set_path(&format!("{}/", base.path()));
-        }
-        Ok(base.join("graphql").map_err(ErrorKind::from)?)
+        derive_graphql_url(&self.base_url)
     }
 
     fn apply_dns_override(&self, builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder, BlokliClientError> {
@@ -236,6 +224,22 @@ impl BlokliClient {
         let addr = SocketAddr::new(dns_override.ip, port);
 
         Ok(builder.resolve(host, addr))
+    }
+
+    fn query_client(&self) -> Result<reqwest::Client, BlokliClientError> {
+        if let Some(client) = self.query_client.get() {
+            return Ok(client.clone());
+        }
+        let client = self.build_reqwest_client()?;
+        Ok(self.query_client.get_or_init(|| client).clone())
+    }
+
+    fn subscription_client(&self) -> Result<reqwest::Client, BlokliClientError> {
+        if let Some(client) = self.subscription_client.get() {
+            return Ok(client.clone());
+        }
+        let client = self.build_subscription_reqwest_client()?;
+        Ok(self.subscription_client.get_or_init(|| client).clone())
     }
 
     fn build_reqwest_client(&self) -> Result<reqwest::Client, BlokliClientError> {
@@ -275,107 +279,130 @@ impl BlokliClient {
             .map_err(ErrorKind::from)?)
     }
 
+    /// Opens the subscription `op` and returns its stream together with its health.
+    ///
+    /// `name` says what the subscription is for; it identifies the subscription in health reports.
+    ///
+    /// The long-running subscriptions of one client share a single SSE connection, so this registers a slot on the
+    /// client's hub instead of opening a connection of its own.
     fn build_subscription_stream<Q, V>(
         &self,
         op: cynic::StreamingOperation<Q, V>,
-    ) -> Result<impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static, BlokliClientError>
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
     where
-        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + 'static,
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let query = serde_json::to_string(&op).map_err(ErrorKind::from)?;
-        tracing::debug!(query, "sending SSE query");
-        let graphql_url = self.graphql_url()?;
-        let reqwest_client = self.build_subscription_reqwest_client()?;
+        self.subscribe_on(self.subscriptions.clone(), op, name)
+    }
 
-        struct PendingSubscriptionState {
-            graphql_url: url::Url,
-            query: String,
-            cfg: BlokliClientConfig,
-            reqwest_client: reqwest::Client,
+    /// Opens the subscription `op` on an SSE connection of its own and returns its stream together with its health.
+    ///
+    /// Used for subscriptions that must not share the client's connection: short-lived ones, whose arrival and
+    /// departure would otherwise reconnect every long-running subscription, and `health`, which Blokli only serves
+    /// alone while it is not ready.
+    fn build_dedicated_subscription_stream<Q, V>(
+        &self,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        let hub = SubscriptionHub::dedicated(self.base_url.clone(), self.cfg.clone());
+        self.subscribe_on(hub, op, name)
+    }
+
+    fn subscribe_on<Q, V>(
+        &self,
+        hub: SubscriptionHub,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        self.subscribe_on_with_resume(hub, op, name, None)
+    }
+
+    /// Registers a resumable subscription on the client's shared connection.
+    fn build_resumable_subscription_stream<Q, V>(
+        &self,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+        resume: Option<ResumeQuery<Q>>,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        self.subscribe_on_with_resume(self.subscriptions.clone(), op, name, resume)
+    }
+
+    fn subscribe_on_with_resume<Q, V>(
+        &self,
+        hub: SubscriptionHub,
+        op: cynic::StreamingOperation<Q, V>,
+        name: &'static str,
+        resume: Option<ResumeQuery<Q>>,
+    ) -> Result<
+        (
+            impl futures::Stream<Item = Result<Q, BlokliClientError>> + Send + 'static,
+            SubscriptionHealthHandle,
+        ),
+        BlokliClientError,
+    >
+    where
+        Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Send + 'static,
+        V: cynic::QueryVariables + cynic::serde::Serialize,
+    {
+        let mut spec = SubscriptionSpec::new(op)?;
+        if let Some(resume) = resume {
+            spec = spec.with_resume(resume);
         }
+        let reqwest_client = self.subscription_client()?;
+        let (health, handle) = HealthTracker::new(name);
 
-        enum SubscriptionState {
-            Pending(Box<PendingSubscriptionState>),
-            Active(Box<SubscriptionStreamState>),
-        }
-
-        Ok(futures::stream::try_unfold(
-            SubscriptionState::Pending(Box::new(PendingSubscriptionState {
-                graphql_url,
-                query,
-                cfg: self.cfg.clone(),
-                reqwest_client,
-            })),
-            move |state| async move {
-                let mut state = state;
-
-                loop {
-                    if let SubscriptionState::Pending(pending_state) = state {
-                        state = SubscriptionState::Active(Box::new(SubscriptionStreamState::new(
-                            pending_state.graphql_url,
-                            pending_state.query,
-                            pending_state.cfg,
-                            pending_state.reqwest_client,
-                        )?));
-                        continue;
-                    }
-
-                    let SubscriptionState::Active(mut stream_state) = state else {
-                        unreachable!("subscription state must be active");
-                    };
-
-                    if let Some(stream) = &mut stream_state.stream {
-                        match stream.next().await {
-                            Some(Ok(SSE::Event(event))) => {
-                                tracing::debug!(?event, "SSE event");
-                                let response = serde_json::from_str::<GraphQlResponse<Q>>(&event.data)
-                                    .map_err(BlokliClientError::from)
-                                    .and_then(response_to_data)?;
-                                return Ok(Some((response, SubscriptionState::Active(stream_state))));
-                            }
-                            Some(Ok(SSE::Comment(comment))) => {
-                                tracing::debug!(comment, "SSE comment");
-                                state = SubscriptionState::Active(stream_state);
-                            }
-                            Some(Ok(SSE::Connected(details))) => {
-                                tracing::debug!(?details, "SSE connection details");
-                                state = SubscriptionState::Active(stream_state);
-                            }
-                            Some(Err(error)) => {
-                                tracing::warn!(%error, "SSE transport issue detected, continuing subscription");
-                                state = SubscriptionState::Active(stream_state);
-                            }
-                            None => {
-                                if let Some(delay) = stream_state.cfg.subscription_stream_restart_delay {
-                                    let actual_delay = delay.max(MIN_RECONNECTION_DELAY);
-                                    tracing::warn!(
-                                        ?actual_delay,
-                                        "SSE stream ended, sleeping before attempting to restart"
-                                    );
-                                    futures_time::task::sleep(actual_delay.into()).await;
-                                    state = SubscriptionState::Pending(Box::new(PendingSubscriptionState {
-                                        graphql_url: stream_state.graphql_url,
-                                        query: stream_state.query,
-                                        cfg: stream_state.cfg,
-                                        reqwest_client: stream_state.reqwest_client,
-                                    }));
-                                } else {
-                                    tracing::warn!(
-                                        "SSE stream ended and no restart delay configured, stopping subscription"
-                                    );
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    } else {
-                        tracing::warn!("SSE stream missing, stopping subscription");
-                        return Ok(None);
-                    }
-                }
-            },
-        )
-        .boxed())
+        Ok((
+            hub.subscribe(spec, health, reqwest_client)
+                .map(|event| match event {
+                    // The hub decoded the payload with the decoder of this subscription's spec, so it is a `Q`.
+                    SlotEvent::Data(payload) => payload
+                        .downcast::<Q>()
+                        .map(|value| *value)
+                        .map_err(|_| ErrorKind::ParseError.into()),
+                    SlotEvent::Error(error) => Err(error),
+                })
+                .boxed(),
+            handle,
+        ))
     }
 
     fn build_raw_operation<Q, V>(
@@ -386,7 +413,7 @@ impl BlokliClient {
         Q: cynic::QueryFragment + cynic::serde::de::DeserializeOwned + Debug + 'static,
         V: cynic::QueryVariables + cynic::serde::Serialize,
     {
-        let client = self.build_reqwest_client()?;
+        let client = self.query_client()?;
         tracing::debug!(query = ?serde_json::to_string(&op), "sending Blokli query");
 
         Ok(client
@@ -414,6 +441,76 @@ impl BlokliClient {
     {
         self.build_raw_operation(op)
     }
+}
+
+/// Derives the GraphQL endpoint URL from a Blokli base URL.
+fn derive_graphql_url(base_url: &url::Url) -> Result<url::Url, BlokliClientError> {
+    let mut base = base_url.clone();
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    Ok(base.join("graphql").map_err(ErrorKind::from)?)
+}
+
+/// What an SSE error says about the subscription.
+fn problem_of(error: &SseError) -> SubscriptionProblem {
+    match error {
+        SseError::TimedOut => SubscriptionProblem::Timeout,
+        // reqwest reports its read timeout as a transport error.
+        SseError::Transport(_) | SseError::HttpStream(_) if caused_by_timeout(error) => SubscriptionProblem::Timeout,
+        SseError::UnexpectedResponse(response, _) => SubscriptionProblem::HttpStatus(response.status()),
+        SseError::Eof => SubscriptionProblem::Closed,
+        SseError::UnexpectedEof | SseError::InvalidLine(_) | SseError::InvalidEvent => {
+            SubscriptionProblem::MalformedEvent
+        }
+        _ => SubscriptionProblem::Transport,
+    }
+}
+
+/// A short description of an SSE error for logs.
+///
+/// For transport errors this is the root cause, such as "Connection refused", which says more than reqwest's
+/// generic "error sending request". Invalid lines are not quoted, because they are event payload.
+fn describe(error: &SseError) -> String {
+    match error {
+        SseError::InvalidLine(_) => "invalid SSE line".to_owned(),
+        SseError::Transport(_) | SseError::HttpStream(_) => {
+            let mut root = error.source();
+            while let Some(cause) = root.and_then(|cause| cause.source()) {
+                root = Some(cause);
+            }
+            root.map_or_else(|| "transport error".to_owned(), ToString::to_string)
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Whether an HTTP status means Blokli refuses the subscription, rather than being briefly unavailable.
+fn is_rejection(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 408 | 425 | 429)
+}
+
+/// The wait before retrying a subscription Blokli rejected: the longest reconnect wait.
+fn rejected_retry_delay(cfg: &BlokliClientConfig) -> Duration {
+    cfg.stream_reconnect_timeout.max(MIN_RECONNECTION_DELAY)
+}
+
+/// Whether a timeout anywhere in the error's causes made the SSE request fail.
+fn caused_by_timeout(error: &SseError) -> bool {
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        let timed_out = error
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+            || error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::TimedOut);
+        if timed_out {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
 }
 
 pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::Result<Q> {
@@ -447,17 +544,187 @@ pub(crate) fn response_to_data<Q>(response: GraphQlResponse<Q>) -> crate::api::R
 
 #[cfg(test)]
 mod tests {
+    use std::{net::IpAddr, time::Duration};
+
+    use anyhow::Result;
     use cynic::GraphQlResponse;
-    use futures::TryStreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use launchdarkly_sdk_transport::HttpTransport;
     use mockito::{Matcher, Server};
-    use serde_json::json;
+    use serde_json::{Value, json};
+    use tokio::time::timeout;
 
-    use super::{BlokliClient, BlokliClientConfig, ReqwestTransport, SCHEMA_VERSION, response_to_data};
+    use super::{
+        BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport, SCHEMA_VERSION, response_to_data,
+        sse_test_server::{Connection, SseTestServer, Step, event},
+    };
     use crate::{
-        api::{BlokliQueryClient, BlokliTransactionClient},
+        api::{
+            AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus,
+        },
         errors::ErrorKind,
     };
+
+    fn graph_event(status: &str, cursor: Value) -> String {
+        let account = json!({
+            "chainKey": "0x1111111111111111111111111111111111111111",
+            "keyid": 1,
+            "multiAddresses": [],
+            "packetKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "safeAddress": null,
+        });
+        let payload = json!({
+            "data": {"s0": {
+                "cursor": cursor,
+                "channel": {
+                    "balance": "0 wxHOPR",
+                    "closureTime": null,
+                    "concreteChannelId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "destination": 1,
+                    "epoch": 1,
+                    "source": 1,
+                    "status": status,
+                    "ticketIndex": "0",
+                },
+                "destination": account,
+                "source": account,
+            }}
+        });
+        format!("event: next\ndata: {payload}\n\n")
+    }
+
+    #[tokio::test]
+    async fn graph_reconnects_with_the_last_cursor_and_delivers_missed_closures() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let initial_query = Matcher::PartialJson(json!({"variables": {"s0_after": null}}));
+        let unavailable = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query.clone())
+            .with_status(503)
+            .expect(2)
+            .create_async()
+            .await;
+        let cursor = json!({"block": "10", "transactionIndex": "2", "logIndex": "3"});
+        let snapshot = server
+            .mock("POST", "/graphql")
+            .match_body(initial_query)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                [
+                    graph_event("OPEN", json!(null)),
+                    graph_event("OPEN", cursor.clone()),
+                    // A cursor-less entry must not erase the last known resume position.
+                    graph_event("OPEN", json!(null)),
+                ]
+                .concat(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let next_cursor = json!({"block": "11", "transactionIndex": "0", "logIndex": "1"});
+        let resumed = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"s0_after": cursor}})))
+            .with_header("content-type", "text/event-stream")
+            .with_body(graph_event("CLOSED", next_cursor))
+            .expect(1)
+            .create_async()
+            .await;
+        let client = BlokliClient::new(
+            server.url().parse()?,
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_millis(100),
+                ..Default::default()
+            },
+        );
+        let mut stream = client.subscribe_graph()?;
+        for _ in 0..3 {
+            let entry = timeout(Duration::from_secs(5), stream.next())
+                .await?
+                .expect("snapshot entry")?;
+            assert_eq!(entry.channel.status, ChannelStatus::Open);
+        }
+        let closure = timeout(Duration::from_secs(5), stream.next())
+            .await?
+            .expect("missed closure")?;
+        assert_eq!(closure.channel.status, ChannelStatus::Closed);
+        let position = closure.cursor.expect("resumed entry has a cursor");
+        insta::assert_json_snapshot!(json!({
+            "block": position.block.0,
+            "transaction_index": position.transaction_index.0,
+            "log_index": position.log_index.0,
+        }), @r###"
+        {
+          "block": "11",
+          "transaction_index": "0",
+          "log_index": "1"
+        }
+        "###);
+        unavailable.assert_async().await;
+        snapshot.assert_async().await;
+        resumed.assert_async().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn graph_shares_connections_and_resumes_after_delivered_not_queued_entries() -> Result<()> {
+        let cursor = |block: &str| json!({"block": block, "transactionIndex": "0", "logIndex": "1"});
+        let account = json!({"data": {"s1": {
+            "chainKey": "0x1111111111111111111111111111111111111111",
+            "keyid": 7,
+            "multiAddresses": [],
+            "packetKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "safeAddress": null,
+        }}});
+        let ticket_params = json!({"data": {"s2": {
+            "ticketPrice": "0.001 wxHOPR", "minTicketWinningProbability": 0.5,
+        }}});
+        let server = SseTestServer::start(vec![
+            Connection::ok(vec![
+                Step::Send(graph_event("OPEN", cursor("10"))),
+                Step::Send(graph_event("OPEN", cursor("20"))),
+                event(&account.to_string()),
+                Step::Hang,
+            ]),
+            Connection::ok(vec![
+                event(&ticket_params.to_string()),
+                Step::Send(graph_event("CLOSED", cursor("30"))),
+                Step::Hang,
+            ]),
+        ])
+        .await?;
+        let client = BlokliClient::new(server.url(), BlokliClientConfig::default());
+        let mut graph = client.subscribe_graph()?;
+        let mut accounts = client.subscribe_accounts(AccountSelector::Any)?;
+        let (first, account) = timeout(Duration::from_secs(5), async {
+            tokio::join!(graph.next(), accounts.next())
+        })
+        .await?;
+        assert_eq!(first.expect("graph entry")?.cursor.expect("cursor").block.0, "10");
+        assert_eq!(account.expect("account entry")?.keyid, 7);
+        assert_eq!(server.connections(), 1, "graph and accounts must share a connection");
+
+        // The cursor at block 20 is queued, but the caller has not received it. Adding a third subscription
+        // rebuilds the shared document and must resume the graph after block 10, so queued data is not skipped.
+        let mut tickets = client.subscribe_ticket_params()?;
+        timeout(Duration::from_secs(5), tickets.next())
+            .await?
+            .expect("ticket parameters")?;
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        let (_, body) = requests[1].split_once("\r\n\r\n").expect("HTTP request body");
+        let request: Value = serde_json::from_str(body)?;
+        assert_eq!(request["variables"]["s0_after"], cursor("10"));
+        assert!(request["query"].as_str().expect("query").contains("s1: accountUpdated"));
+        let queued = timeout(Duration::from_secs(5), graph.next())
+            .await?
+            .expect("queued graph entry")?;
+        assert_eq!(queued.cursor.expect("queued cursor").block.0, "20");
+        let closure = timeout(Duration::from_secs(5), graph.next()).await?.expect("closure")?;
+        assert_eq!(closure.channel.status, ChannelStatus::Closed);
+        assert_eq!(closure.cursor.expect("closure cursor").block.0, "30");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reqwest_transport_returns_streaming_response_body() {
@@ -506,6 +773,22 @@ mod tests {
         };
 
         assert!(error.to_string().contains("builder error"));
+    }
+
+    #[test]
+    fn try_new_reports_dns_override_errors_that_new_defers_to_the_first_request() {
+        let hostless_url = url::Url::parse("data:text/plain,blokli").expect("valid URL");
+        let cfg = BlokliClientConfig {
+            dns_override: Some(BlokliDnsOverride {
+                ip: IpAddr::from([203, 0, 113, 10]),
+                port: Some(443),
+            }),
+            ..Default::default()
+        };
+
+        let lazy = BlokliClient::new(hostless_url.clone(), cfg.clone());
+        assert!(lazy.query_client().is_err());
+        assert!(BlokliClient::try_new(hostless_url, cfg).is_err());
     }
 
     #[test]

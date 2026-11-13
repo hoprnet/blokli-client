@@ -6,22 +6,31 @@ license     = "GPL-3.0-only"
 name        = "blokli-inspector"
 readme      = "README.md"
 repository  = "https://github.com/hoprnet/blokli-client"
-version     = "0.14.3"
+version     = "0.14.7"
 
 
 [dependencies]
-anyhow             = { workspace = true }
-blokli-client      = { workspace = true, features = ["serde"] }
-clap               = { workspace = true }
-comfy-table        = { workspace = true }
-futures            = { workspace = true }
-hex                = { workspace = true }
-serde              = { workspace = true }
-serde_json         = { workspace = true }
-serde_yaml         = { workspace = true }
-tokio              = { workspace = true, features = ["io-std", "signal", "tracing"] }
+anyhow = { workspace = true }
+blokli-client = { workspace = true, features = ["serde"] }
+clap = { workspace = true }
+comfy-table = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+tokio = { workspace = true, features = [
+  "fs",
+  "io-std",
+  "macros",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+  "tracing",
+] }
 tracing-subscriber = { workspace = true }
-url                = { workspace = true }
+url = { workspace = true }
 
 hopr-types = { workspace = true, features = ["crypto", "primitive"] }
 

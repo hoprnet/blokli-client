@@ -960,3 +960,79 @@ async fn subscribe_service_types_reports_a_type_claim(#[future(awt)] fixture: In
 
     Ok(())
 }
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// Verifies that the subscriptions of one client share a connection that Blokli serves with a combined document.
+///
+/// A subscription that joins later extends the shared document, so the shared connection reconnects and replays the
+/// state of the subscription already on it. With a connection per subscription, the first one would not reconnect.
+async fn subscriptions_of_one_client_share_a_connection(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [first, second] = fixture.sample_accounts::<2>();
+
+    tokio::try_join!(
+        fixture.deploy_safe_and_announce(first, parsed_safe_balance()),
+        fixture.deploy_safe_and_announce(second, parsed_safe_balance()),
+    )?;
+
+    for account in [first, second] {
+        let poll_client = fixture.client().clone();
+        let selector = AccountSelector::Address(*account.to_alloy_address().as_ref());
+        poll_until(
+            "account indexed for shared connection test",
+            Duration::from_secs(30),
+            Duration::from_millis(500),
+            || {
+                let client = poll_client.clone();
+                let selector = selector.clone();
+                async move {
+                    let accounts = client.query_accounts(selector).await?;
+                    Ok(if accounts.is_empty() { None } else { Some(()) })
+                }
+            },
+        )
+        .await?;
+    }
+
+    let client = fixture.client().clone();
+    let (mut first_stream, first_health) =
+        client.subscribe_accounts_with_health(AccountSelector::Address(*first.to_alloy_address().as_ref()))?;
+
+    let first_account = first_stream
+        .next()
+        .timeout(subscription_timeout())
+        .await?
+        .ok_or_else(|| anyhow!("first subscription ended without an update"))??;
+    assert_eq!(
+        first_account.chain_key.to_lowercase(),
+        first.address.to_string().to_lowercase()
+    );
+    assert_eq!(first_health.get().connections, 1);
+
+    let (mut second_stream, second_health) =
+        client.subscribe_accounts_with_health(AccountSelector::Address(*second.to_alloy_address().as_ref()))?;
+
+    let (first_replay, second_account) = async { tokio::join!(first_stream.next(), second_stream.next()) }
+        .timeout(subscription_timeout())
+        .await?;
+
+    let first_replay = first_replay.ok_or_else(|| anyhow!("first subscription ended without a replay"))??;
+    let second_account = second_account.ok_or_else(|| anyhow!("second subscription ended without an update"))??;
+    assert_eq!(
+        first_replay.chain_key.to_lowercase(),
+        first.address.to_string().to_lowercase()
+    );
+    assert_eq!(
+        second_account.chain_key.to_lowercase(),
+        second.address.to_string().to_lowercase()
+    );
+    assert_eq!(
+        first_health.get().connections,
+        2,
+        "the second subscription must join the first one's connection"
+    );
+    assert_eq!(second_health.get().connections, 1);
+
+    Ok(())
+}
