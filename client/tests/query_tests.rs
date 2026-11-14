@@ -217,6 +217,49 @@ async fn query_services_returns_registry_entries() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn query_services_follows_next_cursor_with_bounded_page_size() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+
+    let page = |node: &str, next_cursor: &str| {
+        format!(
+            r#"{{"data":{{"services":{{"__typename":"ServicesList","services":[{{"serviceType":"gvpn:exit","node":"{node}","safe":"0x3333333333333333333333333333333333333333","metadata":"0x","registeredAt":"1","updatedAt":"1"}}],"watermark":"9","nextCursor":{next_cursor}}}}}}}"#
+        )
+    };
+
+    let first_page = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::PartialJsonString(
+            r#"{"variables":{"first":250,"after":null}}"#.into(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(page("0x1111111111111111111111111111111111111111", r#""5""#))
+        .create_async()
+        .await;
+    let second_page = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::PartialJsonString(
+            r#"{"variables":{"first":250,"after":"5","watermark":"9"}}"#.into(),
+        ))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(page("0x2222222222222222222222222222222222222222", "null"))
+        .create_async()
+        .await;
+
+    let entries = cli.query_services(ServiceSelector::Any).await?;
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].node, "0x1111111111111111111111111111111111111111");
+    assert_eq!(entries[1].node, "0x2222222222222222222222222222222222222222");
+    first_page.assert_async().await;
+    second_page.assert_async().await;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn query_services_surfaces_the_missing_filter_error() -> anyhow::Result<()> {
     let mut server = mockito::Server::new_async().await;
     let cli = BlokliClient::new(server.url().parse()?, Default::default());
