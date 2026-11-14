@@ -45,6 +45,14 @@ pub struct ServiceVariables {
     pub node: Option<String>,
 }
 
+/// Number of services requested per page.
+///
+/// Blokli charges roughly one complexity point per requested item (plus the selection's child complexity) for
+/// `services(..., liveOnly: true)`, and rejects queries above `max_query_complexity` (default 500) with
+/// "Query is too complex.". 250 stays well below that budget, and below lower operator budgets. Larger result sets are
+/// enumerated by following `next_cursor`.
+pub const SERVICE_PAGE_SIZE: i32 = 250;
+
 #[derive(cynic::QueryVariables, Debug)]
 pub struct ServicePageVariables {
     pub service_type: Option<String>,
@@ -61,7 +69,7 @@ impl ServicePageVariables {
         Self {
             service_type: filters.service_type,
             node: filters.node,
-            first: 1000,
+            first: SERVICE_PAGE_SIZE,
             after,
             watermark,
             live_only,
