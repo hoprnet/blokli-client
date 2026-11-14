@@ -10,7 +10,7 @@ expression: recorder.requests()
       variables:
         serviceType: "0x6776706e3a657869740000000000000000000000000000000000000000000000"
         node: ~
-        first: 1000
+        first: 250
         after: ~
         watermark: ~
         liveOnly: false
