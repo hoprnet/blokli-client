@@ -8,7 +8,8 @@
 use blokli_client::{
     BlokliClient,
     api::BlokliTransactionClient,
-    errors::{BlokliClientError, ErrorKind},
+    errors::{BlokliClientError, ErrorKind, HoprRefusalReason, RefusalCode},
+    types::TrackedSubmission,
 };
 use mockito::Matcher;
 
@@ -59,6 +60,11 @@ async fn a_rejected_action_reports_its_operation_and_reason() -> anyhow::Result<
         }
         other => panic!("expected a HOPR action rejection, got {other:?}"),
     }
+    // A reason this client has no variant for stays available as a string.
+    assert_eq!(
+        error.hopr_reason(),
+        Some(HoprRefusalReason::Unknown("CHANNEL_NOT_PENDING_TO_CLOSE".into()))
+    );
 
     mock.assert_async().await;
     Ok(())
@@ -142,6 +148,46 @@ async fn a_deduplicated_submission_yields_the_transaction_already_tracking_it() 
         .expect("a deduplicated submission is not a failure");
     assert_eq!(tx_id, "5a6b7c8d-0000-0000-0000-000000000000");
 
+    // The dedup-aware method reports the same id as a distinct outcome.
+    let outcome = cli.submit_and_track_transaction_outcome(SIGNED_TX).await?;
+    assert_eq!(
+        outcome,
+        TrackedSubmission::Deduplicated("5a6b7c8d-0000-0000-0000-000000000000".into())
+    );
+    assert!(outcome.is_deduplicated());
+
+    mock.expect(2).assert_async().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_new_submission_is_not_reported_as_deduplicated() -> anyhow::Result<()> {
+    let mut server = mockito::Server::new_async().await;
+    let mock = serve(
+        &mut server,
+        "MutateTrackTransaction",
+        r#"{
+          "data": {
+            "sendTransactionAsync": {
+              "__typename": "Transaction",
+              "id": "5a6b7c8d-0000-0000-0000-000000000001",
+              "status": "PENDING",
+              "submittedAt": "2026-09-23T10:00:00Z",
+              "transactionHash": "0xaabbccddeeff00112233445566778899aabbccddeeff001122334455667788990",
+              "safeExecution": null
+            }
+          }
+        }"#,
+    )
+    .await;
+
+    let cli = BlokliClient::new(server.url().parse()?, Default::default());
+    let outcome = cli.submit_and_track_transaction_outcome(SIGNED_TX).await?;
+    assert_eq!(
+        outcome,
+        TrackedSubmission::New("5a6b7c8d-0000-0000-0000-000000000001".into())
+    );
+
     mock.assert_async().await;
     Ok(())
 }
@@ -179,8 +225,38 @@ async fn an_overloaded_blokli_is_reported_as_such() -> anyhow::Result<()> {
         }
         other => panic!("expected an overload error, got {other:?}"),
     }
+    assert_eq!(error.refusal_code(), Some(RefusalCode::SubmissionCapacityExceeded));
 
     mock.assert_async().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_rpc_refusal_is_typed_and_an_unseen_code_is_kept_verbatim() -> anyhow::Result<()> {
+    for (code, expected) in [
+        ("NONCE_TOO_LOW", RefusalCode::NonceTooLow),
+        ("FUTURE_CODE", RefusalCode::Unknown("FUTURE_CODE".into())),
+    ] {
+        let mut server = mockito::Server::new_async().await;
+        let body = format!(
+            r#"{{"data":{{"sendTransactionAsync":{{"__typename":"RpcError","code":"{code}","message":"m"}}}}}}"#
+        );
+        let mock = serve(&mut server, "MutateTrackTransaction", &body).await;
+
+        let cli = BlokliClient::new(server.url().parse()?, Default::default());
+        let error = cli
+            .submit_and_track_transaction(SIGNED_TX)
+            .await
+            .expect_err("an rpc refusal must stay an error, whatever its code");
+
+        assert_eq!(error.refusal_code(), Some(expected));
+        match error.kind() {
+            ErrorKind::BlokliError { code: got, .. } => assert_eq!(got, code),
+            other => panic!("expected a blokli error, got {other:?}"),
+        }
+
+        mock.assert_async().await;
+    }
     Ok(())
 }
 

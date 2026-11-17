@@ -239,7 +239,7 @@ pub use client::{
     BlokliTestClient, BlokliTestState, BlokliTestStateMutator, BlokliTestStateSnapshot, GraphQlQueries,
     NopStateMutator, SimulatedPolicyOutcome,
 };
-pub use errors::{BlokliClientError, ErrorKind, TrackingErrorKind};
+pub use errors::{BlokliClientError, ErrorKind, HoprRefusalReason, RefusalCode, TrackingErrorKind};
 pub use health::{
     SubscriptionEnd, SubscriptionHealth, SubscriptionHealthHandle, SubscriptionId, SubscriptionProblem,
     SubscriptionStatus,
