@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use cynic::http::CynicReqwestError;
 
+use crate::api::types::TransactionDiagnosis;
+
 /// Error type for the Blokli client.
 ///
 /// Most public methods return this type for transport failures, GraphQL errors, Blokli application errors, parsing
@@ -11,12 +13,29 @@ use cynic::http::CynicReqwestError;
 /// Cloning an error is cheap and shares the underlying [`ErrorKind`], which lets one connection-level failure be
 /// reported to every subscription stream that depends on it.
 #[derive(Clone, Debug)]
-pub struct BlokliClientError(Arc<ErrorKind>);
+pub struct BlokliClientError {
+    kind: Arc<ErrorKind>,
+    unmined_diagnosis: Option<Arc<TransactionDiagnosis>>,
+}
 
 impl BlokliClientError {
     /// Returns the reference to [`ErrorKind`].
     pub fn kind(&self) -> &ErrorKind {
-        self.0.as_ref()
+        self.kind.as_ref()
+    }
+
+    /// Returns Blokli's explanation of why a timed out transaction was not mined.
+    ///
+    /// Only a [`TrackingErrorKind::Timeout`] error returned by transaction tracking can carry one, and only when
+    /// the Blokli server supports diagnoses (0.15.0 or later) and the follow-up query succeeded. Every other error
+    /// returns `None`.
+    pub fn unmined_diagnosis(&self) -> Option<&TransactionDiagnosis> {
+        self.unmined_diagnosis.as_deref()
+    }
+
+    pub(crate) fn with_unmined_diagnosis(mut self, diagnosis: TransactionDiagnosis) -> Self {
+        self.unmined_diagnosis = Some(Arc::new(diagnosis));
+        self
     }
 
     /// Returns the typed refusal code for RPC and capacity refusals.
@@ -127,19 +146,22 @@ impl From<&str> for HoprRefusalReason {
 
 impl<T: Into<ErrorKind>> From<T> for BlokliClientError {
     fn from(kind: T) -> Self {
-        Self(Arc::new(kind.into()))
+        Self {
+            kind: Arc::new(kind.into()),
+            unmined_diagnosis: None,
+        }
     }
 }
 
 impl std::fmt::Display for BlokliClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        self.kind.fmt(f)
     }
 }
 
 impl std::error::Error for BlokliClientError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref())
+        Some(self.kind.as_ref())
     }
 }
 
