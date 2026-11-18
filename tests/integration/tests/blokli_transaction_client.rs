@@ -1,9 +1,12 @@
 use std::{str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use blokli_client::api::{
-    BlokliQueryClient, BlokliTransactionClient, TransactionTrackingOutcome,
-    types::{Transaction, TransactionStatus},
+use blokli_client::{
+    ErrorKind, TrackingErrorKind,
+    api::{
+        BlokliQueryClient, BlokliTransactionClient, TransactionTrackingOutcome,
+        types::{TrackedSubmission, Transaction, TransactionStatus, UnminedReason},
+    },
 };
 use blokli_integration_tests::{
     constants::parsed_safe_balance,
@@ -345,6 +348,79 @@ async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: Integ
         ".transaction_hash" => "[tx_hash]",
         ".safe_execution.revert_reason" => "[revert_data]",
     });
+
+    Ok(())
+}
+
+/// Blokli's transaction monitor marks a transaction as timed out after this long (its default, not configurable
+/// through the integration stack), so tracking has to outlast it.
+const MONITOR_TIMEOUT_WITH_MARGIN: Duration = Duration::from_secs(8 * 60);
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// Test that a transaction that never gets mined times out with Blokli's diagnosis.
+///
+/// The transaction is signed with a nonce ahead of the sender's, so the node holds it back behind the gap. Blokli
+/// reports the diagnosis from version 0.15.0 on: older servers must keep returning the plain timeout, with no
+/// diagnosis, and without the client sending a query the server would reject.
+async fn unmined_transaction_times_out_with_diagnosis(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await? + 3;
+
+    let raw_tx = fixture
+        .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
+        .await?;
+    let signed_bytes =
+        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+
+    let version = fixture.client().query_version().await?;
+    let parsed = semver::Version::parse(version.trim().trim_start_matches('v'))
+        .with_context(|| format!("blokli reported an unparseable version {version:?}"))?;
+    // The client ignores a pre-release suffix when gating on the version
+    let supports_diagnosis =
+        semver::Version::new(parsed.major, parsed.minor, parsed.patch) >= semver::Version::new(0, 15, 0);
+
+    let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
+    let error = fixture
+        .client()
+        .track_transaction(tx_id.clone(), MONITOR_TIMEOUT_WITH_MARGIN)
+        .await
+        .expect_err("a transaction behind a nonce gap must time out");
+    assert!(
+        matches!(error.kind(), ErrorKind::TrackingError(TrackingErrorKind::Timeout)),
+        "unexpected error: {error}"
+    );
+
+    // The same bytes again join the transaction already tracked
+    let (submission, deduplicated_diagnosis) = fixture
+        .client()
+        .submit_and_track_transaction_detailed(&signed_bytes)
+        .await?;
+    assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+
+    if supports_diagnosis {
+        let diagnosis = error
+            .unmined_diagnosis()
+            .with_context(|| format!("blokli {version} must report a diagnosis for a timed out transaction"))?;
+        assert_eq!(diagnosis.reason, UnminedReason::NonceGap);
+        assert!(diagnosis.signed_fees.is_some(), "signed fees: {diagnosis:?}");
+        assert!(diagnosis.recommended_fees.is_some(), "recommended fees: {diagnosis:?}");
+        assert!(
+            diagnosis.min_replacement_fees.is_some(),
+            "min replacement fees: {diagnosis:?}"
+        );
+        assert!(diagnosis.retry_after_seconds > 0, "retry after: {diagnosis:?}");
+
+        assert_eq!(
+            deduplicated_diagnosis.as_ref().map(|d| &d.reason),
+            Some(&UnminedReason::NonceGap),
+            "the deduplicated submission must carry the diagnosis"
+        );
+    } else {
+        assert!(error.unmined_diagnosis().is_none());
+        assert!(deduplicated_diagnosis.is_none());
+    }
 
     Ok(())
 }
