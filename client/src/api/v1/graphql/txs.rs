@@ -1,6 +1,6 @@
 use super::{DateTime, Hex32, schema};
 use crate::{
-    api::TxReceipt,
+    api::{TxId, TxReceipt},
     errors::{BlokliClientError, ErrorKind},
 };
 
@@ -366,6 +366,40 @@ pub struct DeduplicatedTransaction {
     pub operation: String,
 }
 
+/// Outcome of a successful asynchronous submission.
+///
+/// Both variants carry the id to track. `Deduplicated` means nothing was broadcast for this call because an
+/// equivalent logical action was already tracked under that id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrackedSubmission {
+    /// The transaction was accepted as a new submission.
+    New(TxId),
+    /// An equivalent action was already in flight; this is the id already tracking it.
+    Deduplicated(TxId),
+}
+
+impl TrackedSubmission {
+    /// The id to track, whichever way the submission was accepted.
+    pub fn tx_id(&self) -> &TxId {
+        match self {
+            Self::New(id) | Self::Deduplicated(id) => id,
+        }
+    }
+
+    /// Consumes the outcome and returns the id to track.
+    pub fn into_tx_id(self) -> TxId {
+        match self {
+            Self::New(id) | Self::Deduplicated(id) => id,
+        }
+    }
+
+    /// Whether the submission joined an already tracked action.
+    pub fn is_deduplicated(&self) -> bool {
+        matches!(self, Self::Deduplicated(_))
+    }
+}
+
 #[derive(cynic::InlineFragments, Debug)]
 pub enum SendTransactionAsyncResult {
     Transaction(Transaction),
@@ -378,6 +412,18 @@ pub enum SendTransactionAsyncResult {
     DeduplicatedTransaction(DeduplicatedTransaction),
     #[cynic(fallback)]
     Unknown,
+}
+
+impl SendTransactionAsyncResult {
+    /// Converts the result, keeping a deduplicated submission distinct from a new one.
+    pub fn into_tracked_submission(self) -> Result<TrackedSubmission, BlokliClientError> {
+        match self {
+            Self::DeduplicatedTransaction(d) => Ok(TrackedSubmission::Deduplicated(d.transaction.id.into_inner())),
+            other => {
+                Result::<Transaction, BlokliClientError>::from(other).map(|t| TrackedSubmission::New(t.id.into_inner()))
+            }
+        }
+    }
 }
 
 impl From<SendTransactionAsyncResult> for Result<Transaction, BlokliClientError> {

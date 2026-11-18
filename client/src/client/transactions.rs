@@ -13,7 +13,7 @@ use crate::{
             ConfirmTransactionVariables, MutateConfirmTransaction, MutateSendTransaction, MutateTrackTransaction,
             SendTransactionVariables, SubscribeTransaction, TransactionsVariables,
         },
-        types::{Transaction, TransactionStatus},
+        types::{TrackedSubmission, Transaction, TransactionStatus},
     },
     errors::{ErrorKind, TrackingErrorKind},
 };
@@ -53,6 +53,20 @@ impl GraphQlQueries {
         tx_id: TxId,
     ) -> cynic::StreamingOperation<SubscribeTransaction, TransactionsVariables> {
         SubscribeTransaction::build(TransactionsVariables { id: tx_id.into() })
+    }
+}
+
+impl BlokliClient {
+    /// Submits a signed transaction for tracking and reports whether it joined an already tracked action.
+    ///
+    /// Behaves like [`BlokliTransactionClient::submit_and_track_transaction`], but a deduplicated submission is
+    /// returned as [`TrackedSubmission::Deduplicated`] instead of being indistinguishable from a new one.
+    pub async fn submit_and_track_transaction_outcome(&self, signed_tx: &[u8]) -> Result<TrackedSubmission> {
+        let resp = self
+            .build_query(GraphQlQueries::mutate_submit_and_track_transaction(signed_tx))?
+            .await?;
+
+        response_to_data(resp)?.send_transaction_async.into_tracked_submission()
     }
 }
 

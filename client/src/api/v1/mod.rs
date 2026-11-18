@@ -73,7 +73,7 @@ pub mod types {
             ServiceUpdate, ServiceUpdateKind,
         },
         tickets::{RedeemTicketDetails, RedemptionResult},
-        txs::{SafeExecution, Transaction, TransactionStatus},
+        txs::{SafeExecution, TrackedSubmission, Transaction, TransactionStatus},
     };
 }
 
