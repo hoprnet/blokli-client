@@ -433,6 +433,10 @@ pub struct BlokliTestClient<M> {
     tx_simulation_delay: Duration,
     use_internal_txs: bool,
     policy_outcome: Option<SimulatedPolicyOutcome>,
+    // Diagnoses to report for timed out transactions, shared by clones
+    unmined_diagnoses: Arc<parking_lot::RwLock<IndexMap<TxId, TransactionDiagnosis>>>,
+    // Which tracking id each raw transaction submitted for tracking got, to simulate deduplication
+    submitted_raw: Arc<parking_lot::RwLock<IndexMap<Vec<u8>, TxId>>>,
 }
 
 fn channel_matches(channel: &Channel, selector: &ChannelSelector, accounts: &IndexMap<u32, Account>) -> bool {
@@ -548,6 +552,8 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
             tx_simulation_delay: Duration::from_secs(1),
             use_internal_txs: false,
             policy_outcome: None,
+            unmined_diagnoses: Arc::default(),
+            submitted_raw: Arc::default(),
         }
     }
 
@@ -582,6 +588,50 @@ impl<M: BlokliTestStateMutator> BlokliTestClient<M> {
     #[must_use]
     pub fn with_policy_outcome(mut self, policy_outcome: Option<SimulatedPolicyOutcome>) -> Self {
         self.policy_outcome = policy_outcome;
+        self
+    }
+
+    /// Configures the diagnosis Blokli would report for the timed out transaction `tx_id`.
+    ///
+    /// [`track_transaction`](BlokliTransactionClient::track_transaction) then returns the `Timeout` error with
+    /// [`unmined_diagnosis`](BlokliClientError::unmined_diagnosis) set, as the real client does against a Blokli that
+    /// serves diagnoses. A transaction that does not time out never carries one, and a timed out one without a
+    /// configured diagnosis behaves like a server that cannot diagnose. The configuration is shared by clones.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::time::Duration;
+    ///
+    /// use blokli_client::{
+    ///     BlokliTestClient, BlokliTestState, BlokliTransactionClient, NopStateMutator,
+    ///     types::{TransactionDiagnosis, TransactionStatus, UnminedReason},
+    /// };
+    ///
+    /// let client = BlokliTestClient::new(BlokliTestState::default(), NopStateMutator);
+    /// let tx_id = client.submit_and_track_transaction(&[0x02]).await?;
+    /// let diagnosis = TransactionDiagnosis {
+    ///     reason: UnminedReason::Underpriced,
+    ///     signed_fees: None,
+    ///     recommended_fees: None,
+    ///     min_replacement_fees: None,
+    ///     retry_after_seconds: 30,
+    /// };
+    /// let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis);
+    /// client.hidden_state_update(|state| {
+    ///     state.active_txs.get_mut(&tx_id).expect("tracked").status = TransactionStatus::Timeout;
+    /// });
+    ///
+    /// let error = client
+    ///     .track_transaction(tx_id, Duration::from_secs(1))
+    ///     .await
+    ///     .unwrap_err();
+    /// assert!(error.unmined_diagnosis().is_some());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn with_unmined_diagnosis(self, tx_id: TxId, diagnosis: TransactionDiagnosis) -> Self {
+        self.unmined_diagnoses.write().insert(tx_id, diagnosis);
         self
     }
 
@@ -1562,6 +1612,41 @@ fn simulate_tx_execution(
     Ok(())
 }
 
+impl<M: BlokliTestStateMutator + Send + Sync> BlokliTestClient<M> {
+    /// Submits a signed transaction for tracking like the real
+    /// [`BlokliClient::submit_and_track_transaction_detailed`](crate::BlokliClient::submit_and_track_transaction_detailed).
+    ///
+    /// Submitting the bytes of a transaction that is still tracked is a deduplicated submission, whatever its status.
+    /// The diagnosis is returned only for a timed out one with a diagnosis configured
+    /// ([`with_unmined_diagnosis`](Self::with_unmined_diagnosis)), and only once: resubmission resumes tracking, which
+    /// moves the transaction back to `Submitted` and clears the diagnosis. Every other outcome carries none.
+    pub async fn submit_and_track_transaction_detailed(
+        &self,
+        signed_tx: &[u8],
+    ) -> Result<(TrackedSubmission, Option<TransactionDiagnosis>)> {
+        if let Some(outcome) = &self.policy_outcome {
+            return Err(outcome.clone().into());
+        }
+
+        let tracked = self.submitted_raw.read().get(signed_tx).cloned();
+        if let Some(tx_id) = tracked {
+            let mut state = self.state.write();
+            if let Some(tx) = state.active_txs.get_mut(&tx_id) {
+                let diagnosis = if tx.status == TransactionStatus::Timeout {
+                    tx.status = TransactionStatus::Submitted;
+                    self.unmined_diagnoses.write().shift_remove(&tx_id)
+                } else {
+                    None
+                };
+                return Ok((TrackedSubmission::Deduplicated(tx_id), diagnosis));
+            }
+        }
+
+        let tx_id = self.submit_and_track_transaction(signed_tx).await?;
+        Ok((TrackedSubmission::New(tx_id), None))
+    }
+}
+
 /// A refusal by Blokli's HOPR-aware transaction policy, for a test to replay.
 ///
 /// Mirrors the two outcomes that stop a transaction being broadcast. They differ in what the
@@ -1681,6 +1766,7 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
                 }),
             },
         );
+        self.submitted_raw.write().insert(signed_tx.to_vec(), tx_id.clone());
 
         Ok(tx_id)
     }
@@ -1721,7 +1807,13 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
 
         match tx.status {
             TransactionStatus::Confirmed => Ok(TransactionTrackingOutcome::Confirmed(tx)),
-            TransactionStatus::Timeout => Err(ErrorKind::TrackingError(TrackingErrorKind::Timeout).into()),
+            TransactionStatus::Timeout => {
+                let error = BlokliClientError::from(ErrorKind::TrackingError(TrackingErrorKind::Timeout));
+                match self.unmined_diagnoses.read().get(&tx_id).cloned() {
+                    Some(diagnosis) => Err(error.with_unmined_diagnosis(diagnosis)),
+                    None => Err(error),
+                }
+            }
             TransactionStatus::SubmissionFailed => {
                 Err(ErrorKind::TrackingError(TrackingErrorKind::SubmissionFailed).into())
             }
@@ -1745,8 +1837,10 @@ mod tests {
     use super::{
         BlokliQueryClient, BlokliSubscriptionClient, BlokliTestClient, BlokliTestState, BlokliTransactionClient,
         ChainAddress, NopStateMutator, Result, ServiceEntry, ServiceRegistryConfig, ServiceSelector, ServiceTypeInfo,
-        ServiceTypeUpdateKind, ServiceUpdateKind, Uint64,
+        ServiceTypeUpdateKind, ServiceUpdateKind, TrackedSubmission, TransactionDiagnosis, TransactionStatus, Uint64,
+        UnminedReason,
     };
+    use crate::errors::{ErrorKind, TrackingErrorKind};
 
     /// `bytes32("gvpn:exit")`, the canonical id of the GnosisVPN exit-node service.
     const GVPN_EXIT: [u8; 32] = [
@@ -2126,6 +2220,145 @@ mod tests {
                 .is_none()
         );
 
+        Ok(())
+    }
+
+    const SIGNED_TX: &[u8] = &[0x02, 0xF8, 0x6B, 0x01];
+
+    fn diagnosis() -> TransactionDiagnosis {
+        TransactionDiagnosis {
+            reason: UnminedReason::Underpriced,
+            signed_fees: None,
+            recommended_fees: None,
+            min_replacement_fees: None,
+            retry_after_seconds: 7,
+        }
+    }
+
+    fn client() -> BlokliTestClient<NopStateMutator> {
+        BlokliTestClient::new(BlokliTestState::default(), NopStateMutator)
+            .with_tx_simulation_delay(std::time::Duration::from_millis(1))
+    }
+
+    fn set_status(client: &BlokliTestClient<NopStateMutator>, tx_id: &str, status: TransactionStatus) {
+        client.hidden_state_update(|state| {
+            state.active_txs.get_mut(tx_id).expect("tracked transaction").status = status;
+        });
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_transaction_carries_its_configured_diagnosis() -> Result<()> {
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis());
+        set_status(&client, &tx_id, TransactionStatus::Timeout);
+
+        let error = client
+            .track_transaction(tx_id, std::time::Duration::from_secs(1))
+            .await
+            .expect_err("timeout");
+
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::TrackingError(TrackingErrorKind::Timeout)
+        ));
+        assert_eq!(error.unmined_diagnosis(), Some(&diagnosis()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_transaction_without_a_configured_diagnosis_carries_none() -> Result<()> {
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        set_status(&client, &tx_id, TransactionStatus::Timeout);
+
+        let error = client
+            .track_transaction(tx_id, std::time::Duration::from_secs(1))
+            .await
+            .expect_err("timeout");
+
+        assert!(error.unmined_diagnosis().is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_transaction_that_did_not_time_out_never_carries_a_diagnosis() -> Result<()> {
+        for status in [TransactionStatus::Reverted, TransactionStatus::SubmissionFailed] {
+            let client = client();
+            let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+            let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis());
+            set_status(&client, &tx_id, status);
+
+            let error = client
+                .track_transaction(tx_id, std::time::Duration::from_secs(1))
+                .await
+                .expect_err("failure");
+            assert!(error.unmined_diagnosis().is_none(), "{status:?}");
+        }
+
+        // A confirmed transaction is not an error at all
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis());
+        assert!(
+            client
+                .track_transaction(tx_id, std::time::Duration::from_secs(1))
+                .await
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_deduplicated_timed_out_submission_returns_the_diagnosis_once() -> Result<()> {
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis());
+        set_status(&client, &tx_id, TransactionStatus::Timeout);
+
+        let (submission, found) = client.submit_and_track_transaction_detailed(SIGNED_TX).await?;
+        assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id.clone()));
+        assert_eq!(found, Some(diagnosis()));
+
+        // Resumed tracking cleared it
+        let (submission, found) = client.submit_and_track_transaction_detailed(SIGNED_TX).await?;
+        assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+        assert_eq!(found, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_deduplicated_submission_that_did_not_time_out_carries_no_diagnosis() -> Result<()> {
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        let client = client.with_unmined_diagnosis(tx_id.clone(), diagnosis());
+
+        let (submission, found) = client.submit_and_track_transaction_detailed(SIGNED_TX).await?;
+
+        assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+        assert_eq!(found, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_deduplicated_submission_without_a_configured_diagnosis_carries_none() -> Result<()> {
+        let client = client();
+        let tx_id = client.submit_and_track_transaction(SIGNED_TX).await?;
+        set_status(&client, &tx_id, TransactionStatus::Timeout);
+
+        let (submission, found) = client.submit_and_track_transaction_detailed(SIGNED_TX).await?;
+
+        assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+        assert_eq!(found, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_new_submission_is_not_deduplicated() -> Result<()> {
+        let (submission, found) = client().submit_and_track_transaction_detailed(SIGNED_TX).await?;
+
+        assert!(matches!(submission, TrackedSubmission::New(_)));
+        assert_eq!(found, None);
         Ok(())
     }
 }
