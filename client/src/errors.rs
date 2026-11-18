@@ -27,8 +27,8 @@ impl BlokliClientError {
     /// Returns Blokli's explanation of why a timed out transaction was not mined.
     ///
     /// Only a [`TrackingErrorKind::Timeout`] error returned by transaction tracking can carry one, and only when
-    /// the Blokli server supports diagnoses (0.15.0 or later) and the follow-up query succeeded. Every other error
-    /// returns `None`.
+    /// the Blokli server knows the `diagnosis` field (older servers do not) and the follow-up query succeeded. Every
+    /// other error returns `None`.
     pub fn unmined_diagnosis(&self) -> Option<&TransactionDiagnosis> {
         self.unmined_diagnosis.as_deref()
     }

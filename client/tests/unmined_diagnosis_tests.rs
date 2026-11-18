@@ -4,7 +4,6 @@
 //! the follow-up queries can be checked against the same client. The server records the operations it served.
 
 use std::{
-    collections::VecDeque,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -23,11 +22,7 @@ use tokio::{
 const TX_ID: &str = "018f3f6a-9521-7c5d-8ed6-4a789f936f31";
 const SIGNED_TX: &[u8] = &[0x02, 0xF8, 0x6B, 0x01];
 
-/// What the server answers to a `Version` query; `None` is an HTTP 500.
-type VersionAnswer = Option<&'static str>;
-
 struct Scenario {
-    versions: Mutex<VecDeque<VersionAnswer>>,
     /// Body of the `UnminedDiagnosis` answer; `None` is an HTTP 500.
     diagnosis: Option<serde_json::Value>,
     /// Status of the transaction in a deduplicated submission.
@@ -36,9 +31,8 @@ struct Scenario {
 }
 
 impl Scenario {
-    fn new(versions: Vec<VersionAnswer>, diagnosis: Option<serde_json::Value>) -> Arc<Self> {
+    fn new(diagnosis: Option<serde_json::Value>) -> Arc<Self> {
         Arc::new(Self {
-            versions: Mutex::new(versions.into()),
             diagnosis,
             dedup_status: "TIMEOUT",
             requests: Mutex::default(),
@@ -147,15 +141,7 @@ async fn serve(mut conn: TcpStream, scenario: Arc<Scenario>) -> Result<()> {
         return Ok(());
     }
 
-    let body: Option<serde_json::Value> = if request.contains("QueryVersion") {
-        let mut versions = scenario.versions.lock().unwrap();
-        let answer = if versions.len() > 1 {
-            versions.pop_front().flatten()
-        } else {
-            versions.front().copied().flatten()
-        };
-        answer.map(|v| serde_json::json!({ "data": { "version": v } }))
-    } else if request.contains("QueryUnminedDiagnosis") {
+    let body: Option<serde_json::Value> = if request.contains("QueryUnminedDiagnosis") {
         scenario.diagnosis.clone()
     } else if request.contains("MutateTrackTransaction") {
         let result = match scenario.dedup_status {
@@ -205,7 +191,7 @@ async fn track(client: &BlokliClient) -> blokli_client::BlokliClientError {
 
 #[tokio::test]
 async fn a_timeout_carries_the_diagnosis_when_the_server_supports_it() -> Result<()> {
-    let scenario = Scenario::new(vec![Some("0.15.0")], Some(underpriced()));
+    let scenario = Scenario::new(Some(underpriced()));
     let cli = client(spawn_server(scenario.clone()).await?);
 
     let error = track(&cli).await;
@@ -227,6 +213,7 @@ async fn a_timeout_carries_the_diagnosis_when_the_server_supports_it() -> Result
     // Empty strings mean the fees are unavailable
     assert_eq!(diagnosis.min_replacement_fees, None);
 
+    assert_eq!(scenario.count("QueryVersion"), 0);
     // The tracking document itself never selects `diagnosis`
     assert!(
         scenario
@@ -238,58 +225,14 @@ async fn a_timeout_carries_the_diagnosis_when_the_server_supports_it() -> Result
 }
 
 #[tokio::test]
-async fn an_older_server_gets_no_follow_up_query() -> Result<()> {
-    let scenario = Scenario::new(vec![Some("0.14.6")], Some(underpriced()));
-    let cli = client(spawn_server(scenario.clone()).await?);
-
-    let error = track(&cli).await;
-
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::TrackingError(TrackingErrorKind::Timeout)
-    ));
-    assert!(error.unmined_diagnosis().is_none());
-    assert_eq!(scenario.count("QueryVersion"), 1);
-    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_pre_release_of_the_first_supporting_version_counts_as_supported() -> Result<()> {
-    let scenario = Scenario::new(vec![Some("0.15.0-rc.2")], Some(underpriced()));
-    let cli = client(spawn_server(scenario.clone()).await?);
-
-    assert!(track(&cli).await.unmined_diagnosis().is_some());
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_failed_version_query_is_not_cached() -> Result<()> {
-    // First version query fails, later ones answer 0.15.0
-    let scenario = Scenario::new(vec![None, Some("0.15.0")], Some(underpriced()));
-    let cli = client(spawn_server(scenario.clone()).await?);
-
-    let first = track(&cli).await;
-    assert!(matches!(
-        first.kind(),
-        ErrorKind::TrackingError(TrackingErrorKind::Timeout)
-    ));
-    assert!(first.unmined_diagnosis().is_none());
-    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 0);
-
-    // Retried on the next timeout
-    assert!(track(&cli).await.unmined_diagnosis().is_some());
-    assert_eq!(scenario.count("QueryVersion"), 2);
-
-    // A successful answer is cached, also for clones
-    assert!(track(&cli.clone()).await.unmined_diagnosis().is_some());
-    assert_eq!(scenario.count("QueryVersion"), 2);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_failed_diagnosis_query_keeps_the_original_timeout() -> Result<()> {
-    let scenario = Scenario::new(vec![Some("0.15.0")], None);
+async fn a_server_without_the_field_is_asked_once_and_keeps_the_plain_timeout() -> Result<()> {
+    let unknown_field = serde_json::json!({
+        "errors": [{
+            "message": "Unknown field \"diagnosis\" on type \"Transaction\".",
+            "locations": [{ "line": 3, "column": 5 }],
+        }]
+    });
+    let scenario = Scenario::new(Some(unknown_field));
     let cli = client(spawn_server(scenario.clone()).await?);
 
     let error = track(&cli).await;
@@ -300,6 +243,31 @@ async fn a_failed_diagnosis_query_keeps_the_original_timeout() -> Result<()> {
     ));
     assert!(error.unmined_diagnosis().is_none());
     assert_eq!(scenario.count("QueryUnminedDiagnosis"), 1);
+
+    // Later timeouts, also through a clone, do not send the rejected query again
+    assert!(track(&cli).await.unmined_diagnosis().is_none());
+    assert!(track(&cli.clone()).await.unmined_diagnosis().is_none());
+    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_diagnosis_query_keeps_the_original_timeout() -> Result<()> {
+    let scenario = Scenario::new(None);
+    let cli = client(spawn_server(scenario.clone()).await?);
+
+    let error = track(&cli).await;
+
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::TrackingError(TrackingErrorKind::Timeout)
+    ));
+    assert!(error.unmined_diagnosis().is_none());
+    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 1);
+
+    // A failure that is not "unknown field" is not remembered: the next timeout asks again
+    assert!(track(&cli).await.unmined_diagnosis().is_none());
+    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 2);
     Ok(())
 }
 
@@ -312,7 +280,7 @@ async fn an_unseen_reason_decodes_to_unknown() -> Result<()> {
         "minReplacementFees": null,
         "retryAfterSeconds": 0,
     }));
-    let scenario = Scenario::new(vec![Some("0.15.0")], Some(answer));
+    let scenario = Scenario::new(Some(answer));
     let cli = client(spawn_server(scenario).await?);
 
     let error = track(&cli).await;
@@ -326,7 +294,7 @@ async fn an_unseen_reason_decodes_to_unknown() -> Result<()> {
 
 #[tokio::test]
 async fn a_timed_out_deduplicated_submission_carries_the_diagnosis() -> Result<()> {
-    let scenario = Scenario::new(vec![Some("0.15.1")], Some(underpriced()));
+    let scenario = Scenario::new(Some(underpriced()));
     let cli = client(spawn_server(scenario.clone()).await?);
 
     let (submission, diagnosis) = cli.submit_and_track_transaction_detailed(SIGNED_TX).await?;
@@ -345,7 +313,7 @@ async fn a_timed_out_deduplicated_submission_carries_the_diagnosis() -> Result<(
 
 #[tokio::test]
 async fn a_deduplicated_submission_still_in_flight_sends_no_extra_request() -> Result<()> {
-    let mut scenario = Scenario::new(vec![Some("0.15.0")], Some(underpriced()));
+    let mut scenario = Scenario::new(Some(underpriced()));
     Arc::get_mut(&mut scenario).expect("sole owner").dedup_status = "SUBMITTED";
     let cli = client(spawn_server(scenario.clone()).await?);
 
@@ -353,13 +321,13 @@ async fn a_deduplicated_submission_still_in_flight_sends_no_extra_request() -> R
 
     assert!(submission.is_deduplicated());
     assert!(diagnosis.is_none());
-    assert_eq!(scenario.count("QueryVersion"), 0);
+    assert_eq!(scenario.count("QueryUnminedDiagnosis"), 0);
     Ok(())
 }
 
 #[tokio::test]
 async fn a_new_submission_sends_no_extra_request() -> Result<()> {
-    let mut scenario = Scenario::new(vec![Some("0.15.0")], Some(underpriced()));
+    let mut scenario = Scenario::new(Some(underpriced()));
     Arc::get_mut(&mut scenario).expect("sole owner").dedup_status = "NEW";
     let cli = client(spawn_server(scenario.clone()).await?);
 
@@ -367,7 +335,6 @@ async fn a_new_submission_sends_no_extra_request() -> Result<()> {
 
     assert_eq!(submission, TrackedSubmission::New(TX_ID.into()));
     assert!(diagnosis.is_none());
-    assert_eq!(scenario.count("QueryVersion"), 0);
     assert_eq!(scenario.count("QueryUnminedDiagnosis"), 0);
     Ok(())
 }

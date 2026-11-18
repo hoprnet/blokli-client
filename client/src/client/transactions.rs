@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cynic::{MutationBuilder, QueryBuilder, SubscriptionBuilder};
 use futures::TryStreamExt;
@@ -8,7 +8,7 @@ use hex::ToHex;
 use super::{BlokliClient, GraphQlQueries, response_to_data};
 use crate::{
     api::{
-        BlokliQueryClient, BlokliTransactionClient, Result, TransactionTrackingOutcome, TxId, TxReceipt,
+        BlokliTransactionClient, Result, TransactionTrackingOutcome, TxId, TxReceipt,
         internal::{
             ConfirmTransactionVariables, MutateConfirmTransaction, MutateSendTransaction, MutateTrackTransaction,
             QueryUnminedDiagnosis, SendTransactionAsyncResult, SendTransactionVariables, SubscribeTransaction,
@@ -16,7 +16,7 @@ use crate::{
         },
         types::{TrackedSubmission, Transaction, TransactionDiagnosis, TransactionStatus},
     },
-    errors::{ErrorKind, TrackingErrorKind},
+    errors::{BlokliClientError, ErrorKind, TrackingErrorKind},
 };
 
 impl GraphQlQueries {
@@ -58,56 +58,69 @@ impl GraphQlQueries {
 
     /// `UnminedDiagnosis` GraphQL query.
     ///
-    /// Selects `Transaction.diagnosis`, which Blokli versions before [`MIN_DIAGNOSIS_VERSION`] reject. The client
-    /// sends it only after checking the server version.
+    /// Selects `Transaction.diagnosis`, which Blokli servers without that field reject as an unknown field. The client
+    /// sends it only after a server timeout, and stops sending it for a while once a server rejected it.
     pub fn query_unmined_diagnosis(tx_id: TxId) -> cynic::Operation<QueryUnminedDiagnosis, TransactionsVariables> {
         QueryUnminedDiagnosis::build(TransactionsVariables { id: tx_id.into() })
     }
 }
 
-/// First Blokli version that serves `Transaction.diagnosis`.
-const MIN_DIAGNOSIS_VERSION: (u64, u64, u64) = (0, 15, 0);
-
-/// Whether the Blokli `version` string denotes a release serving `Transaction.diagnosis`.
+/// How long the client stops asking for a diagnosis after a server rejected the `diagnosis` field.
 ///
-/// Compares `major.minor.patch` and ignores a leading `v` and any pre-release or build suffix, so `0.15.0-rc.1`
-/// counts as supported. An unparseable version is unsupported.
-fn version_supports_diagnosis(version: &str) -> bool {
-    let core = version.trim().trim_start_matches('v');
-    let core = core.split(['-', '+']).next().unwrap_or_default();
-    let mut parts = core.split('.').map(|part| part.parse::<u64>());
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => (major, minor, patch) >= MIN_DIAGNOSIS_VERSION,
-        _ => false,
-    }
+/// Servers that do not know the field fail the query at validation, so asking again on every timeout is pointless.
+/// The pause is bounded so that a Blokli upgrade is picked up without restarting the client.
+const UNMINED_DIAGNOSIS_UNSUPPORTED_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The validation message of a server that does not know `Transaction.diagnosis`.
+///
+/// async-graphql attaches no error code or extensions to validation errors, so the message is the only marker.
+const UNKNOWN_DIAGNOSIS_FIELD_MESSAGE: &str = "Unknown field \"diagnosis\" on type \"Transaction\"";
+
+/// Remembers, per client and its clones, until when the server is assumed unable to diagnose.
+#[derive(Debug)]
+pub(super) struct UnminedDiagnosisBackoff {
+    ttl: Duration,
+    unsupported_until: std::sync::Mutex<Option<Instant>>,
 }
 
-impl BlokliClient {
-    /// Whether the server serves `Transaction.diagnosis`, judged by its version.
-    ///
-    /// Read once, on the first timeout, and cached for all clones of this client. A failed version query is not
-    /// cached: it counts as unsupported for this call and is retried on the next timeout.
-    async fn supports_unmined_diagnosis(&self) -> bool {
-        let supported = self
-            .unmined_diagnosis_supported
-            .get_or_try_init(|| async { self.query_version().await.map(|v| version_supports_diagnosis(&v)) })
-            .await;
-
-        match supported {
-            Ok(supported) => *supported,
-            Err(error) => {
-                tracing::warn!(%error, "could not read the blokli version, skipping the unmined diagnosis");
-                false
-            }
+impl UnminedDiagnosisBackoff {
+    pub(super) fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            unsupported_until: std::sync::Mutex::new(None),
         }
     }
 
+    fn is_unsupported(&self) -> bool {
+        let guard = self.unsupported_until.lock().unwrap_or_else(|e| e.into_inner());
+        guard.is_some_and(|until| Instant::now() < until)
+    }
+
+    fn mark_unsupported(&self) {
+        let mut guard = self.unsupported_until.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Instant::now().checked_add(self.ttl);
+    }
+}
+
+impl Default for UnminedDiagnosisBackoff {
+    fn default() -> Self {
+        Self::new(UNMINED_DIAGNOSIS_UNSUPPORTED_TTL)
+    }
+}
+
+/// Whether the error is a server rejecting the `diagnosis` field as unknown.
+fn is_unknown_diagnosis_field(error: &BlokliClientError) -> bool {
+    matches!(error.kind(), ErrorKind::GraphQLError(e) if e.message.contains(UNKNOWN_DIAGNOSIS_FIELD_MESSAGE))
+}
+
+impl BlokliClient {
     /// Reads the diagnosis of a transaction that Blokli reported as timed out.
     ///
-    /// Returns `None` when the server does not support diagnoses or the lookup fails, so the caller keeps the
-    /// timeout it already has.
+    /// Returns `None` when the lookup fails, so the caller keeps the timeout it already has. A server that rejects
+    /// the `diagnosis` field as unknown is not asked again for [`UNMINED_DIAGNOSIS_UNSUPPORTED_TTL`]; no other
+    /// failure is remembered.
     async fn fetch_unmined_diagnosis(&self, tx_id: &TxId) -> Option<TransactionDiagnosis> {
-        if !self.supports_unmined_diagnosis().await {
+        if self.unmined_diagnosis_backoff.is_unsupported() {
             return None;
         }
 
@@ -118,13 +131,18 @@ impl BlokliClient {
 
             response_to_data(resp)?
                 .transaction
-                .ok_or::<crate::errors::BlokliClientError>(ErrorKind::NoData.into())?
+                .ok_or::<BlokliClientError>(ErrorKind::NoData.into())?
                 .into_diagnosis()
         }
         .await;
 
         result.unwrap_or_else(|error| {
-            tracing::warn!(%error, tx_id, "could not read the unmined diagnosis");
+            if is_unknown_diagnosis_field(&error) {
+                tracing::info!(%error, "blokli does not serve the unmined diagnosis, not asking again for a while");
+                self.unmined_diagnosis_backoff.mark_unsupported();
+            } else {
+                tracing::warn!(%error, tx_id, "could not read the unmined diagnosis");
+            }
             None
         })
     }
@@ -144,8 +162,8 @@ impl BlokliClient {
     /// Like [`Self::submit_and_track_transaction_outcome`], and also returns why the tracked transaction timed
     /// out unmined when a deduplicated submission already reports a timeout.
     ///
-    /// The diagnosis is `None` for every other outcome, when the Blokli server is older than 0.15.0, or when the
-    /// lookup fails.
+    /// The diagnosis is `None` for every other outcome, when the Blokli server does not know the `diagnosis` field, or
+    /// when the lookup fails.
     pub async fn submit_and_track_transaction_detailed(
         &self,
         signed_tx: &[u8],
@@ -257,37 +275,107 @@ impl BlokliTransactionClient for BlokliClient {
 
 #[cfg(test)]
 mod tests {
-    use super::version_supports_diagnosis;
+    use std::sync::Arc;
+
+    use mockito::Matcher;
+
+    use super::*;
+    use crate::BlokliClientConfig;
+
+    const UNKNOWN_FIELD_BODY: &str = r#"{"errors":[{"message":"Unknown field \"diagnosis\" on type \"Transaction\".","locations":[{"line":3,"column":5}]}]}"#;
+    const DIAGNOSIS_BODY: &str = r#"{"data":{"transaction":{"__typename":"Transaction","diagnosis":{"reason":"QUEUED","signedFees":null,"recommendedFees":null,"minReplacementFees":null,"retryAfterSeconds":3}}}}"#;
+
+    async fn serve(server: &mut mockito::ServerGuard, status: usize, body: &str) -> mockito::Mock {
+        server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::Regex("QueryUnminedDiagnosis".into()))
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    fn client(server: &mockito::ServerGuard, ttl: Duration) -> BlokliClient {
+        let mut client = BlokliClient::new(server.url().parse().expect("valid URL"), BlokliClientConfig::default());
+        client.unmined_diagnosis_backoff = Arc::new(UnminedDiagnosisBackoff::new(ttl));
+        client
+    }
 
     #[test]
-    fn version_gate_compares_major_minor_patch() {
-        for supported in [
-            "0.15.0",
-            "0.15.1",
-            "0.16.0",
-            "1.0.0",
-            "v0.15.0",
-            " 0.15.0 ",
-            "0.15.0-rc.1",
-            "0.15.0+build.5",
+    fn the_unsupported_pause_lasts_twelve_hours() {
+        assert_eq!(UNMINED_DIAGNOSIS_UNSUPPORTED_TTL, Duration::from_secs(12 * 3600));
+    }
+
+    #[tokio::test]
+    async fn a_supporting_server_returns_the_diagnosis() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = serve(&mut server, 200, DIAGNOSIS_BODY).await;
+        let client = client(&server, UNMINED_DIAGNOSIS_UNSUPPORTED_TTL);
+
+        let diagnosis = client
+            .fetch_unmined_diagnosis(&"tx".to_owned())
+            .await
+            .expect("diagnosis");
+
+        assert_eq!(diagnosis.reason, crate::api::types::UnminedReason::Queued);
+        assert_eq!(diagnosis.retry_after_seconds, 3);
+        // Success needs no bookkeeping: the next timeout asks again
+        client
+            .fetch_unmined_diagnosis(&"tx".to_owned())
+            .await
+            .expect("diagnosis");
+        mock.expect(2).assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_field_error_is_remembered_for_the_ttl_and_shared_by_clones() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = serve(&mut server, 200, UNKNOWN_FIELD_BODY).await;
+        let client = client(&server, Duration::from_millis(200));
+        let clone = client.clone();
+
+        assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+        // Within the pause, neither this client nor its clone asks again
+        assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+        assert!(clone.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+        mock.expect(1).assert_async().await;
+
+        // After the pause the query is sent again, and an upgraded server answers it
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let upgraded = serve(&mut server, 200, DIAGNOSIS_BODY).await;
+        assert!(clone.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_some());
+        upgraded.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn other_failures_are_not_remembered() {
+        let other_graphql_error = r#"{"errors":[{"message":"internal error"}]}"#;
+        for (status, body) in [
+            (500, ""),
+            (200, other_graphql_error),
+            (200, r#"{"data":{"transaction":null}}"#),
         ] {
-            assert!(version_supports_diagnosis(supported), "{supported} must be supported");
+            let mut server = mockito::Server::new_async().await;
+            let mock = serve(&mut server, status, body).await;
+            let client = client(&server, UNMINED_DIAGNOSIS_UNSUPPORTED_TTL);
+
+            // None of these may start a pause: every call reaches the server
+            assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+            assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+            mock.expect(2).assert_async().await;
         }
-        for unsupported in [
-            "0.14.6",
-            "0.14.99",
-            "0.9.0",
-            "0.15",
-            "0.15.0.1",
-            "abc",
-            "",
-            "0.15.x",
-            "0.14.9-rc.1",
-        ] {
-            assert!(
-                !version_supports_diagnosis(unsupported),
-                "{unsupported} must be unsupported"
-            );
-        }
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_unknown_field_is_not_taken_for_missing_diagnosis_support() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"errors":[{"message":"Unknown field \"transaction\" on type \"QueryRoot\"."}]}"#;
+        let mock = serve(&mut server, 200, body).await;
+        let client = client(&server, UNMINED_DIAGNOSIS_UNSUPPORTED_TTL);
+
+        assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+        assert!(client.fetch_unmined_diagnosis(&"tx".to_owned()).await.is_none());
+        mock.expect(2).assert_async().await;
     }
 }

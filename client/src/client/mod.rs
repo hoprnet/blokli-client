@@ -162,8 +162,8 @@ pub struct BlokliClient {
     // Shared by all clones so requests reuse pooled connections instead of paying a TLS handshake each
     query_client: Arc<OnceLock<reqwest::Client>>,
     subscription_client: Arc<OnceLock<reqwest::Client>>,
-    // Whether the server is new enough to report unmined diagnoses; read lazily, shared by all clones
-    unmined_diagnosis_supported: Arc<tokio::sync::OnceCell<bool>>,
+    // Until when the server is assumed unable to diagnose unmined transactions; shared by all clones
+    unmined_diagnosis_backoff: Arc<transactions::UnminedDiagnosisBackoff>,
     // Shared by all clones so one client holds one SSE connection for all of its subscriptions
     subscriptions: SubscriptionHub,
 }
@@ -183,7 +183,7 @@ impl BlokliClient {
             cfg,
             query_client: Arc::default(),
             subscription_client: Arc::default(),
-            unmined_diagnosis_supported: Arc::default(),
+            unmined_diagnosis_backoff: Arc::default(),
             subscriptions,
         }
     }

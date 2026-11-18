@@ -377,17 +377,31 @@ async fn log_server_under_test(fixture: &IntegrationFixture) -> Result<()> {
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
     let version = fixture.client().query_version().await?;
-    tracing::info!(%image, image_id_and_created = %inspected, %version, "server under test");
+    tracing::info!(%image, image_id_and_created = %inspected, %version, "server under test (the version is informational only)");
     Ok(())
 }
 
-/// Whether the Blokli under test serves the unmined diagnosis, judged by version the way the client does.
-async fn server_supports_diagnosis(fixture: &IntegrationFixture) -> Result<bool> {
-    let version = fixture.client().query_version().await?;
-    let parsed = semver::Version::parse(version.trim().trim_start_matches('v'))
-        .with_context(|| format!("blokli reported an unparseable version {version:?}"))?;
-    // The client ignores a pre-release suffix when gating on the version
-    Ok(semver::Version::new(parsed.major, parsed.minor, parsed.patch) >= semver::Version::new(0, 15, 0))
+/// Whether the Blokli under test has the `Transaction.diagnosis` field, asked of its schema.
+///
+/// The client does not look at versions: it asks for the diagnosis after a timeout and stops asking when the server
+/// rejects the field. The expectations of the tests below follow what the schema of the image says.
+async fn server_knows_diagnosis_field(fixture: &IntegrationFixture) -> Result<bool> {
+    let url = fixture.client().base_url().join("graphql")?;
+    let body = serde_json::json!({
+        "query": "{ __type(name: \"Transaction\") { fields { name } } }"
+    });
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let fields = response["data"]["__type"]["fields"]
+        .as_array()
+        .context("blokli answered the schema query without the Transaction fields")?;
+    Ok(fields.iter().any(|field| field["name"] == "diagnosis"))
 }
 
 /// Submits `raw_tx` for tracking and waits until Blokli times it out.
@@ -457,16 +471,16 @@ fn assert_complete_diagnosis(diagnosis: &TransactionDiagnosis, reason: &UnminedR
     assert!(diagnosis.retry_after_seconds > 0, "{diagnosis:?}");
 }
 
-/// Checks the outcome of [`time_out_unmined`] against what the server version promises.
+/// Checks the outcome of [`time_out_unmined`] against the schema of the server.
 ///
-/// Servers older than 0.15.0 must keep returning the plain timeout, with no diagnosis.
+/// A server whose schema lacks `Transaction.diagnosis` must keep returning the plain timeout, with no diagnosis.
 async fn assert_outcome(
     fixture: &IntegrationFixture,
     error: &blokli_client::BlokliClientError,
     expected: impl Fn(&UnminedReason) -> bool,
     expected_name: &str,
 ) -> Result<()> {
-    if server_supports_diagnosis(fixture).await? {
+    if server_knows_diagnosis_field(fixture).await? {
         let diagnosis = error
             .unmined_diagnosis()
             .context("blokli must report a diagnosis for a timed out transaction")?;
