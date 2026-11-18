@@ -354,10 +354,10 @@ async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: Integ
 
 /// Env var overriding how long the tests below wait for Blokli to time a transaction out, in seconds.
 ///
-/// Blokli's transaction monitor timeout defaults to 300 seconds. A stack started with a shorter monitor timeout
-/// lets this deadline shrink accordingly.
+/// The compose stack sets the monitor timeout to 15 s (default 300 s), so this deadline leaves room for it. Raise it
+/// together with `BLOKLI_API_TRANSACTIONS_UNMINED_TIMEOUT` when testing against a slower setup.
 const UNMINED_TRACK_TIMEOUT_ENV: &str = "BLOKLI_TEST_UNMINED_TIMEOUT_SECS";
-const UNMINED_TRACK_TIMEOUT_DEFAULT_SECS: u64 = 8 * 60;
+const UNMINED_TRACK_TIMEOUT_DEFAULT_SECS: u64 = 60;
 
 fn unmined_track_timeout() -> Duration {
     let secs = std::env::var(UNMINED_TRACK_TIMEOUT_ENV)
@@ -543,7 +543,6 @@ fn gas(max_fee_per_gas: u128, max_priority_fee_per_gas: u128) -> Eip1559GasParam
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// A transaction signed with a nonce ahead of the sender's waits behind the gap.
 async fn unmined_nonce_gap_is_diagnosed(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
@@ -561,7 +560,6 @@ async fn unmined_nonce_gap_is_diagnosed(#[future(awt)] fixture: IntegrationFixtu
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// A transaction behind an earlier pending nonce of the same signer is queued.
 async fn unmined_transaction_behind_a_pending_nonce_is_queued(
     #[future(awt)] fixture: IntegrationFixture,
@@ -595,7 +593,6 @@ async fn unmined_transaction_behind_a_pending_nonce_is_queued(
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// A transaction held by the node but signed below the recommended fee is underpriced.
 async fn unmined_low_fee_transaction_is_underpriced(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
@@ -623,7 +620,6 @@ async fn unmined_low_fee_transaction_is_underpriced(#[future(awt)] fixture: Inte
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// Control for the underpriced case: a well-priced transaction the node holds is not diagnosed as underpriced.
 async fn unmined_well_priced_transaction_is_not_underpriced(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
@@ -656,7 +652,6 @@ async fn unmined_well_priced_transaction_is_not_underpriced(#[future(awt)] fixtu
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// A transaction the node forgot, whose nonce is still unused, is dropped.
 async fn unmined_forgotten_transaction_is_dropped(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
@@ -689,7 +684,6 @@ async fn unmined_forgotten_transaction_is_dropped(#[future(awt)] fixture: Integr
 #[rstest]
 #[test_log::test(tokio::test)]
 #[serial]
-#[ignore = "needs a configurable monitor timeout, the default 300 s makes it a 5 minute test"]
 /// A transaction whose nonce was consumed by another transaction of the signer is replaced.
 async fn unmined_replaced_transaction_is_diagnosed(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();

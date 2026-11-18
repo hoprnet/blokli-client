@@ -9,8 +9,8 @@ services:
       ANVIL_HOST: 0.0.0.0
       BLOKLI_INDEXER_ENABLE_SAFE_INDEXING: "true"
       RUST_LOG: ${BLOKLI_TEST_RUST_LOG:-info}
-      # Shortens the unmined transaction timeout when set on the host; ignored by images without the setting
-      BLOKLI_API_TRANSACTIONS_UNMINED_TIMEOUT:
+      # Unmined transaction timeout; the default 300 s would make the unmined tests take minutes. Override from the host
+      BLOKLI_API_TRANSACTIONS_UNMINED_TIMEOUT: ${BLOKLI_API_TRANSACTIONS_UNMINED_TIMEOUT:-15s}
     ports:
       - "127.0.0.1:${ANVIL_PORT:-8546}:8545"
       - "127.0.0.1:${BLOKLID_PORT:-8081}:8080"
