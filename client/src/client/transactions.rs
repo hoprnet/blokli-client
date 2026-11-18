@@ -263,10 +263,7 @@ impl BlokliTransactionClient for BlokliClient {
             Ok(Ok(Some(transaction))) => Ok(TransactionTrackingOutcome::Confirmed(transaction)),
             Ok(Ok(None)) | Err(_) => Ok(TransactionTrackingOutcome::StatusUnknown { tx_id }),
             Ok(Err(error)) if matches!(error.kind(), ErrorKind::TrackingError(TrackingErrorKind::Timeout)) => {
-                match self.fetch_unmined_diagnosis(&tx_id).await {
-                    Some(diagnosis) => Err(error.with_unmined_diagnosis(diagnosis)),
-                    None => Err(error),
-                }
+                Err(error.with_unmined_diagnosis(self.fetch_unmined_diagnosis(&tx_id).await))
             }
             Ok(Err(error)) => Err(error),
         }

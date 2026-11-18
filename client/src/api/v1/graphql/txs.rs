@@ -268,12 +268,7 @@ impl TryFrom<RawTransactionDiagnosis> for TransactionDiagnosis {
 
     fn try_from(raw: RawTransactionDiagnosis) -> Result<Self, Self::Error> {
         Ok(Self {
-            // `EnumString` with a default variant never fails
-            reason: raw
-                .reason
-                .0
-                .parse()
-                .unwrap_or_else(|_| UnminedReason::Unknown(raw.reason.0.clone())),
+            reason: UnminedReason::from(raw.reason.0.as_str()),
             signed_fees: TransactionFees::from_raw(raw.signed_fees),
             recommended_fees: TransactionFees::from_raw(raw.recommended_fees),
             min_replacement_fees: TransactionFees::from_raw(raw.min_replacement_fees),
@@ -690,7 +685,7 @@ mod diagnosis_tests {
             ("REPLACED", UnminedReason::Replaced),
             ("UNKNOWN", UnminedReason::Undetermined),
         ] {
-            let parsed: UnminedReason = wire.parse().expect("infallible");
+            let parsed = UnminedReason::from(wire);
             assert_eq!(parsed, reason);
             assert_eq!(parsed.as_str(), wire);
         }

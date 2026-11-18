@@ -1808,11 +1808,11 @@ impl<M: BlokliTestStateMutator + Send + Sync> BlokliTransactionClient for Blokli
         match tx.status {
             TransactionStatus::Confirmed => Ok(TransactionTrackingOutcome::Confirmed(tx)),
             TransactionStatus::Timeout => {
-                let error = BlokliClientError::from(ErrorKind::TrackingError(TrackingErrorKind::Timeout));
-                match self.unmined_diagnoses.read().get(&tx_id).cloned() {
-                    Some(diagnosis) => Err(error.with_unmined_diagnosis(diagnosis)),
-                    None => Err(error),
-                }
+                let diagnosis = self.unmined_diagnoses.read().get(&tx_id).cloned();
+                Err(
+                    BlokliClientError::from(ErrorKind::TrackingError(TrackingErrorKind::Timeout))
+                        .with_unmined_diagnosis(diagnosis),
+                )
             }
             TransactionStatus::SubmissionFailed => {
                 Err(ErrorKind::TrackingError(TrackingErrorKind::SubmissionFailed).into())

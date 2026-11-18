@@ -33,8 +33,8 @@ impl BlokliClientError {
         self.unmined_diagnosis.as_deref()
     }
 
-    pub(crate) fn with_unmined_diagnosis(mut self, diagnosis: TransactionDiagnosis) -> Self {
-        self.unmined_diagnosis = Some(Arc::new(diagnosis));
+    pub(crate) fn with_unmined_diagnosis(mut self, diagnosis: Option<TransactionDiagnosis>) -> Self {
+        self.unmined_diagnosis = diagnosis.map(Arc::new);
         self
     }
 
