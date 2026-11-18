@@ -30,5 +30,5 @@ pub const VERSION: &str = "v1";
 pub use v1::{
     AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, ChainAddress, ChannelFilter,
     ChannelId, ChannelSelector, KeyId, ModulePredictionInput, PacketKey, RedeemedStatsSelector, SafeSelector,
-    ServiceSelector, ServiceTypeId, TicketSelector, TxId, TxReceipt, types,
+    ServiceSelector, ServiceTypeId, TicketSelector, TransactionTrackingOutcome, TxId, TxReceipt, types,
 };
