@@ -57,26 +57,35 @@ impl ErrorKind {
 ///
 /// Codes added by newer Blokli versions deserialise to [`RefusalCode::Unknown`] with the original string, so
 /// matching on this enum never fails on an unseen code.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
 #[non_exhaustive]
 pub enum RefusalCode {
     /// The node already knows this transaction.
+    #[strum(serialize = "ALREADY_KNOWN")]
     AlreadyKnown,
     /// A transaction with this nonce exists and the replacement fee is too low.
+    #[strum(serialize = "REPLACEMENT_UNDERPRICED")]
     ReplacementUnderpriced,
     /// The nonce was already used.
+    #[strum(serialize = "NONCE_TOO_LOW")]
     NonceTooLow,
     /// The nonce is ahead of the account's next nonce.
+    #[strum(serialize = "NONCE_TOO_HIGH")]
     NonceTooHigh,
     /// The fee is below what the node accepts.
+    #[strum(serialize = "FEE_TOO_LOW")]
     FeeTooLow,
     /// The signer cannot pay for the transaction.
+    #[strum(serialize = "INSUFFICIENT_FUNDS")]
     InsufficientFunds,
     /// Any other RPC failure.
+    #[strum(serialize = "RPC_ERROR")]
     RpcError,
     /// Blokli has no capacity to track another transaction; retry later.
+    #[strum(serialize = "SUBMISSION_CAPACITY_EXCEEDED")]
     SubmissionCapacityExceeded,
     /// A code this client version does not know, with the original string.
+    #[strum(default)]
     Unknown(String),
 }
 
@@ -84,31 +93,8 @@ impl RefusalCode {
     /// The code string as sent by Blokli.
     pub fn as_str(&self) -> &str {
         match self {
-            Self::AlreadyKnown => "ALREADY_KNOWN",
-            Self::ReplacementUnderpriced => "REPLACEMENT_UNDERPRICED",
-            Self::NonceTooLow => "NONCE_TOO_LOW",
-            Self::NonceTooHigh => "NONCE_TOO_HIGH",
-            Self::FeeTooLow => "FEE_TOO_LOW",
-            Self::InsufficientFunds => "INSUFFICIENT_FUNDS",
-            Self::RpcError => "RPC_ERROR",
-            Self::SubmissionCapacityExceeded => "SUBMISSION_CAPACITY_EXCEEDED",
             Self::Unknown(code) => code,
-        }
-    }
-}
-
-impl From<&str> for RefusalCode {
-    fn from(code: &str) -> Self {
-        match code {
-            "ALREADY_KNOWN" => Self::AlreadyKnown,
-            "REPLACEMENT_UNDERPRICED" => Self::ReplacementUnderpriced,
-            "NONCE_TOO_LOW" => Self::NonceTooLow,
-            "NONCE_TOO_HIGH" => Self::NonceTooHigh,
-            "FEE_TOO_LOW" => Self::FeeTooLow,
-            "INSUFFICIENT_FUNDS" => Self::InsufficientFunds,
-            "RPC_ERROR" => Self::RpcError,
-            "SUBMISSION_CAPACITY_EXCEEDED" => Self::SubmissionCapacityExceeded,
-            other => Self::Unknown(other.to_owned()),
+            other => other.into(),
         }
     }
 }
@@ -294,6 +280,22 @@ mod tests {
         ] {
             assert_eq!(RefusalCode::from(code), expected);
             assert_eq!(expected.as_str(), code);
+        }
+    }
+
+    #[test]
+    fn known_variants_parse_back_from_as_str() {
+        for variant in [
+            RefusalCode::AlreadyKnown,
+            RefusalCode::ReplacementUnderpriced,
+            RefusalCode::NonceTooLow,
+            RefusalCode::NonceTooHigh,
+            RefusalCode::FeeTooLow,
+            RefusalCode::InsufficientFunds,
+            RefusalCode::RpcError,
+            RefusalCode::SubmissionCapacityExceeded,
+        ] {
+            assert_eq!(variant.as_str().parse::<RefusalCode>(), Ok(variant));
         }
     }
 
