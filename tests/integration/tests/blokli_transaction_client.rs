@@ -392,19 +392,26 @@ async fn server_supports_diagnosis(fixture: &IntegrationFixture) -> Result<bool>
 
 /// Submits `raw_tx` for tracking and waits until Blokli times it out.
 ///
-/// Returns the tracking id, the tracking error and the diagnosis of the deduplicated resubmission of the same bytes.
+/// Returns the tracking id and the tracking error.
 async fn time_out_unmined(
     fixture: &IntegrationFixture,
     raw_tx: &str,
-) -> Result<(String, blokli_client::BlokliClientError, Option<TransactionDiagnosis>)> {
+) -> Result<(String, blokli_client::BlokliClientError)> {
     log_server_under_test(fixture).await?;
     let signed_bytes =
         Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
 
     let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
+    let error = track_to_timeout(fixture, &tx_id).await?;
+
+    Ok((tx_id, error))
+}
+
+/// Tracks an already submitted transaction until Blokli times it out.
+async fn track_to_timeout(fixture: &IntegrationFixture, tx_id: &str) -> Result<blokli_client::BlokliClientError> {
     let error = fixture
         .client()
-        .track_transaction(tx_id.clone(), unmined_track_timeout())
+        .track_transaction(tx_id.to_owned(), unmined_track_timeout())
         .await
         .expect_err("an unmined transaction must time out");
     assert!(
@@ -412,14 +419,23 @@ async fn time_out_unmined(
         "unexpected error: {error}"
     );
 
-    // The same bytes again join the transaction already tracked
-    let (submission, deduplicated) = fixture
+    Ok(error)
+}
+
+/// Resubmits the bytes of a timed out transaction the node still holds.
+///
+/// Blokli returns the tracked transaction and resumes tracking it, which clears the diagnosis, so the resubmission
+/// is deduplicated but carries no diagnosis. A dropped or replaced transaction is no longer held: its resubmission
+/// is a fresh one, so this is not called for those.
+async fn assert_resubmission_deduplicated(fixture: &IntegrationFixture, raw_tx: &str, tx_id: String) -> Result<()> {
+    let signed_bytes =
+        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+    let (submission, _) = fixture
         .client()
         .submit_and_track_transaction_detailed(&signed_bytes)
         .await?;
-    assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id.clone()));
-
-    Ok((tx_id, error, deduplicated))
+    assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+    Ok(())
 }
 
 /// Asserts the fee and retry fields every diagnosis must carry, and returns it.
@@ -447,7 +463,6 @@ fn assert_complete_diagnosis(diagnosis: &TransactionDiagnosis, reason: &UnminedR
 async fn assert_outcome(
     fixture: &IntegrationFixture,
     error: &blokli_client::BlokliClientError,
-    deduplicated: Option<&TransactionDiagnosis>,
     expected: impl Fn(&UnminedReason) -> bool,
     expected_name: &str,
 ) -> Result<()> {
@@ -460,23 +475,30 @@ async fn assert_outcome(
             "expected {expected_name}, got {diagnosis:?}"
         );
         assert_complete_diagnosis(diagnosis, &diagnosis.reason);
-        assert_eq!(
-            deduplicated,
-            Some(diagnosis),
-            "the deduplicated submission must carry the diagnosis"
-        );
     } else {
         assert!(error.unmined_diagnosis().is_none());
-        assert!(deduplicated.is_none());
     }
     Ok(())
 }
 
-/// Runs `body` with Anvil mining only on demand, and restores automining afterwards whatever the outcome.
+/// Block interval of the integration image's Anvil (`ANVIL_BLOCK_TIME`), restored after manual mining.
+const ANVIL_BLOCK_TIME_SECS: u64 = 1;
+
+/// Runs `body` with Anvil mining only on demand, and restores mining afterwards whatever the outcome.
+///
+/// The image mines a block every second on top of automining, so both have to be switched off for a transaction
+/// to stay in the pool.
 async fn with_manual_mining<T>(fixture: &IntegrationFixture, body: impl Future<Output = Result<T>>) -> Result<T> {
     fixture.rpc().set_automine(false).await?;
+    fixture.rpc().set_interval_mining(0).await?;
     let outcome = body.await;
-    let restored = fixture.rpc().set_automine(true).await;
+    let restored = async {
+        // Mine what the pool still holds now, so it cannot confirm in the middle of the next test
+        fixture.rpc().mine(1).await?;
+        fixture.rpc().set_automine(true).await?;
+        fixture.rpc().set_interval_mining(ANVIL_BLOCK_TIME_SECS).await
+    }
+    .await;
     let outcome = outcome?;
     restored?;
     Ok(outcome)
@@ -516,16 +538,10 @@ async fn unmined_nonce_gap_is_diagnosed(#[future(awt)] fixture: IntegrationFixtu
         .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
         .await?;
 
-    let (_, error, deduplicated) = time_out_unmined(&fixture, &raw_tx).await?;
+    let (tx_id, error) = time_out_unmined(&fixture, &raw_tx).await?;
 
-    assert_outcome(
-        &fixture,
-        &error,
-        deduplicated.as_ref(),
-        |r| *r == UnminedReason::NonceGap,
-        "NONCE_GAP",
-    )
-    .await
+    assert_outcome(&fixture, &error, |r| *r == UnminedReason::NonceGap, "NONCE_GAP").await?;
+    assert_resubmission_deduplicated(&fixture, &raw_tx, tx_id).await
 }
 
 #[rstest]
@@ -538,6 +554,7 @@ async fn unmined_transaction_behind_a_pending_nonce_is_queued(
 ) -> Result<()> {
     let [sender, recipient] = fixture.sample_accounts::<2>();
     let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let (max_fee, max_priority) = recommended_fees(&fixture).await?;
 
     with_manual_mining(&fixture, async {
         let first = fixture
@@ -545,18 +562,18 @@ async fn unmined_transaction_behind_a_pending_nonce_is_queued(
             .await?;
         fixture.rpc().execute_transaction(&first).await?;
         let second = fixture
-            .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce + 1)
+            .build_raw_tx_with_gas(
+                U256::from(TX_VALUE),
+                sender,
+                recipient,
+                nonce + 1,
+                Some(gas(max_fee * 4, max_priority * 4)),
+            )
             .await?;
 
-        let (_, error, deduplicated) = time_out_unmined(&fixture, &second).await?;
-        assert_outcome(
-            &fixture,
-            &error,
-            deduplicated.as_ref(),
-            |r| *r == UnminedReason::Queued,
-            "QUEUED",
-        )
-        .await
+        let (tx_id, error) = time_out_unmined(&fixture, &second).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Queued, "QUEUED").await?;
+        assert_resubmission_deduplicated(&fixture, &second, tx_id).await
     })
     .await
 }
@@ -582,15 +599,9 @@ async fn unmined_low_fee_transaction_is_underpriced(#[future(awt)] fixture: Inte
             )
             .await?;
 
-        let (_, error, deduplicated) = time_out_unmined(&fixture, &raw_tx).await?;
-        assert_outcome(
-            &fixture,
-            &error,
-            deduplicated.as_ref(),
-            |r| *r == UnminedReason::Underpriced,
-            "UNDERPRICED",
-        )
-        .await
+        let (tx_id, error) = time_out_unmined(&fixture, &raw_tx).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Underpriced, "UNDERPRICED").await?;
+        assert_resubmission_deduplicated(&fixture, &raw_tx, tx_id).await
     })
     .await
 }
@@ -616,11 +627,10 @@ async fn unmined_well_priced_transaction_is_not_underpriced(#[future(awt)] fixtu
             )
             .await?;
 
-        let (_, error, deduplicated) = time_out_unmined(&fixture, &raw_tx).await?;
+        let (_, error) = time_out_unmined(&fixture, &raw_tx).await?;
         assert_outcome(
             &fixture,
             &error,
-            deduplicated.as_ref(),
             |r| *r != UnminedReason::Underpriced,
             "anything but UNDERPRICED",
         )
@@ -649,21 +659,15 @@ async fn unmined_forgotten_transaction_is_dropped(#[future(awt)] fixture: Integr
         let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
         let hash = fixture
             .client()
-            .query_transaction_status(tx_id)
+            .query_transaction_status(tx_id.clone())
             .await?
             .transaction_hash
             .0;
         fixture.rpc().drop_transaction(&hash).await?;
 
-        let (_, error, deduplicated) = time_out_unmined(&fixture, &raw_tx).await?;
-        assert_outcome(
-            &fixture,
-            &error,
-            deduplicated.as_ref(),
-            |r| *r == UnminedReason::Dropped,
-            "DROPPED",
-        )
-        .await
+        log_server_under_test(&fixture).await?;
+        let error = track_to_timeout(&fixture, &tx_id).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Dropped, "DROPPED").await
     })
     .await
 }
@@ -684,7 +688,7 @@ async fn unmined_replaced_transaction_is_diagnosed(#[future(awt)] fixture: Integ
             .await?;
         let signed_bytes =
             Vec::from_hex(original.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
-        fixture.submit_and_track_tx(&signed_bytes).await?;
+        let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
 
         // Replace it at the same nonce with higher fees straight on the node, then mine the replacement
         let replacement = fixture
@@ -699,15 +703,9 @@ async fn unmined_replaced_transaction_is_diagnosed(#[future(awt)] fixture: Integ
         fixture.rpc().execute_transaction(&replacement).await?;
         fixture.rpc().mine(1).await?;
 
-        let (_, error, deduplicated) = time_out_unmined(&fixture, &original).await?;
-        assert_outcome(
-            &fixture,
-            &error,
-            deduplicated.as_ref(),
-            |r| *r == UnminedReason::Replaced,
-            "REPLACED",
-        )
-        .await
+        log_server_under_test(&fixture).await?;
+        let error = track_to_timeout(&fixture, &tx_id).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Replaced, "REPLACED").await
     })
     .await
 }

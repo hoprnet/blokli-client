@@ -112,6 +112,12 @@ impl RpcClient {
         Ok(())
     }
 
+    /// Sets Anvil's block interval in seconds; 0 turns interval mining off.
+    pub async fn set_interval_mining(&self, seconds: u64) -> Result<()> {
+        self.call_raw("evm_setIntervalMining", vec![json!(seconds)]).await?;
+        Ok(())
+    }
+
     /// Mines `blocks` blocks, including every transaction Anvil currently holds.
     pub async fn mine(&self, blocks: u64) -> Result<()> {
         self.call_raw("anvil_mine", vec![json!(format!("0x{blocks:x}"))])
