@@ -106,6 +106,35 @@ impl RpcClient {
         Ok(())
     }
 
+    /// Switches Anvil between mining every transaction at once and mining only on demand.
+    pub async fn set_automine(&self, enabled: bool) -> Result<()> {
+        self.call_raw("evm_setAutomine", vec![json!(enabled)]).await?;
+        Ok(())
+    }
+
+    /// Mines `blocks` blocks, including every transaction Anvil currently holds.
+    pub async fn mine(&self, blocks: u64) -> Result<()> {
+        self.call_raw("anvil_mine", vec![json!(format!("0x{blocks:x}"))])
+            .await?;
+        Ok(())
+    }
+
+    /// Removes a transaction from Anvil's pool, so the node no longer knows it.
+    pub async fn drop_transaction(&self, tx_hash: &str) -> Result<()> {
+        self.call_raw("anvil_dropTransaction", vec![json!(tx_hash)]).await?;
+        Ok(())
+    }
+
+    /// Sets the base fee of the next mined block, in wei.
+    pub async fn set_next_block_base_fee(&self, base_fee: u128) -> Result<()> {
+        self.call_raw(
+            "anvil_setNextBlockBaseFeePerGas",
+            vec![json!(format!("0x{base_fee:x}"))],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Sets the native balance of `address`, so an impersonated account can pay for gas.
     pub async fn set_balance(&self, address: &str, balance: U256) -> Result<()> {
         self.call_raw("anvil_setBalance", vec![json!(address), json!(balance.to_string())])
