@@ -559,6 +559,7 @@ mod tests {
         sse_test_server::{Connection, SseTestServer, Step, event},
     };
     use crate::{
+        SubscriptionStatus,
         api::{
             AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus,
         },
@@ -723,6 +724,78 @@ mod tests {
         let closure = timeout(Duration::from_secs(5), graph.next()).await?.expect("closure")?;
         assert_eq!(closure.channel.status, ChannelStatus::Closed);
         assert_eq!(closure.cursor.expect("closure cursor").block.0, "30");
+        Ok(())
+    }
+
+    // Expected behaviour: a cursor the server keeps rejecting must not leave the graph stuck; the client falls back
+    // to a request without `after`, which makes the server replay the full snapshot.
+    #[tokio::test]
+    async fn a_rejected_cursor_falls_back_to_a_full_snapshot() -> Result<()> {
+        let mut server = Server::new_async().await;
+        let cursor = json!({"block": "10", "transactionIndex": "2", "logIndex": "3"});
+        let initial = Matcher::PartialJson(json!({"variables": {"s0_after": null}}));
+        let first = server
+            .mock("POST", "/graphql")
+            .match_body(initial.clone())
+            .with_header("content-type", "text/event-stream")
+            .with_body(graph_event("OPEN", cursor.clone()))
+            .expect(1)
+            .create_async()
+            .await;
+        let rejected = server
+            .mock("POST", "/graphql")
+            .match_body(Matcher::PartialJson(json!({"variables": {"s0_after": cursor}})))
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"data\":null,\"errors\":[{\"message\":\"cursor rejected\"}]}\n\n")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let snapshot = server
+            .mock("POST", "/graphql")
+            .match_body(initial)
+            .with_header("content-type", "text/event-stream")
+            .with_body(graph_event(
+                "OPEN",
+                json!({"block": "20", "transactionIndex": "0", "logIndex": "1"}),
+            ))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+        let client = BlokliClient::new(
+            server.url().parse()?,
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_millis(50),
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let (mut graph, health) = client.subscribe_graph_with_health()?;
+        let entry = timeout(Duration::from_secs(5), graph.next())
+            .await?
+            .expect("graph entry")?;
+        assert_eq!(entry.cursor.expect("cursor").block.0, "10");
+
+        // 10 reconnect attempts at 50ms each fit comfortably in this window.
+        let snapshot_entry = timeout(Duration::from_secs(3), async {
+            loop {
+                match graph.next().await {
+                    Some(Ok(entry)) => return Some(entry),
+                    Some(Err(_)) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        let entry = snapshot_entry
+            .expect("expected a snapshot request without a cursor within 10 attempts, saw only cursor requests");
+        assert_eq!(entry.cursor.expect("cursor").block.0, "20");
+        assert_ne!(health.get().status, SubscriptionStatus::Rejected);
+        first.assert_async().await;
+        rejected.assert_async().await;
+        snapshot.assert_async().await;
         Ok(())
     }
 
