@@ -126,6 +126,168 @@ impl From<TransactionResult> for Result<Transaction, BlokliClientError> {
     }
 }
 
+/// Operation fetching the diagnosis of a timed out transaction.
+///
+/// Kept apart from [`QueryTransaction`] on purpose: Blokli versions without the `diagnosis` field reject any
+/// document selecting it, so this operation is sent only to servers known to support it.
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "QueryRoot", variables = "TransactionsVariables")]
+pub struct QueryUnminedDiagnosis {
+    #[arguments(id: $id)]
+    pub transaction: Option<TransactionDiagnosisResult>,
+}
+
+/// Result of [`QueryUnminedDiagnosis`].
+#[derive(cynic::InlineFragments, Debug)]
+#[cynic(graphql_type = "TransactionResult")]
+pub enum TransactionDiagnosisResult {
+    Transaction(TransactionWithDiagnosis),
+    InvalidTransactionIdError(InvalidTransactionIdError),
+    #[cynic(fallback)]
+    Unknown,
+}
+
+/// The `diagnosis` selection of a transaction.
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "Transaction")]
+pub struct TransactionWithDiagnosis {
+    pub diagnosis: Option<RawTransactionDiagnosis>,
+}
+
+/// Wire form of `TransactionDiagnosis`.
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "TransactionDiagnosis")]
+pub struct RawTransactionDiagnosis {
+    pub reason: RawUnminedReason,
+    pub signed_fees: Option<RawTransactionFees>,
+    pub recommended_fees: Option<RawTransactionFees>,
+    pub min_replacement_fees: Option<RawTransactionFees>,
+    pub retry_after_seconds: i32,
+}
+
+/// Wire form of `TransactionFees`: decimal strings, empty when unavailable.
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "TransactionFees")]
+pub struct RawTransactionFees {
+    pub max_fee_per_gas: String,
+    pub max_priority_fee_per_gas: String,
+}
+
+/// Wire form of `UnminedReason`, read as a plain string so that values added by a newer Blokli still decode.
+///
+/// Implemented by hand because `cynic::Enum` derives cannot keep the string of an unseen value.
+#[derive(Debug, Clone, PartialEq, Eq, cynic::serde::Deserialize, cynic::serde::Serialize)]
+#[serde(crate = "cynic::serde", transparent)]
+pub struct RawUnminedReason(pub String);
+
+impl cynic::Enum for RawUnminedReason {
+    type SchemaType = schema::UnminedReason;
+}
+
+/// Why a submitted transaction was not mined before it timed out.
+///
+/// Values added by newer Blokli versions decode to [`UnminedReason::Unknown`] with the original string.
+#[derive(Clone, Debug, PartialEq, Eq, strum::EnumString, strum::IntoStaticStr)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub enum UnminedReason {
+    /// The node holds the transaction, but it was signed below the current recommended fee.
+    #[strum(serialize = "UNDERPRICED")]
+    Underpriced,
+    /// The node holds the transaction and it waits behind earlier pending transactions of the signer.
+    #[strum(serialize = "QUEUED")]
+    Queued,
+    /// An earlier nonce of the signer is neither mined nor pending.
+    #[strum(serialize = "NONCE_GAP")]
+    NonceGap,
+    /// The node no longer knows the transaction and its nonce is still unused.
+    #[strum(serialize = "DROPPED")]
+    Dropped,
+    /// The node no longer knows the transaction and its nonce was consumed by another one.
+    #[strum(serialize = "REPLACED")]
+    Replaced,
+    /// Blokli could not establish the reason (the `UNKNOWN` value on the wire).
+    #[strum(serialize = "UNKNOWN")]
+    Undetermined,
+    /// A reason this client version does not know, with the original string.
+    #[strum(default)]
+    Unknown(String),
+}
+
+impl UnminedReason {
+    /// The reason string as sent by Blokli.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Unknown(reason) => reason,
+            other => other.into(),
+        }
+    }
+}
+
+/// EIP-1559 fees in wei.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TransactionFees {
+    /// `maxFeePerGas` in wei.
+    pub max_fee_per_gas: u128,
+    /// `maxPriorityFeePerGas` in wei.
+    pub max_priority_fee_per_gas: u128,
+}
+
+impl TransactionFees {
+    /// `None` when Blokli reported the fees as unavailable (empty strings) or in an unparseable form.
+    fn from_raw(raw: Option<RawTransactionFees>) -> Option<Self> {
+        let raw = raw?;
+        Some(Self {
+            max_fee_per_gas: raw.max_fee_per_gas.parse().ok()?,
+            max_priority_fee_per_gas: raw.max_priority_fee_per_gas.parse().ok()?,
+        })
+    }
+}
+
+/// Explanation of a transaction that timed out unmined.
+///
+/// A fee object is `None` when Blokli could not provide it, for example when its fee estimate was unavailable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TransactionDiagnosis {
+    /// Why the transaction was not mined.
+    pub reason: UnminedReason,
+    /// Fees the transaction was signed with.
+    pub signed_fees: Option<TransactionFees>,
+    /// Fees a transaction should currently be signed with.
+    pub recommended_fees: Option<TransactionFees>,
+    /// Lowest fees at which a replacement would be accepted.
+    pub min_replacement_fees: Option<TransactionFees>,
+    /// Seconds to wait before checking or retrying.
+    pub retry_after_seconds: u32,
+}
+
+impl TryFrom<RawTransactionDiagnosis> for TransactionDiagnosis {
+    type Error = BlokliClientError;
+
+    fn try_from(raw: RawTransactionDiagnosis) -> Result<Self, Self::Error> {
+        Ok(Self {
+            reason: UnminedReason::from(raw.reason.0.as_str()),
+            signed_fees: TransactionFees::from_raw(raw.signed_fees),
+            recommended_fees: TransactionFees::from_raw(raw.recommended_fees),
+            min_replacement_fees: TransactionFees::from_raw(raw.min_replacement_fees),
+            retry_after_seconds: u32::try_from(raw.retry_after_seconds).map_err(|_| ErrorKind::ParseError)?,
+        })
+    }
+}
+
+impl TransactionDiagnosisResult {
+    /// Extracts the diagnosis, `None` when the transaction carries none.
+    pub fn into_diagnosis(self) -> Result<Option<TransactionDiagnosis>, BlokliClientError> {
+        match self {
+            Self::Transaction(t) => t.diagnosis.map(TransactionDiagnosis::try_from).transpose(),
+            Self::InvalidTransactionIdError(e) => Err(e.into()),
+            Self::Unknown => Err(ErrorKind::NoData.into()),
+        }
+    }
+}
+
 /// Transaction lifecycle state reported by Blokli.
 #[derive(cynic::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -501,5 +663,72 @@ impl From<SendTransactionSyncResult> for Result<Transaction, BlokliClientError> 
             SendTransactionSyncResult::HoprActionThrottledError(e) => Err(e.into()),
             SendTransactionSyncResult::Unknown => Err(ErrorKind::NoData.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnosis_tests {
+    use super::{RawTransactionDiagnosis, TransactionDiagnosis, TransactionFees, UnminedReason};
+    use crate::errors::ErrorKind;
+
+    fn raw(value: serde_json::Value) -> RawTransactionDiagnosis {
+        serde_json::from_value(value).expect("valid wire form")
+    }
+
+    #[test]
+    fn reasons_round_trip_and_keep_unseen_values() {
+        for (wire, reason) in [
+            ("UNDERPRICED", UnminedReason::Underpriced),
+            ("QUEUED", UnminedReason::Queued),
+            ("NONCE_GAP", UnminedReason::NonceGap),
+            ("DROPPED", UnminedReason::Dropped),
+            ("REPLACED", UnminedReason::Replaced),
+            ("UNKNOWN", UnminedReason::Undetermined),
+        ] {
+            let parsed = UnminedReason::from(wire);
+            assert_eq!(parsed, reason);
+            assert_eq!(parsed.as_str(), wire);
+        }
+        assert_eq!(
+            "FROM_THE_FUTURE".parse::<UnminedReason>().expect("infallible"),
+            UnminedReason::Unknown("FROM_THE_FUTURE".into())
+        );
+    }
+
+    #[test]
+    fn empty_or_malformed_fee_strings_map_to_none() {
+        let diagnosis = TransactionDiagnosis::try_from(raw(serde_json::json!({
+            "reason": "QUEUED",
+            "signedFees": { "maxFeePerGas": "", "maxPriorityFeePerGas": "" },
+            "recommendedFees": { "maxFeePerGas": "5", "maxPriorityFeePerGas": "" },
+            "minReplacementFees": { "maxFeePerGas": "7", "maxPriorityFeePerGas": "3" },
+            "retryAfterSeconds": 30,
+        })))
+        .expect("conversion succeeds");
+
+        assert_eq!(diagnosis.signed_fees, None);
+        assert_eq!(diagnosis.recommended_fees, None);
+        assert_eq!(
+            diagnosis.min_replacement_fees,
+            Some(TransactionFees {
+                max_fee_per_gas: 7,
+                max_priority_fee_per_gas: 3
+            })
+        );
+        assert_eq!(diagnosis.retry_after_seconds, 30);
+    }
+
+    #[test]
+    fn a_negative_retry_delay_is_a_parse_error() {
+        let error = TransactionDiagnosis::try_from(raw(serde_json::json!({
+            "reason": "DROPPED",
+            "signedFees": null,
+            "recommendedFees": null,
+            "minReplacementFees": null,
+            "retryAfterSeconds": -1,
+        })))
+        .expect_err("negative delay");
+
+        assert!(matches!(error.kind(), ErrorKind::ParseError));
     }
 }

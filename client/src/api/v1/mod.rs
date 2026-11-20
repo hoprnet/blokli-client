@@ -73,7 +73,10 @@ pub mod types {
             ServiceUpdate, ServiceUpdateKind,
         },
         tickets::{RedeemTicketDetails, RedemptionResult},
-        txs::{SafeExecution, TrackedSubmission, Transaction, TransactionStatus},
+        txs::{
+            SafeExecution, TrackedSubmission, Transaction, TransactionDiagnosis, TransactionFees, TransactionStatus,
+            UnminedReason,
+        },
     };
 }
 
@@ -116,7 +119,8 @@ pub(crate) mod internal {
         tickets::{SubscribeTicketRedeemed, TicketRedeemedVariables},
         txs::{
             ConfirmTransactionVariables, MutateConfirmTransaction, MutateSendTransaction, MutateTrackTransaction,
-            QueryTransaction, SendTransactionVariables, SubscribeTransaction, TransactionsVariables,
+            QueryTransaction, QueryUnminedDiagnosis, SendTransactionAsyncResult, SendTransactionVariables,
+            SubscribeTransaction, TransactionsVariables,
         },
     };
 }

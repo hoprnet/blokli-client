@@ -1,13 +1,16 @@
-use std::{str::FromStr, time::Duration};
+use std::{future::Future, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use blokli_client::api::{
-    BlokliQueryClient, BlokliTransactionClient, TransactionTrackingOutcome,
-    types::{Transaction, TransactionStatus},
+use blokli_client::{
+    ErrorKind, TrackingErrorKind,
+    api::{
+        BlokliQueryClient, BlokliTransactionClient, TransactionTrackingOutcome,
+        types::{TrackedSubmission, Transaction, TransactionDiagnosis, TransactionStatus, UnminedReason},
+    },
 };
 use blokli_integration_tests::{
     constants::parsed_safe_balance,
-    fixtures::{IntegrationFixture, integration_fixture as fixture, poll_until},
+    fixtures::{Eip1559GasParameters, IntegrationFixture, integration_fixture as fixture, poll_until},
 };
 use hex::FromHex;
 use hopr_bindings::exports::alloy::primitives::U256;
@@ -347,4 +350,370 @@ async fn test_plain_transaction_no_safe_enrichment(#[future(awt)] fixture: Integ
     });
 
     Ok(())
+}
+
+/// Env var overriding how long the tests below wait for Blokli to time a transaction out, in seconds.
+///
+/// The compose stack sets the monitor timeout to 15 s (default 300 s), so this deadline leaves room for it. Raise it
+/// together with `BLOKLI_API_TRANSACTIONS_UNMINED_TIMEOUT` when testing against a slower setup.
+const UNMINED_TRACK_TIMEOUT_ENV: &str = "BLOKLI_TEST_UNMINED_TIMEOUT_SECS";
+const UNMINED_TRACK_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+fn unmined_track_timeout() -> Duration {
+    let secs = std::env::var(UNMINED_TRACK_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(UNMINED_TRACK_TIMEOUT_DEFAULT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Logs which image and Blokli version a result belongs to, so it is never read against the wrong server.
+async fn log_server_under_test(fixture: &IntegrationFixture) -> Result<()> {
+    let image = std::env::var("BLOKLI_TEST_IMAGE").unwrap_or_else(|_| "bloklid-anvil:integration-test".to_owned());
+    let inspected = std::process::Command::new("docker")
+        .args(["image", "inspect", "--format", "{{.Id}} {{.Created}}", &image])
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .unwrap_or_default();
+    let version = fixture.client().query_version().await?;
+    tracing::info!(%image, image_id_and_created = %inspected, %version, "server under test (the version is informational only)");
+    Ok(())
+}
+
+/// Whether the Blokli under test has the `Transaction.diagnosis` field, asked of its schema.
+///
+/// The client does not look at versions: it asks for the diagnosis after a timeout and stops asking when the server
+/// rejects the field. The expectations of the tests below follow what the schema of the image says.
+async fn server_knows_diagnosis_field(fixture: &IntegrationFixture) -> Result<bool> {
+    let url = fixture.client().base_url().join("graphql")?;
+    let body = serde_json::json!({
+        "query": "{ __type(name: \"Transaction\") { fields { name } } }"
+    });
+    let response: serde_json::Value = reqwest::Client::new()
+        .post(url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let fields = response["data"]["__type"]["fields"]
+        .as_array()
+        .context("blokli answered the schema query without the Transaction fields")?;
+    Ok(fields.iter().any(|field| field["name"] == "diagnosis"))
+}
+
+/// Submits `raw_tx` for tracking and waits until Blokli times it out.
+///
+/// Returns the tracking id and the tracking error.
+async fn time_out_unmined(
+    fixture: &IntegrationFixture,
+    raw_tx: &str,
+) -> Result<(String, blokli_client::BlokliClientError)> {
+    log_server_under_test(fixture).await?;
+    let signed_bytes =
+        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+
+    let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
+    let error = track_to_timeout(fixture, &tx_id).await?;
+
+    Ok((tx_id, error))
+}
+
+/// Tracks an already submitted transaction until Blokli times it out.
+async fn track_to_timeout(fixture: &IntegrationFixture, tx_id: &str) -> Result<blokli_client::BlokliClientError> {
+    let error = fixture
+        .client()
+        .track_transaction(tx_id.to_owned(), unmined_track_timeout())
+        .await
+        .expect_err("an unmined transaction must time out");
+    assert!(
+        matches!(error.kind(), ErrorKind::TrackingError(TrackingErrorKind::Timeout)),
+        "unexpected error: {error}"
+    );
+
+    Ok(error)
+}
+
+/// Resubmits the bytes of a timed out transaction the node still holds.
+///
+/// Blokli returns the tracked transaction and resumes tracking it, which clears the diagnosis, so the resubmission
+/// is deduplicated but carries no diagnosis. A dropped or replaced transaction is no longer held: its resubmission
+/// is a fresh one, so this is not called for those.
+async fn assert_resubmission_deduplicated(fixture: &IntegrationFixture, raw_tx: &str, tx_id: String) -> Result<()> {
+    let signed_bytes =
+        Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+    let (submission, _) = fixture
+        .client()
+        .submit_and_track_transaction_detailed(&signed_bytes)
+        .await?;
+    assert_eq!(submission, TrackedSubmission::Deduplicated(tx_id));
+    Ok(())
+}
+
+/// Asserts the fee and retry fields every diagnosis must carry, and returns it.
+fn assert_complete_diagnosis(diagnosis: &TransactionDiagnosis, reason: &UnminedReason) {
+    assert_eq!(&diagnosis.reason, reason, "{diagnosis:?}");
+    let signed = diagnosis.signed_fees.expect("signed fees");
+    let recommended = diagnosis.recommended_fees.expect("recommended fees");
+    let replacement = diagnosis.min_replacement_fees.expect("min replacement fees");
+    assert!(recommended.max_fee_per_gas > 0, "{diagnosis:?}");
+    // A replacement must outbid the signed fees by at least 12.5%
+    assert!(
+        replacement.max_fee_per_gas * 8 >= signed.max_fee_per_gas * 9,
+        "{diagnosis:?}"
+    );
+    assert!(
+        replacement.max_priority_fee_per_gas * 8 >= signed.max_priority_fee_per_gas * 9,
+        "{diagnosis:?}"
+    );
+    assert!(diagnosis.retry_after_seconds > 0, "{diagnosis:?}");
+}
+
+/// Checks the outcome of [`time_out_unmined`] against the schema of the server.
+///
+/// A server whose schema lacks `Transaction.diagnosis` must keep returning the plain timeout, with no diagnosis.
+async fn assert_outcome(
+    fixture: &IntegrationFixture,
+    error: &blokli_client::BlokliClientError,
+    expected: impl Fn(&UnminedReason) -> bool,
+    expected_name: &str,
+) -> Result<()> {
+    if server_knows_diagnosis_field(fixture).await? {
+        let diagnosis = error
+            .unmined_diagnosis()
+            .context("blokli must report a diagnosis for a timed out transaction")?;
+        assert!(
+            expected(&diagnosis.reason),
+            "expected {expected_name}, got {diagnosis:?}"
+        );
+        assert_complete_diagnosis(diagnosis, &diagnosis.reason);
+    } else {
+        assert!(error.unmined_diagnosis().is_none());
+    }
+    Ok(())
+}
+
+/// Block interval of the integration image's Anvil (`ANVIL_BLOCK_TIME`), restored after manual mining.
+const ANVIL_BLOCK_TIME_SECS: u64 = 1;
+
+/// Runs `body` with Anvil mining only on demand, and restores mining afterwards whatever the outcome.
+///
+/// The image mines a block every second on top of automining, so both have to be switched off for a transaction
+/// to stay in the pool.
+async fn with_manual_mining<T>(fixture: &IntegrationFixture, body: impl Future<Output = Result<T>>) -> Result<T> {
+    fixture.rpc().set_automine(false).await?;
+    fixture.rpc().set_interval_mining(0).await?;
+    let outcome = body.await;
+    let restored = async {
+        // Mine what the pool still holds now, so it cannot confirm in the middle of the next test
+        fixture.rpc().mine(1).await?;
+        fixture.rpc().set_automine(true).await?;
+        fixture.rpc().set_interval_mining(ANVIL_BLOCK_TIME_SECS).await
+    }
+    .await;
+    let outcome = outcome?;
+    restored?;
+    Ok(outcome)
+}
+
+/// The fees Blokli currently recommends, as `(max fee, max priority fee)`.
+async fn recommended_fees(fixture: &IntegrationFixture) -> Result<(u128, u128)> {
+    let info = fixture.client().query_chain_info().await?;
+    let parse = |value: Option<String>, name: &str| {
+        value
+            .and_then(|v| v.parse::<u128>().ok())
+            .with_context(|| format!("chainInfo has no usable {name}"))
+    };
+    Ok((
+        parse(info.max_fee_per_gas, "maxFeePerGas")?,
+        parse(info.max_priority_fee_per_gas, "maxPriorityFeePerGas")?,
+    ))
+}
+
+fn gas(max_fee_per_gas: u128, max_priority_fee_per_gas: u128) -> Eip1559GasParameters {
+    Eip1559GasParameters {
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        ..Eip1559GasParameters::default()
+    }
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// A transaction signed with a nonce ahead of the sender's waits behind the gap.
+async fn unmined_nonce_gap_is_diagnosed(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await? + 3;
+    let raw_tx = fixture
+        .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
+        .await?;
+
+    let (tx_id, error) = time_out_unmined(&fixture, &raw_tx).await?;
+
+    assert_outcome(&fixture, &error, |r| *r == UnminedReason::NonceGap, "NONCE_GAP").await?;
+    assert_resubmission_deduplicated(&fixture, &raw_tx, tx_id).await
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// A transaction behind an earlier pending nonce of the same signer is queued.
+async fn unmined_transaction_behind_a_pending_nonce_is_queued(
+    #[future(awt)] fixture: IntegrationFixture,
+) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let (max_fee, max_priority) = recommended_fees(&fixture).await?;
+
+    with_manual_mining(&fixture, async {
+        let first = fixture
+            .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
+            .await?;
+        fixture.rpc().execute_transaction(&first).await?;
+        let second = fixture
+            .build_raw_tx_with_gas(
+                U256::from(TX_VALUE),
+                sender,
+                recipient,
+                nonce + 1,
+                Some(gas(max_fee * 4, max_priority * 4)),
+            )
+            .await?;
+
+        let (tx_id, error) = time_out_unmined(&fixture, &second).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Queued, "QUEUED").await?;
+        assert_resubmission_deduplicated(&fixture, &second, tx_id).await
+    })
+    .await
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// A transaction held by the node but signed below the recommended fee is underpriced.
+async fn unmined_low_fee_transaction_is_underpriced(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let (max_fee, max_priority) = recommended_fees(&fixture).await?;
+
+    with_manual_mining(&fixture, async {
+        let raw_tx = fixture
+            .build_raw_tx_with_gas(
+                U256::from(TX_VALUE),
+                sender,
+                recipient,
+                nonce,
+                Some(gas((max_fee / 4).max(1), (max_priority / 4).max(1))),
+            )
+            .await?;
+
+        let (tx_id, error) = time_out_unmined(&fixture, &raw_tx).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Underpriced, "UNDERPRICED").await?;
+        assert_resubmission_deduplicated(&fixture, &raw_tx, tx_id).await
+    })
+    .await
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// Control for the underpriced case: a well-priced transaction the node holds is not diagnosed as underpriced.
+async fn unmined_well_priced_transaction_is_not_underpriced(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let (max_fee, max_priority) = recommended_fees(&fixture).await?;
+
+    with_manual_mining(&fixture, async {
+        let raw_tx = fixture
+            .build_raw_tx_with_gas(
+                U256::from(TX_VALUE),
+                sender,
+                recipient,
+                nonce,
+                Some(gas(max_fee * 4, max_priority * 4)),
+            )
+            .await?;
+
+        let (_, error) = time_out_unmined(&fixture, &raw_tx).await?;
+        assert_outcome(
+            &fixture,
+            &error,
+            |r| *r != UnminedReason::Underpriced,
+            "anything but UNDERPRICED",
+        )
+        .await
+    })
+    .await
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// A transaction the node forgot, whose nonce is still unused, is dropped.
+async fn unmined_forgotten_transaction_is_dropped(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+
+    with_manual_mining(&fixture, async {
+        let raw_tx = fixture
+            .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
+            .await?;
+        let signed_bytes =
+            Vec::from_hex(raw_tx.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+
+        // Submit, then make the node forget the transaction before the monitor times out
+        let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
+        let hash = fixture
+            .client()
+            .query_transaction_status(tx_id.clone())
+            .await?
+            .transaction_hash
+            .0;
+        fixture.rpc().drop_transaction(&hash).await?;
+
+        log_server_under_test(&fixture).await?;
+        let error = track_to_timeout(&fixture, &tx_id).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Dropped, "DROPPED").await
+    })
+    .await
+}
+
+#[rstest]
+#[test_log::test(tokio::test)]
+#[serial]
+/// A transaction whose nonce was consumed by another transaction of the signer is replaced.
+async fn unmined_replaced_transaction_is_diagnosed(#[future(awt)] fixture: IntegrationFixture) -> Result<()> {
+    let [sender, recipient] = fixture.sample_accounts::<2>();
+    let nonce = fixture.rpc().transaction_count(&sender.address).await?;
+    let (max_fee, max_priority) = recommended_fees(&fixture).await?;
+
+    with_manual_mining(&fixture, async {
+        let original = fixture
+            .build_raw_tx(U256::from(TX_VALUE), sender, recipient, nonce)
+            .await?;
+        let signed_bytes =
+            Vec::from_hex(original.trim_start_matches("0x")).context("failed to decode raw transaction payload")?;
+        let tx_id = fixture.submit_and_track_tx(&signed_bytes).await?;
+
+        // Replace it at the same nonce with higher fees straight on the node, then mine the replacement
+        let replacement = fixture
+            .build_raw_tx_with_gas(
+                U256::from(TX_VALUE + 1),
+                sender,
+                recipient,
+                nonce,
+                Some(gas(max_fee * 4, max_priority * 4)),
+            )
+            .await?;
+        fixture.rpc().execute_transaction(&replacement).await?;
+        fixture.rpc().mine(1).await?;
+
+        log_server_under_test(&fixture).await?;
+        let error = track_to_timeout(&fixture, &tx_id).await?;
+        assert_outcome(&fixture, &error, |r| *r == UnminedReason::Replaced, "REPLACED").await
+    })
+    .await
 }
