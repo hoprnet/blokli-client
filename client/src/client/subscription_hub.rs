@@ -62,7 +62,11 @@ const MAX_SLOT_CHANGE_WAIT: Duration = Duration::from_millis(250);
 /// stalling its siblings, and is resynchronised on a connection of its own once it has caught up. It holds the
 /// initial state of a typical subscription, such as one event per open channel, so a consumer that reads a little
 /// slower than the network does not lose it. The queue allocates as it fills, so an unused capacity costs no memory.
-const SLOT_CHANNEL_CAPACITY: usize = 16_384;
+pub(super) const SLOT_CHANNEL_CAPACITY: usize = 16_384;
+
+/// Number of consecutive rejections of a resumed request after which a resumable subscription gives up on its cursor
+/// and requests its initial state again.
+const MAX_REJECTED_RESUMES: u32 = 3;
 
 /// Number of deregistered aliases tolerated in a live document before the connection is rebuilt.
 const MAX_STALE_ALIASES: usize = 32;
@@ -222,7 +226,9 @@ impl SubscriptionHub {
             state.slots.insert(
                 id,
                 SlotEntry {
+                    initial: pending.spec.resume.is_some().then(|| pending.spec.clone()),
                     spec: pending.spec,
+                    resumed_rejections: None,
                     health: pending.health,
                     tx,
                     lagging: Arc::clone(&lagging),
@@ -257,6 +263,8 @@ impl SubscriptionHub {
         {
             entry.spec.document = next.document;
             entry.spec.variables = next.variables;
+            // The slot received data, so the next request resumes from a cursor the server handed out.
+            entry.resumed_rejections = Some(0);
         }
     }
 
@@ -270,6 +278,9 @@ impl SubscriptionHub {
             let Some(entry) = state.slots.get_mut(&id) else {
                 return;
             };
+            if entry.resync {
+                return;
+            }
             entry.resync = true;
             entry.isolated.is_none()
         };
@@ -342,8 +353,9 @@ impl Stream for SubscriptionSlot {
                     this.hub.resume_after(active.guard.id, payload.as_ref());
                 }
                 // Once a slot that lost events has drained its queue, reconnect so the server replays what it missed.
-                // Waiting until then keeps the replay from being dropped as well.
-                if active.receiver.is_empty() && active.lagging.swap(false, Ordering::AcqRel) {
+                // Waiting until then keeps the replay from being dropped as well. The flag stays set until the
+                // connection of its own takes over, so nothing queued after the gap moves the resume cursor past it.
+                if active.receiver.is_empty() && active.lagging.load(Ordering::Acquire) {
                     let id = active.guard.id;
                     this.hub.request_resync(id);
                 }
@@ -398,6 +410,10 @@ struct HubState {
 
 struct SlotEntry {
     spec: SubscriptionSpec,
+    /// The request the subscription started with, for a resumable subscription.
+    initial: Option<SubscriptionSpec>,
+    /// Consecutive rejections of the resumed request, or `None` while the slot has not resumed from a cursor.
+    resumed_rejections: Option<u32>,
     health: HealthTracker,
     tx: mpsc::Sender<SlotEvent>,
     lagging: Arc<AtomicBool>,
@@ -426,6 +442,28 @@ enum IsolationCause {
 }
 
 impl SlotEntry {
+    /// Counts a rejection of a resumed request. A cursor that keeps being refused would otherwise be retried forever,
+    /// so after [`MAX_REJECTED_RESUMES`] of them the subscription starts over from its initial request, which makes
+    /// the server send its state again.
+    fn forget_rejected_cursor(&mut self, id: SlotId) {
+        let Some(rejections) = self.resumed_rejections.as_mut() else {
+            return;
+        };
+        *rejections += 1;
+        if *rejections < MAX_REJECTED_RESUMES {
+            return;
+        }
+        if let Some(initial) = &self.initial {
+            tracing::warn!(
+                slot = id,
+                rejections = *rejections,
+                "the server keeps rejecting the resume cursor, requesting the initial state again"
+            );
+            self.spec = initial.clone();
+            self.resumed_rejections = None;
+        }
+    }
+
     fn belongs_to(&self, id: SlotId, scope: Scope) -> bool {
         match scope {
             Scope::Shared => self.isolated.is_none(),
@@ -583,6 +621,8 @@ impl HubShared {
             .map(|(id, entry)| {
                 if mem::take(&mut entry.resync) {
                     entry.health.caught_up();
+                    // The connection built from this snapshot replays the state the slot missed.
+                    entry.lagging.store(false, Ordering::Release);
                 }
                 (
                     *id,
@@ -641,9 +681,11 @@ impl HubShared {
         for id in ids {
             if let Some(entry) = state.slots.get_mut(id)
                 && entry.belongs_to(*id, scope)
-                && entry.health.reject(problem, error, retry_in)
             {
-                first.push(*id);
+                if entry.health.reject(problem, error, retry_in) {
+                    first.push(*id);
+                }
+                entry.forget_rejected_cursor(*id);
             }
         }
 
@@ -683,6 +725,15 @@ impl HubShared {
         }
     }
 
+    /// Whether the slot left the shared connection to receive the server's state again.
+    fn moved_for_resync(&self, id: SlotId) -> bool {
+        self.lock_state()
+            .slots
+            .get(&id)
+            .and_then(|entry| entry.isolated.as_ref())
+            .is_some_and(|isolation| matches!(isolation.cause, IsolationCause::Lagged))
+    }
+
     /// Queues one event for a subscription and reports whether it was queued.
     ///
     /// On the shared connection, a consumer that falls behind loses events instead of stalling its siblings. Its
@@ -694,6 +745,13 @@ impl HubShared {
         if self.dedicated || matches!(scope, Scope::Isolated(_)) {
             // Fails only once the stream is gone, which also ends the wait.
             return target.tx.send(event).await.is_ok();
+        }
+
+        // A slot that dropped an event gets nothing more here: a later event would move its resume cursor past the gap,
+        // and the replay would then never contain what was dropped. That includes frames that were already being
+        // dispatched when the slot moved to its own connection.
+        if target.lagging.load(Ordering::Acquire) || self.moved_for_resync(target.id) {
+            return false;
         }
 
         match target.tx.try_send(event) {
@@ -2385,6 +2443,8 @@ mod tests {
                 state.slots.insert(
                     id,
                     SlotEntry {
+                        initial: None,
+                        resumed_rejections: None,
                         spec: channel_spec(),
                         health,
                         tx,
