@@ -560,8 +560,10 @@ mod tests {
     use super::{
         BlokliClient, BlokliClientConfig, BlokliDnsOverride, ReqwestTransport, SCHEMA_VERSION, response_to_data,
         sse_test_server::{Connection, SseTestServer, Step, event},
+        subscription_hub::SLOT_CHANNEL_CAPACITY,
     };
     use crate::{
+        SubscriptionProblem,
         api::{
             AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus,
         },
@@ -726,6 +728,129 @@ mod tests {
         let closure = timeout(Duration::from_secs(5), graph.next()).await?.expect("closure")?;
         assert_eq!(closure.channel.status, ChannelStatus::Closed);
         assert_eq!(closure.cursor.expect("closure cursor").block.0, "30");
+        Ok(())
+    }
+
+    fn graph_cursor(block: usize) -> Value {
+        json!({"block": block.to_string(), "transactionIndex": "0", "logIndex": "1"})
+    }
+
+    /// The `after` variable of the graph subscription in the raw request `index` that the server received.
+    fn requested_after(server: &SseTestServer, index: usize) -> Value {
+        let requests = server.requests();
+        let (_, body) = requests[index].split_once("\r\n\r\n").expect("HTTP request body");
+        let request: Value = serde_json::from_str(body).expect("JSON request body");
+        request["variables"]["s0_after"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_graph_slot_that_dropped_snapshot_entries_resyncs_from_a_new_snapshot() -> Result<()> {
+        // Snapshot entries carry no cursor, so the entries the slot delivered give no point to resume from.
+        let mut flood: Vec<Step> = (0..SLOT_CHANNEL_CAPACITY + 100)
+            .map(|_| Step::Send(graph_event("OPEN", json!(null))))
+            .collect();
+        flood.push(Step::Hang);
+        let server = SseTestServer::start(vec![
+            Connection::ok(flood),
+            Connection::ok(vec![Step::Send(graph_event("OPEN", graph_cursor(5))), Step::Hang]),
+        ])
+        .await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let (mut graph, health) = client.subscribe_graph_with_health()?;
+        assert!(futures::FutureExt::now_or_never(graph.next()).is_none());
+        timeout(Duration::from_secs(5), async {
+            while health.get().last_problem != Some(SubscriptionProblem::Lagged) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+
+        timeout(Duration::from_secs(5), async {
+            while let Some(entry) = graph.next().await {
+                if entry?.cursor.is_some_and(|cursor| cursor.block.0 == "5") {
+                    return anyhow::Ok(());
+                }
+            }
+            anyhow::bail!("the stream ended before the new snapshot arrived")
+        })
+        .await??;
+
+        assert_eq!(server.connections(), 2);
+        assert!(requested_after(&server, 0).is_null());
+        assert!(
+            requested_after(&server, 1).is_null(),
+            "the resync must start a new snapshot"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_graph_slot_that_dropped_live_updates_resumes_before_the_gap() -> Result<()> {
+        let mut flood: Vec<Step> = (0..SLOT_CHANNEL_CAPACITY + 100)
+            .map(|block| Step::Send(graph_event("OPEN", graph_cursor(block))))
+            .collect();
+        // An update after the gap, sent once the consumer has made room in its queue.
+        flood.push(Step::Wait(Duration::from_millis(500)));
+        flood.push(Step::Send(graph_event("OPEN", graph_cursor(1_000_000))));
+        flood.push(Step::Hang);
+        let server = SseTestServer::start(vec![
+            Connection::ok(flood),
+            Connection::ok(vec![
+                Step::Send(graph_event("CLOSED", graph_cursor(2_000_000))),
+                Step::Hang,
+            ]),
+        ])
+        .await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let (mut graph, health) = client.subscribe_graph_with_health()?;
+        assert!(futures::FutureExt::now_or_never(graph.next()).is_none());
+        timeout(Duration::from_secs(5), async {
+            while health.get().last_problem != Some(SubscriptionProblem::Lagged) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await?;
+
+        // Reads a single entry, which leaves room in the queue, and keeps the rest queued while the update after the
+        // gap arrives.
+        let first = timeout(Duration::from_secs(5), graph.next()).await?.expect("graph entry")?;
+        assert_eq!(first.cursor.expect("cursor").block.0, "0");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        let blocks = timeout(Duration::from_secs(10), async {
+            let mut blocks = Vec::new();
+            while let Some(entry) = graph.next().await {
+                let block: usize = entry?.cursor.expect("cursor").block.0.parse()?;
+                blocks.push(block);
+                if block == 2_000_000 {
+                    return anyhow::Ok(blocks);
+                }
+            }
+            anyhow::bail!("the stream ended before the resync arrived")
+        })
+        .await??;
+
+        assert!(
+            !blocks.contains(&1_000_000),
+            "an update after the gap must not reach the consumer"
+        );
+        assert_eq!(
+            requested_after(&server, 1),
+            graph_cursor(SLOT_CHANNEL_CAPACITY - 1),
+            "the resync must resume from the last entry the consumer received before the gap"
+        );
         Ok(())
     }
 

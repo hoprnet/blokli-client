@@ -62,7 +62,7 @@ const MAX_SLOT_CHANGE_WAIT: Duration = Duration::from_millis(250);
 /// stalling its siblings, and is resynchronised on a connection of its own once it has caught up. It holds the
 /// initial state of a typical subscription, such as one event per open channel, so a consumer that reads a little
 /// slower than the network does not lose it. The queue allocates as it fills, so an unused capacity costs no memory.
-const SLOT_CHANNEL_CAPACITY: usize = 16_384;
+pub(super) const SLOT_CHANNEL_CAPACITY: usize = 16_384;
 
 /// Number of deregistered aliases tolerated in a live document before the connection is rebuilt.
 const MAX_STALE_ALIASES: usize = 32;
@@ -270,6 +270,9 @@ impl SubscriptionHub {
             let Some(entry) = state.slots.get_mut(&id) else {
                 return;
             };
+            if entry.resync {
+                return;
+            }
             entry.resync = true;
             entry.isolated.is_none()
         };
@@ -342,8 +345,9 @@ impl Stream for SubscriptionSlot {
                     this.hub.resume_after(active.guard.id, payload.as_ref());
                 }
                 // Once a slot that lost events has drained its queue, reconnect so the server replays what it missed.
-                // Waiting until then keeps the replay from being dropped as well.
-                if active.receiver.is_empty() && active.lagging.swap(false, Ordering::AcqRel) {
+                // Waiting until then keeps the replay from being dropped as well. The flag stays set until the
+                // connection of its own takes over, so nothing queued after the gap moves the resume cursor past it.
+                if active.receiver.is_empty() && active.lagging.load(Ordering::Acquire) {
                     let id = active.guard.id;
                     this.hub.request_resync(id);
                 }
@@ -583,6 +587,8 @@ impl HubShared {
             .map(|(id, entry)| {
                 if mem::take(&mut entry.resync) {
                     entry.health.caught_up();
+                    // The connection built from this snapshot replays the state the slot missed.
+                    entry.lagging.store(false, Ordering::Release);
                 }
                 (
                     *id,
@@ -683,6 +689,15 @@ impl HubShared {
         }
     }
 
+    /// Whether the slot left the shared connection to receive the server's state again.
+    fn moved_for_resync(&self, id: SlotId) -> bool {
+        self.lock_state()
+            .slots
+            .get(&id)
+            .and_then(|entry| entry.isolated.as_ref())
+            .is_some_and(|isolation| matches!(isolation.cause, IsolationCause::Lagged))
+    }
+
     /// Queues one event for a subscription and reports whether it was queued.
     ///
     /// On the shared connection, a consumer that falls behind loses events instead of stalling its siblings. Its
@@ -694,6 +709,13 @@ impl HubShared {
         if self.dedicated || matches!(scope, Scope::Isolated(_)) {
             // Fails only once the stream is gone, which also ends the wait.
             return target.tx.send(event).await.is_ok();
+        }
+
+        // A slot that dropped an event gets nothing more here: a later event would move its resume cursor past the gap,
+        // and the replay would then never contain what was dropped. That includes frames that were already being
+        // dispatched when the slot moved to its own connection.
+        if target.lagging.load(Ordering::Acquire) || self.moved_for_resync(target.id) {
+            return false;
         }
 
         match target.tx.try_send(event) {
