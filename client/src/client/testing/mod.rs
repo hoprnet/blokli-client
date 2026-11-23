@@ -1994,10 +1994,12 @@ mod tests {
 
     #[tokio::test]
     async fn query_service_registry_config_returns_current_configuration() -> anyhow::Result<()> {
-        let mut state = BlokliTestState::default();
-        state.service_registry_config = ServiceRegistryConfig {
-            type_registration_fee: "1000 wxHOPR".into(),
-            node_safe_registry: "0x4444444444444444444444444444444444444444".into(),
+        let state = BlokliTestState {
+            service_registry_config: ServiceRegistryConfig {
+                type_registration_fee: "1000 wxHOPR".into(),
+                node_safe_registry: "0x4444444444444444444444444444444444444444".into(),
+            },
+            ..Default::default()
         };
         let client = BlokliTestClient::new(state, NopStateMutator);
 
@@ -2053,10 +2055,12 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_service_registry_config_reports_snapshot_then_update() -> anyhow::Result<()> {
-        let mut initial = BlokliTestState::default();
-        initial.service_registry_config = ServiceRegistryConfig {
-            type_registration_fee: "1 wxHOPR".into(),
-            node_safe_registry: "0x1111111111111111111111111111111111111111".into(),
+        let initial = BlokliTestState {
+            service_registry_config: ServiceRegistryConfig {
+                type_registration_fee: "1 wxHOPR".into(),
+                node_safe_registry: "0x1111111111111111111111111111111111111111".into(),
+            },
+            ..Default::default()
         };
         let client = BlokliTestClient::new(initial, |_: &[u8], state: &mut BlokliTestState| {
             state.service_registry_config = ServiceRegistryConfig {
@@ -2116,7 +2120,7 @@ mod tests {
                 .service_types
                 .get_mut("gvpn:exit")
                 .ok_or_else(|| anyhow::anyhow!("missing service type"))
-                .map_err(|e| crate::errors::ErrorKind::MockClientError(e))?;
+                .map_err(crate::errors::ErrorKind::MockClientError)?;
             info.owner = None;
             info.update_burn = "5 wei wxHOPR".to_string();
             Result::Ok(())

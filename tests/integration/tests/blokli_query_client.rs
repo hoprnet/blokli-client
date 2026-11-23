@@ -416,7 +416,7 @@ async fn count_and_query_channels(#[future(awt)] fixture: IntegrationFixture) ->
             let client = client.clone();
             let selector = open_selector.clone();
             async move {
-                let count = client.count_channels(selector).await?;
+                let count = client.query_channel_stats(selector).await?.count;
                 Ok(if count >= 1 { Some(count) } else { None })
             }
         },
@@ -488,7 +488,7 @@ async fn count_and_query_channels(#[future(awt)] fixture: IntegrationFixture) ->
             let client = client.clone();
             let selector = closed_selector.clone();
             async move {
-                let count = client.count_channels(selector).await?;
+                let count = client.query_channel_stats(selector).await?.count;
                 Ok(if count == 0 { Some(count) } else { None })
             }
         },
