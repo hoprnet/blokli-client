@@ -64,6 +64,10 @@ const MAX_SLOT_CHANGE_WAIT: Duration = Duration::from_millis(250);
 /// slower than the network does not lose it. The queue allocates as it fills, so an unused capacity costs no memory.
 pub(super) const SLOT_CHANNEL_CAPACITY: usize = 16_384;
 
+/// Number of consecutive rejections of a resumed request after which a resumable subscription gives up on its cursor
+/// and requests its initial state again.
+const MAX_REJECTED_RESUMES: u32 = 3;
+
 /// Number of deregistered aliases tolerated in a live document before the connection is rebuilt.
 const MAX_STALE_ALIASES: usize = 32;
 
@@ -222,7 +226,9 @@ impl SubscriptionHub {
             state.slots.insert(
                 id,
                 SlotEntry {
+                    initial: pending.spec.resume.is_some().then(|| pending.spec.clone()),
                     spec: pending.spec,
+                    resumed_rejections: None,
                     health: pending.health,
                     tx,
                     lagging: Arc::clone(&lagging),
@@ -257,6 +263,8 @@ impl SubscriptionHub {
         {
             entry.spec.document = next.document;
             entry.spec.variables = next.variables;
+            // The slot received data, so the next request resumes from a cursor the server handed out.
+            entry.resumed_rejections = Some(0);
         }
     }
 
@@ -402,6 +410,10 @@ struct HubState {
 
 struct SlotEntry {
     spec: SubscriptionSpec,
+    /// The request the subscription started with, for a resumable subscription.
+    initial: Option<SubscriptionSpec>,
+    /// Consecutive rejections of the resumed request, or `None` while the slot has not resumed from a cursor.
+    resumed_rejections: Option<u32>,
     health: HealthTracker,
     tx: mpsc::Sender<SlotEvent>,
     lagging: Arc<AtomicBool>,
@@ -430,6 +442,28 @@ enum IsolationCause {
 }
 
 impl SlotEntry {
+    /// Counts a rejection of a resumed request. A cursor that keeps being refused would otherwise be retried forever,
+    /// so after [`MAX_REJECTED_RESUMES`] of them the subscription starts over from its initial request, which makes
+    /// the server send its state again.
+    fn forget_rejected_cursor(&mut self, id: SlotId) {
+        let Some(rejections) = self.resumed_rejections.as_mut() else {
+            return;
+        };
+        *rejections += 1;
+        if *rejections < MAX_REJECTED_RESUMES {
+            return;
+        }
+        if let Some(initial) = &self.initial {
+            tracing::warn!(
+                slot = id,
+                rejections = *rejections,
+                "the server keeps rejecting the resume cursor, requesting the initial state again"
+            );
+            self.spec = initial.clone();
+            self.resumed_rejections = None;
+        }
+    }
+
     fn belongs_to(&self, id: SlotId, scope: Scope) -> bool {
         match scope {
             Scope::Shared => self.isolated.is_none(),
@@ -647,9 +681,11 @@ impl HubShared {
         for id in ids {
             if let Some(entry) = state.slots.get_mut(id)
                 && entry.belongs_to(*id, scope)
-                && entry.health.reject(problem, error, retry_in)
             {
-                first.push(*id);
+                if entry.health.reject(problem, error, retry_in) {
+                    first.push(*id);
+                }
+                entry.forget_rejected_cursor(*id);
             }
         }
 
@@ -2407,6 +2443,8 @@ mod tests {
                 state.slots.insert(
                     id,
                     SlotEntry {
+                        initial: None,
+                        resumed_rejections: None,
                         spec: channel_spec(),
                         health,
                         tx,

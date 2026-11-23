@@ -563,7 +563,7 @@ mod tests {
         subscription_hub::SLOT_CHANNEL_CAPACITY,
     };
     use crate::{
-        SubscriptionProblem,
+        SubscriptionProblem, SubscriptionStatus,
         api::{
             AccountSelector, BlokliQueryClient, BlokliSubscriptionClient, BlokliTransactionClient, types::ChannelStatus,
         },
@@ -825,7 +825,9 @@ mod tests {
 
         // Reads a single entry, which leaves room in the queue, and keeps the rest queued while the update after the
         // gap arrives.
-        let first = timeout(Duration::from_secs(5), graph.next()).await?.expect("graph entry")?;
+        let first = timeout(Duration::from_secs(5), graph.next())
+            .await?
+            .expect("graph entry")?;
         assert_eq!(first.cursor.expect("cursor").block.0, "0");
         tokio::time::sleep(Duration::from_millis(800)).await;
 
@@ -850,6 +852,59 @@ mod tests {
             requested_after(&server, 1),
             graph_cursor(SLOT_CHANNEL_CAPACITY - 1),
             "the resync must resume from the last entry the consumer received before the gap"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_resume_cursor_the_server_keeps_rejecting_falls_back_to_a_new_snapshot() -> Result<()> {
+        let rejection = Step::Send("data: {\"data\":null,\"errors\":[{\"message\":\"cursor rejected\"}]}\n\n".into());
+        let server = SseTestServer::start(vec![
+            // The first request is the snapshot; its stream ends, and the three requests that resume from its cursor
+            // are rejected.
+            Connection::ok(vec![Step::Send(graph_event("OPEN", graph_cursor(10)))]),
+            Connection::ok(vec![rejection.clone()]),
+            Connection::ok(vec![rejection.clone()]),
+            Connection::ok(vec![rejection]),
+            Connection::ok(vec![Step::Send(graph_event("OPEN", graph_cursor(20))), Step::Hang]),
+        ])
+        .await?;
+        let client = BlokliClient::new(
+            server.url(),
+            BlokliClientConfig {
+                stream_reconnect_timeout: Duration::from_millis(50),
+                subscription_stream_restart_delay: None,
+                ..Default::default()
+            },
+        );
+        let (mut graph, health) = client.subscribe_graph_with_health()?;
+        let entry = timeout(Duration::from_secs(5), graph.next())
+            .await?
+            .expect("graph entry")?;
+        assert_eq!(entry.cursor.expect("cursor").block.0, "10");
+
+        let entry = timeout(Duration::from_secs(10), async {
+            loop {
+                match graph.next().await {
+                    Some(Ok(entry)) => return Some(entry),
+                    Some(Err(_)) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await?
+        .expect("graph entry after the fallback");
+        assert_eq!(entry.cursor.expect("cursor").block.0, "20");
+        assert_ne!(health.get().status, SubscriptionStatus::Rejected);
+
+        assert_eq!(server.connections(), 5);
+        assert!(requested_after(&server, 0).is_null());
+        for index in 1..4 {
+            assert_eq!(requested_after(&server, index), graph_cursor(10), "request {index}");
+        }
+        assert!(
+            requested_after(&server, 4).is_null(),
+            "the request after the rejections must start a new snapshot"
         );
         Ok(())
     }
