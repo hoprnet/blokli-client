@@ -246,7 +246,7 @@ async fn subscribe_graph_channel_update_on_closure(#[future(awt)] fixture: Integ
             let client = poll_client.clone();
             let selector = poll_selector.clone();
             async move {
-                let count = client.count_channels(selector).await?;
+                let count = client.query_channel_stats(selector).await?.count;
                 Ok(if count >= 1 { Some(count) } else { None })
             }
         },
@@ -541,7 +541,7 @@ async fn subscribe_channels_no_duplicate_initial_state(#[future(awt)] fixture: I
             let client = poll_client.clone();
             let selector = poll_selector.clone();
             async move {
-                let count = client.count_channels(selector).await?;
+                let count = client.query_channel_stats(selector).await?.count;
                 Ok(if count >= 1 { Some(count) } else { None })
             }
         },
